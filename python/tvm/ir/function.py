@@ -22,11 +22,11 @@ from enum import IntEnum
 import tvm_ffi
 
 import tvm.runtime
-from tvm.runtime.object import Object
+from tvm.runtime import Object
 
 from . import _ffi_api
 from .attrs import DictAttrs
-from .expr import RelaxExpr
+from .expr import Expr
 
 
 class CallingConv(IntEnum):
@@ -38,7 +38,7 @@ class CallingConv(IntEnum):
 
 
 @tvm_ffi.register_object("ir.BaseFunc")
-class BaseFunc(RelaxExpr):
+class BaseFunc(Expr):
     """Base class of all functions."""
 
     @property
@@ -62,17 +62,24 @@ class BaseFunc(RelaxExpr):
         func : BaseFunc
             A new copy of the function
         """
-        # make sure we first copy so that we can safely do copy on write
-        # for multiple updates.
-        res = _ffi_api.BaseFuncCopy(self)
+        # BaseFuncCopy may return the canonical wrapper ``self``.  Keep that
+        # first value as an lvalue so copy-on-write preserves the caller; after
+        # the first update, the private result can be moved on later updates.
+        new_value = _ffi_api.BaseFuncCopy(self)
 
         if isinstance(attr_key_or_dict, dict):
             for key, val in attr_key_or_dict.items():
-                res = _ffi_api.BaseFuncWithAttr(res._move(), key, tvm.runtime.convert(val))
-            return res
+                new_value = _ffi_api.BaseFuncWithAttr(
+                    new_value if new_value is self else new_value._move(),
+                    key,
+                    tvm.runtime.convert(val),
+                )
+            return new_value
 
         return _ffi_api.BaseFuncWithAttr(
-            res._move(), attr_key_or_dict, tvm.runtime.convert(attr_value)
+            new_value if new_value is self else new_value._move(),
+            attr_key_or_dict,
+            tvm.runtime.convert(attr_value),
         )
 
     def with_attrs(self, attr_map: DictAttrs | dict[str, Object]) -> "BaseFunc":

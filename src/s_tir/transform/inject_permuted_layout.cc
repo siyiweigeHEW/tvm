@@ -23,6 +23,7 @@
  */
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/op.h>
 #include <tvm/s_tir/transform.h>
 #include <tvm/tirx/function.h>
 #include <tvm/tirx/op.h>
@@ -40,21 +41,40 @@ using namespace tvm::tirx;
 using namespace arith;
 using namespace runtime;
 
+namespace {
+
+ffi::Optional<Var> GetBufferDataVar(const ffi::Any& data) {
+  if (auto var = data.as<Var>()) {
+    return var;
+  }
+  if (const auto* call = data.as<CallNode>();
+      call && call->op.same_as(builtin::buffer_data()) && call->args.size() == 1) {
+    return call->args[0].as<Var>();
+  }
+  return std::nullopt;
+}
+
+}  // namespace
+
 class PermutedLayoutInjector : private IRMutatorWithAnalyzer {
  public:
   static PrimFunc Transform(PrimFunc func) {
     Analyzer analyzer;
 
-    auto new_body = PermutedLayoutInjector(func, &analyzer)(func->body);
+    auto new_body = PermutedLayoutInjector(func, analyzer)(func->body);
     auto func_node = func.CopyOnWrite();
     func_node->body = new_body;
     return func;
   }
 
  private:
-  explicit PermutedLayoutInjector(PrimFunc func, Analyzer* analyzer)
+  explicit PermutedLayoutInjector(PrimFunc func, const Analyzer& analyzer)
       : IRMutatorWithAnalyzer(analyzer) {
-    buffer_map_.insert(func->buffer_map.begin(), func->buffer_map.end());
+    for (const Var& param : func->params) {
+      if (auto buffer = param.as<BufferVar>()) {
+        buffer_map_.insert({buffer.value().var(), buffer.value()});
+      }
+    }
   }
 
   using IRMutatorWithAnalyzer::VisitExpr_;
@@ -118,12 +138,12 @@ class PermutedLayoutInjector : private IRMutatorWithAnalyzer {
   }
 
   Stmt VisitStmt_(const SBlockNode* op) final {
-    // Record the mapping from buffer data var to buffer for later lookup
+    // Record the mapping from buffer identity to buffer for later lookup.
     for (auto buffer : op->alloc_buffers) {
-      buffer_map_.insert({buffer->data, buffer});
+      buffer_map_.insert({buffer.var(), buffer});
     }
     for (auto match_buffer : op->match_buffers) {
-      buffer_map_.insert({match_buffer->buffer->data, match_buffer->buffer});
+      buffer_map_.insert({match_buffer->buffer.var(), match_buffer->buffer});
     }
 
     if (op->annotations.count("permuted_layout") == 0 ||
@@ -134,7 +154,7 @@ class PermutedLayoutInjector : private IRMutatorWithAnalyzer {
     auto prev_permute = permute_;
     permute_ = true;
 
-    SBlock block = Downcast<SBlock>(IRMutatorWithAnalyzer::VisitStmt_(op));
+    SBlock block = IRMutatorWithAnalyzer::VisitStmt_(op).as_or_throw<SBlock>();
 
     permute_ = prev_permute;
 
@@ -144,9 +164,9 @@ class PermutedLayoutInjector : private IRMutatorWithAnalyzer {
     return block;
   }
 
-  int CheckAndGetBufferRowSize(Buffer buffer) {
+  int CheckAndGetBufferRowSize(BufferVar buffer) {
     TVM_FFI_ICHECK(buffer->shape.size() >= 2)
-        << "The dimension of Buffer \"" << buffer->name << "\" with shape " << buffer->shape
+        << "The dimension of BufferVar \"" << buffer.name() << "\" with shape " << buffer->shape
         << " should be at least 2";
 
     auto dim = buffer->shape.size();
@@ -155,10 +175,11 @@ class PermutedLayoutInjector : private IRMutatorWithAnalyzer {
 
     if (buffer_row_size % 64 != 0) {
       TVM_FFI_ICHECK(buffer_row_size % 32 == 0)
-          << "Permuted Layout for Buffer \"" << buffer->name << "\" with shape " << buffer->shape
-          << " is not supported since its second dimension is not divisible by 32";
+          << "Permuted SLayout for BufferVar \"" << buffer.name() << "\" with shape "
+          << buffer->shape << " is not supported since its second dimension is not divisible by 32";
       TVM_FFI_ICHECK(buffer_col_size % 2 == 0)
-          << "Permuted Layout for Buffer \"" << buffer->name << "\" with shape " << buffer->shape
+          << "Permuted SLayout for BufferVar \"" << buffer.name() << "\" with shape "
+          << buffer->shape
           << " is not supported since its first dimension is not divisible by 2 and second "
              "dimension is not divisible by 64";
     }
@@ -166,7 +187,7 @@ class PermutedLayoutInjector : private IRMutatorWithAnalyzer {
     return buffer_row_size;
   }
 
-  ffi::Array<PrimExpr> HandleBufferIndices(Buffer buffer, ffi::Array<PrimExpr> indices) {
+  ffi::Array<PrimExpr> HandleBufferIndices(BufferVar buffer, ffi::Array<PrimExpr> indices) {
     auto buffer_row_size = CheckAndGetBufferRowSize(buffer);
 
     // Mutate the last two indices
@@ -183,13 +204,13 @@ class PermutedLayoutInjector : private IRMutatorWithAnalyzer {
     // Rewrite write from global to shared.dyn or shared
     // We assume the shape of the shared memory is [..., row_size, col_size],
     // where row_size is divisible by 64, or divisible by 32 and col_size is divisible by 2.
-    auto store = Downcast<BufferStore>(IRMutatorWithAnalyzer::VisitStmt_(op));
+    auto store = IRMutatorWithAnalyzer::VisitStmt_(op).as_or_throw<BufferStore>();
 
     if (!permute_ || store->buffer->shape.size() < 2) {
       return store;
     }
 
-    auto scope = StorageScope::Create(GetPtrStorageScope(store->buffer->data));
+    auto scope = StorageScope::Create(store->buffer.scope());
     if (scope.rank != StorageRank::kShared) {
       return store;
     }
@@ -199,15 +220,15 @@ class PermutedLayoutInjector : private IRMutatorWithAnalyzer {
     return store;
   }
 
-  PrimExpr VisitExpr_(const BufferLoadNode* op) final {
+  Expr VisitExpr_(const BufferLoadNode* op) final {
     // Rewrite load from shared or shared.dyn to global
-    auto load = Downcast<BufferLoad>(IRMutatorWithAnalyzer::VisitExpr_(op));
+    auto load = IRMutatorWithAnalyzer::VisitExpr_(op).as_or_throw<BufferLoad>();
 
     if (!permute_ || load->buffer->shape.size() < 2) {
       return load;
     }
 
-    auto scope = StorageScope::Create(GetPtrStorageScope(load->buffer->data));
+    auto scope = StorageScope::Create(load->buffer.scope());
     if (scope.rank != StorageRank::kShared) {
       return load;
     }
@@ -217,22 +238,25 @@ class PermutedLayoutInjector : private IRMutatorWithAnalyzer {
     return load;
   }
 
-  PrimExpr HandleAccessPtrAndOffset(PrimExpr access_ptr,
-                                    ffi::Optional<PrimExpr> offset = std::nullopt) {
+  Expr HandleAccessPtrAndOffset(Expr access_ptr, ffi::Optional<PrimExpr> offset = std::nullopt) {
     // The 2th arg of T.tvm_access_ptr call is offset, we set it to 0 and accumulate it to
     // smem_offset
     TVM_FFI_ICHECK(access_ptr->IsInstance<CallNode>())
         << "Invalid access ptr for permuted layout: " << access_ptr;
-    auto access_ptr_call = Downcast<Call>(access_ptr);
+    auto access_ptr_call = access_ptr.as_or_throw<Call>();
     TVM_FFI_ICHECK(access_ptr_call->op.same_as(builtin::tvm_access_ptr()))
         << "Invalid access ptr for permuted layout: " << access_ptr;
 
-    auto buffer_map_iter = buffer_map_.find(Downcast<Var>(access_ptr_call->args[1]));
+    auto data_var = GetBufferDataVar(access_ptr_call->args[1]);
+    TVM_FFI_ICHECK(data_var.has_value())
+        << "Expected a buffer data expression, but received " << access_ptr_call->args[1];
+    auto buffer_map_iter = buffer_map_.find(data_var.value());
     TVM_FFI_ICHECK(buffer_map_iter != buffer_map_.end())
         << "The buffer corresponding to data Var " << access_ptr_call->args[1] << " is not found";
     int buffer_row_size = CheckAndGetBufferRowSize(buffer_map_iter->second);
 
-    PrimExpr smem_offset = access_ptr_call->args[2] + (offset.defined() ? offset.value() : 0);
+    PrimExpr smem_offset = access_ptr_call->args[2].as_or_throw<PrimExpr>() +
+                           (offset.has_value() ? offset.value() : 0);
 
     // Convert offset to 2-dimension, reindex it and convert it back
     PrimExpr row_idx = floordiv(smem_offset, buffer_row_size);
@@ -246,32 +270,34 @@ class PermutedLayoutInjector : private IRMutatorWithAnalyzer {
     return access_ptr_call;
   }
 
-  PrimExpr VisitExpr_(const CallNode* op) final {
+  Expr VisitExpr_(const CallNode* op) final {
     // Rewrite from/to shared or shared.dyn to/from local
-    auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
+    auto call = IRMutatorWithAnalyzer::VisitExpr_(op).as_or_throw<Call>();
 
     if (!permute_) {
       return call;
     }
 
-    if (!call->op.same_as(builtin::ptx_ldmatrix()) && !call->op.same_as(builtin::mma_store())) {
+    static const Op& ptx_ldmatrix_op = Op::Get("tirx.ptx_legacy.ldmatrix");
+    static const Op& mma_store_op = Op::Get("tirx.mma_store_legacy");
+    if (!call->op.same_as(ptx_ldmatrix_op) && !call->op.same_as(mma_store_op)) {
       return call;
     }
 
-    if (call->op.same_as(builtin::ptx_ldmatrix())) {
-      // form: T.ptx_ldmatrix(..., smem_ptr, smem_offset)
+    if (call->op.same_as(ptx_ldmatrix_op)) {
+      // form: T.ptx_legacy.ldmatrix(..., smem_ptr, smem_offset)
       // smem_ptr: T.tvm_access_ptr(ptype, data, offset, extent, rw_mask)
-      auto access_ptr = call->args[5];
-      PrimExpr smem_offset = call->args[6];
+      Expr access_ptr = call->args[5];
+      PrimExpr smem_offset = call->args[6].as_or_throw<PrimExpr>();
       auto new_access_ptr = HandleAccessPtrAndOffset(access_ptr, smem_offset);
       auto new_call = call.CopyOnWrite();
       new_call->args.Set(5, new_access_ptr);
-      new_call->args.Set(6, IntImm(smem_offset->dtype, 0));
+      new_call->args.Set(6, IntImm(smem_offset.ty(), 0));
       return call;
-    } else if (call->op.same_as(builtin::mma_store())) {
+    } else if (call->op.same_as(mma_store_op)) {
       // TODO(yixin): mma_store is not fully tested yet
-      // because we will directly store result to Buffer instead of calling mma_store now
-      auto access_ptr = call->args[2];
+      // because we will directly store result to BufferVar instead of calling mma_store now
+      Expr access_ptr = call->args[2];
       auto new_access_ptr = HandleAccessPtrAndOffset(access_ptr);
       auto new_call = call.CopyOnWrite();
       new_call->args.Set(2, new_access_ptr);
@@ -284,8 +310,8 @@ class PermutedLayoutInjector : private IRMutatorWithAnalyzer {
   static constexpr size_t VECTORIZE_FACTOR = 8;
   static constexpr size_t BANK_SIZE_BYTES = 128;
 
-  // Mapping from data Var of a Buffer to Buffer, for lookup
-  std::unordered_map<Var, Buffer> buffer_map_;
+  // Mapping from data Var of a BufferVar to BufferVar, for lookup
+  std::unordered_map<Var, BufferVar> buffer_map_;
   bool permute_ = false;
 };
 

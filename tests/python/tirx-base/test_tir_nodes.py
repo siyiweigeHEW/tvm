@@ -24,13 +24,13 @@ from tvm import ir
 
 def test_const():
     x = tvm.tirx.const(1, "int32")
-    assert x.dtype == "int32"
+    assert x.ty.dtype == "int32"
     assert isinstance(x, tvm.tirx.IntImm)
 
 
 def test_te_const():
     x = tvm.tirx.const(1, "int32")
-    assert x.dtype == "int32"
+    assert x.ty.dtype == "int32"
     assert isinstance(x, tvm.tirx.IntImm)
 
 
@@ -50,11 +50,11 @@ def test_tir_const_dtype_inference():
         np.float32(1),
         np.float64(1),
     ]:
-        assert tvm.tirx.const(data).dtype == str(np.array(data).dtype)
+        assert tvm.tirx.const(data).ty.dtype == str(np.array(data).dtype)
 
-    assert tvm.tirx.const(True).dtype == "bool"
-    assert tvm.tirx.const(1).dtype == "int32"
-    assert tvm.tirx.const(1.0).dtype == "float32"
+    assert tvm.tirx.const(True).ty.dtype == "bool"
+    assert tvm.tirx.const(1).ty.dtype == "int32"
+    assert tvm.tirx.const(1.0).ty.dtype == "float32"
 
 
 def test_make():
@@ -85,7 +85,8 @@ def test_ir2():
     st = tvm.tirx.BufferStore(buf, x + 1, [1])
     assert isinstance(st, tvm.tirx.BufferStore)
     assert st.buffer == buf
-    assert st.buffer.data == array
+    assert st.buffer.data.args[0].same_as(buf)
+    assert st.buffer.data.ty == array.ty
 
 
 def test_let():
@@ -103,12 +104,8 @@ def test_cast():
     assert z.lanes == 4
 
     s = tvm.tirx.StringImm("s")
-    with pytest.raises(tvm.error.TVMError):
-        try:
-            s.astype("int")
-        except Exception as e:
-            assert "Can't cast a handle to other types" in str(e)
-            raise
+    with pytest.raises(TypeError, match="Cannot cast an expression with the void sentinel type"):
+        s.astype("int")
 
 
 def test_attr():
@@ -146,9 +143,9 @@ def test_dir():
 
 def test_dtype():
     x = tvm.tirx.Var("x", "int32")
-    assert x.dtype == "int32"
+    assert x.ty.dtype == "int32"
     y = tvm.tirx.Var("y", "int32")
-    assert (x > y).dtype == "bool"
+    assert (x > y).ty.dtype == "bool"
 
 
 def test_any():
@@ -166,10 +163,11 @@ def test_any():
     except ValueError:
         pass
     assert str(tvm.tirx.any(x < y)) == f"{x.name} < {y.name}"
-    assert str(tvm.tirx.any(x < y, x > z)) == f"{x.name} < {y.name} or {x.name} > {z.name}"
+    assert str(tvm.tirx.any(x < y, x > z)) == (f"{x.name} < {y.name} or {x.name} > {z.name}")
     assert (
         str(tvm.tirx.any(x < y, y > z + 1, x < z * 2))
-        == f"{x.name} < {y.name} or {y.name} > {z.name} + 1 or {x.name} < {z.name} * 2"
+        == f"{x.name} < {y.name} or {y.name} > {z.name} + 1 or "
+        f"{x.name} < {z.name} * 2"
     )
 
 
@@ -188,10 +186,11 @@ def test_all():
     except ValueError:
         pass
     assert str(tvm.tirx.all(x < y)) == f"{x.name} < {y.name}"
-    assert str(tvm.tirx.all(x < y, x > z)) == f"{x.name} < {y.name} and {x.name} > {z.name}"
+    assert str(tvm.tirx.all(x < y, x > z)) == (f"{x.name} < {y.name} and {x.name} > {z.name}")
     assert (
         str(tvm.tirx.all(x < y, y > z + 1, x < z * 2))
-        == f"{x.name} < {y.name} and {y.name} > {z.name} + 1 and {x.name} < {z.name} * 2"
+        == f"{x.name} < {y.name} and {y.name} > {z.name} + 1 and "
+        f"{x.name} < {z.name} * 2"
     )
 
 
@@ -211,9 +210,9 @@ def test_bitwise():
     assert str(10 % x) == "10 % x"
 
     assert str(~x) == "T.bitwise_not(x)"
-    assert (tvm.tirx.const(1, "int8x2") >> 1).dtype == "int8x2"
-    assert (x >> tvm.tirx.const(1, "int32x2")).dtype == "int32x2"
-    assert (tvm.tirx.Var("z", "int8x2") << tvm.tirx.const(1, "int8x2")).dtype == "int8x2"
+    assert (tvm.tirx.const(1, "int8x2") >> 1).ty.dtype == "int8x2"
+    assert (x >> tvm.tirx.const(1, "int32x2")).ty.dtype == "int32x2"
+    assert (tvm.tirx.Var("z", "int8x2") << tvm.tirx.const(1, "int8x2")).ty.dtype == "int8x2"
 
 
 def test_float_bitwise():
@@ -228,7 +227,7 @@ def test_float_bitwise():
         try:
             test(t, 10.0)
             assert False
-        except tvm.TVMError:
+        except RuntimeError:
             pass
     try:
         ~t
@@ -245,7 +244,7 @@ def test_shift_bounds():
             try:
                 test(*testcase)
                 assert False
-            except tvm.TVMError:
+            except RuntimeError:
                 pass
 
         # positive case
@@ -264,7 +263,7 @@ def test_divide_by_zero():
         try:
             test(tvm.tirx.const(5, "int32"), tvm.tirx.const(0, "int32"))
             assert False
-        except tvm.TVMError:
+        except RuntimeError:
             pass
 
 
@@ -277,13 +276,13 @@ def test_infinity():
 def test_isnan():
     x = tvm.tirx.Var("x", "float32")
     assert str(tvm.tirx.isnan(x)) == "T.isnan(x)"
-    assert str(tvm.tirx.isnan(x).dtype) == "bool"
+    assert str(tvm.tirx.isnan(x).ty.dtype) == "bool"
     y = tvm.tirx.Var("y", "float16")
     assert str(tvm.tirx.isnan(y)) == 'T.isnan(T.Cast("float32", y))'
     z = tvm.tirx.Var("z", "int32")
     assert str(tvm.tirx.isnan(z)) == "T.bool(False)"
     k = tvm.tirx.Var("k", "int8x2")
-    assert str(tvm.tirx.isnan(k).dtype) == "boolx2"
+    assert str(tvm.tirx.isnan(k).ty.dtype) == "boolx2"
 
 
 def test_equality():
@@ -310,9 +309,11 @@ def test_prim_func():
 
     func = tvm.tirx.PrimFunc([x, y, b], stmt)
     # make sure we can print
-    assert func.buffer_map[func.params[2]].same_as(b)
+    assert func.params[2].same_as(b)
+    assert not hasattr(func, "buffer_map")
 
-    assert len(func.buffer_map) == 1
+    assert sum(tvm.tirx.is_buffer_var(param) for param in func.params) == 1
+    assert func.with_body(tvm.tirx.Evaluate(0)).params[2].same_as(b)
     f2 = func.with_attr({"calling_conv": 1, "tirx.noalias": True})
     assert f2.attrs["calling_conv"] == 1
     assert not func.attrs
@@ -320,11 +321,10 @@ def test_prim_func():
 
 def test_vars():
     x = tvm.tirx.Var("xyz", "int8")
-    assert x.dtype == "int8"
+    assert x.ty.dtype == "int8"
     ptype = tvm.ir.PointerType(tvm.ir.PrimType("float"))
     x = tvm.tirx.Var("xyz", ptype)
-    assert x.dtype == "handle"
-    assert x.type_annotation == ptype
+    assert x.ty == ptype
     assert isinstance(ptype.element_type, tvm.ir.PrimType)
 
 
@@ -333,9 +333,8 @@ def test_scoped_storage_vars():
     storage_scope = "global.texture"
     ptype = tvm.ir.PointerType(tvm.ir.PrimType(dtype), storage_scope)
     x = tvm.tirx.Var("xyz", ptype)
-    assert x.dtype == "handle"
-    assert x.type_annotation == ptype
-    assert x.type_annotation.storage_scope == storage_scope
+    assert x.ty == ptype
+    assert x.ty.storage_scope == storage_scope
     assert isinstance(ptype.element_type, tvm.ir.PrimType)
 
 
@@ -343,7 +342,7 @@ def test_buffer_load_store():
     b = tvm.tirx.decl_buffer((10,), "float32")
     x = tvm.tirx.BufferLoad(b, [0])
     assert isinstance(x, tvm.tirx.BufferLoad)
-    assert x.dtype == "float32"
+    assert x.ty.dtype == "float32"
     assert x.buffer == b
     s = tvm.tirx.BufferStore(b, 0.1, [0])
     assert isinstance(s, tvm.tirx.BufferStore)
@@ -374,7 +373,7 @@ def _create_broadcast(lanes):
 @pytest.mark.parametrize("node_func", [_create_ramp, _create_broadcast])
 def test_lane_types(lanes, node_func):
     def _check_dtype(node):
-        assert node.lanes.dtype == "int32"
+        assert node.lanes.ty.dtype == "int32"
         assert node.lanes == 11
 
     _check_dtype(node_func(lanes))
@@ -395,7 +394,7 @@ def test_scalable_vec(lanes, node_func):
 )
 @pytest.mark.parametrize("node_func", [_create_ramp, _create_broadcast])
 def test_scalable_vec_error(lanes, node_func):
-    with pytest.raises(tvm.error.TVMError):
+    with pytest.raises(RuntimeError):
         node_func(lanes)
 
 
@@ -415,7 +414,7 @@ def test_buffer_load_scalable_vec():
     load = tvm.tirx.BufferLoad(buf, [index])
 
     assert isinstance(load, tvm.tirx.BufferLoad)
-    assert load.dtype == "float32xvscalex8"
+    assert load.ty.dtype == "float32xvscalex8"
 
 
 def test_buffer_store_scalable_vec():
@@ -425,7 +424,7 @@ def test_buffer_store_scalable_vec():
     store = tvm.tirx.BufferStore(b, value, [index])
 
     assert isinstance(store, tvm.tirx.BufferStore)
-    assert store.value.dtype == "int32xvscalex4"
+    assert store.value.ty.dtype == "int32xvscalex4"
 
 
 def test_buffer_store_predicate_invalid_scalability():
@@ -435,7 +434,7 @@ def test_buffer_store_predicate_invalid_scalability():
     predicate = tvm.tirx.expr.Broadcast(tvm.tirx.IntImm("int1", 1), 4)
 
     err_msg = "Predicate mask dtype and value dtype must both be scalable."
-    with pytest.raises(tvm.TVMError, match=err_msg):
+    with pytest.raises(RuntimeError, match=err_msg):
         tvm.tirx.BufferStore(b, value, [index], predicate)
 
 
@@ -449,7 +448,7 @@ def test_buffer_store_predicate_invalid_lanes():
         "Got a predicate mask with 8 lanes, but trying to store a "
         "value with 4 lanes. The number of lanes must match."
     )
-    with pytest.raises(tvm.TVMError, match=err_msg):
+    with pytest.raises(RuntimeError, match=err_msg):
         tvm.tirx.BufferStore(b, value, [index], predicate)
 
 
@@ -460,7 +459,7 @@ def test_buffer_store_predicate_elements_invalid_type():
     predicate = tvm.tirx.expr.Broadcast(1, 4 * tvm.tirx.vscale())
 
     err_msg = "Predicate mask elements must be boolean values, but got int32."
-    with pytest.raises(tvm.TVMError, match=err_msg):
+    with pytest.raises(RuntimeError, match=err_msg):
         tvm.tirx.BufferStore(b, value, [index], predicate)
 
 
@@ -470,7 +469,7 @@ def test_buffer_load_predicate_elements_invalid_type():
     predicate = tvm.tirx.expr.Broadcast(1, 4 * tvm.tirx.vscale())
 
     err_msg = "Predicate mask elements must be boolean values, but got int32."
-    with pytest.raises(tvm.TVMError, match=err_msg):
+    with pytest.raises(RuntimeError, match=err_msg):
         tvm.tirx.BufferLoad(b, [index], predicate)
 
 
@@ -480,7 +479,7 @@ def test_buffer_store_predicate_invalid_scalability():
     predicate = tvm.tirx.expr.Broadcast(tvm.tirx.IntImm("int1", 1), 4)
 
     err_msg = "Predicate mask dtype and load indices must both be scalable."
-    with pytest.raises(tvm.TVMError, match=err_msg):
+    with pytest.raises(RuntimeError, match=err_msg):
         tvm.tirx.BufferLoad(b, [index], predicate)
 
 
@@ -493,7 +492,7 @@ def test_buffer_store_predicate_invalid_lanes():
         "Got a predicate mask with 8 lanes, but trying to load a "
         "vector with 4 lanes. The number of lanes must match."
     )
-    with pytest.raises(tvm.TVMError, match=err_msg):
+    with pytest.raises(RuntimeError, match=err_msg):
         tvm.tirx.BufferLoad(b, [index], predicate)
 
 

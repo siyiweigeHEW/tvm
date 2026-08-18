@@ -22,6 +22,7 @@
 #include <tvm/arith/analyzer.h>
 #include <tvm/arith/int_set.h>
 #include <tvm/arith/iter_affine_map.h>
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/extra/json.h>
 #include <tvm/ffi/extra/serialization.h>
 #include <tvm/s_tir/schedule/instruction.h>
@@ -42,8 +43,8 @@
 #include "../../arith/pattern_match.h"
 #include "../../ir/attr_registry.h"
 #include "../../runtime/thread_storage_scope.h"
-#include "../../support/array.h"
-#include "../../support/nd_int_set.h"
+#include "../support/array_utils.h"
+#include "../support/nd_int_set.h"
 #include "./analysis.h"
 #include "./error.h"
 #include "./instruction_traits.h"
@@ -165,7 +166,7 @@ inline bool IsSingleStmt(const Stmt& stmt) {
  */
 inline IterVar IterVarFromLoop(const For& loop, ffi::String name, IterVarType iter_var_type) {
   return IterVar(Range::FromMinExtent(loop->min, loop->extent),
-                 Var(std::move(name), loop->loop_var.dtype()), iter_var_type);
+                 PrimVar(std::move(name), loop->loop_var.ty()), iter_var_type);
 }
 
 /*!
@@ -226,9 +227,9 @@ inline const int64_t* GetLoopIntExtent(const StmtSRef& loop_sref) {
  */
 inline ffi::Optional<Var> AnalyzeVarWithShift(const PrimExpr& expr,
                                               ffi::Optional<IntImm>* constant) {
-  if (const auto* var = expr.as<VarNode>()) {
+  if (auto var = expr.as<PrimVar>()) {
     *constant = std::nullopt;
-    return ffi::GetRef<Var>(var);
+    return static_cast<Var>(var.value());
   }
   arith::PVar<Var> var;
   arith::PVar<IntImm> shift;
@@ -240,7 +241,7 @@ inline ffi::Optional<Var> AnalyzeVarWithShift(const PrimExpr& expr,
   // match: "var - shift"
   if ((var - shift).Match(expr)) {
     IntImm result = shift.Eval();
-    *constant = IntImm(result->dtype, -result->value);
+    *constant = IntImm(result.ty(), -result->value);
     return var.Eval();
   }
   return std::nullopt;
@@ -260,7 +261,7 @@ inline ffi::Optional<TObjectRef> GetAnn(const TStmtNode* stmt, const ffi::String
   const ffi::Map<ffi::String, ffi::Any>* annotations = &stmt->annotations;
   for (const auto& ann : *annotations) {
     if (ann.first == ann_key) {
-      return Downcast<TObjectRef>(ann.second);
+      return ann.second.cast<TObjectRef>();
     }
   }
   return std::nullopt;
@@ -305,8 +306,8 @@ inline bool HasAnn(const StmtSRef& sref, const ffi::String& ann_key, const ffi::
  * \return Whether a Block/For has a specific pair of annotation key and values
  */
 inline bool HasAnn(const StmtSRef& sref, const ffi::String& ann_key, bool ann_val) {
-  ffi::Optional<Bool> result = GetAnn<Bool>(sref, ann_key);
-  return result.defined() && result.value() == ann_val;
+  ffi::Optional<bool> result = GetAnn<bool>(sref, ann_key);
+  return result.has_value() && result.value() == ann_val;
 }
 
 /********** Helper Functions for RuleAddRFactor and RuleCrossThreadReduction **********/
@@ -415,8 +416,9 @@ inline bool HasBlock(const Schedule& sch, const std::string& block_name) {
  * \param rv_map The substitution map for variables.
  * \return The transformed objects.
  */
-ffi::Array<Any> TranslateInputRVs(const ffi::Array<Any>& inputs,
-                                  const std::unordered_map<const Object*, const Object*>& rv_map);
+ffi::Array<Any> TranslateInputRVs(
+    const ffi::Array<Any>& inputs,
+    const std::unordered_map<const ffi::Object*, const ffi::Object*>& rv_map);
 
 /*!
  * \brief Update the variable substitution map according to the new outputs.
@@ -425,7 +427,7 @@ ffi::Array<Any> TranslateInputRVs(const ffi::Array<Any>& inputs,
  * \param rv_map The substitution map for variables.
  */
 void TranslateAddOutputRVs(const ffi::Array<Any>& old_outputs, const ffi::Array<Any>& new_outputs,
-                           std::unordered_map<const Object*, const Object*>* rv_map);
+                           std::unordered_map<const ffi::Object*, const ffi::Object*>* rv_map);
 
 /*!
  * \brief Counts the number of trace instructions.

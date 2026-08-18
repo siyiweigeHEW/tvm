@@ -21,8 +21,10 @@
  * \file tvm/relax/transform/meta_schedule.cc
  * \brief Pass for meta_schedule tuning
  */
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/relax/transform.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/s_tir/meta_schedule/database.h>
 #include <tvm/tirx/transform.h>
 
@@ -35,8 +37,8 @@ namespace transform {
 
 class MetaScheduleTuner {
  public:
-  explicit MetaScheduleTuner(Target target, ffi::String work_dir, Integer max_trials_global,
-                             Integer max_trials_per_task,
+  explicit MetaScheduleTuner(Target target, ffi::String work_dir, int64_t max_trials_global,
+                             int64_t max_trials_per_task,
                              ffi::Optional<ffi::Array<ffi::String>> op_names,
                              ffi::Map<ffi::String, runtime::Tensor> params = {})
       : target_(target),
@@ -67,8 +69,8 @@ class MetaScheduleTuner {
  private:
   Target target_;
   ffi::String work_dir_;
-  Integer max_trials_global_;
-  Integer max_trials_per_task_;
+  int64_t max_trials_global_;
+  int64_t max_trials_per_task_;
   ffi::Optional<ffi::Array<ffi::String>> op_names_;
   ffi::Map<ffi::String, runtime::Tensor> params_;
   tvm::ffi::Function normalize_mod_func_;
@@ -83,7 +85,7 @@ Pass MetaScheduleApplyDatabase(ffi::Optional<ffi::String> work_dir, bool enable_
 
   auto pass_func = [=](IRModule mod, PassContext ctx) {
     Database database{ffi::UnsafeInit()};
-    if (Database::Current().defined()) {
+    if (Database::Current().has_value()) {
       database = Database::Current().value();
     } else {
       TVM_FFI_ICHECK(work_dir.has_value());
@@ -127,12 +129,11 @@ Pass MetaScheduleApplyDatabase(ffi::Optional<ffi::String> work_dir, bool enable_
           TVM_FFI_ICHECK_EQ(new_mod->functions.size(), 1);
           BaseFunc new_base_func = (*new_mod->functions.begin()).second;
           TVM_FFI_ICHECK(new_base_func->IsInstance<tirx::PrimFuncNode>());
-          tirx::PrimFunc tuned_prim_func = Downcast<tirx::PrimFunc>(new_base_func);
+          tirx::PrimFunc tuned_prim_func = new_base_func.as_or_throw<tirx::PrimFunc>();
           // maintain the original attributes
           tirx::PrimFunc new_prim_func = tirx::PrimFunc(/*params=*/tuned_prim_func->params,
                                                         /*body=*/tuned_prim_func->body,
                                                         /*ret_type=*/tuned_prim_func->ret_type,
-                                                        /*buffer_map=*/tuned_prim_func->buffer_map,
                                                         /*attrs=*/prim_func->attrs);
           new_prim_func = WithAttr(std::move(new_prim_func), tirx::attr::kIsScheduled, true);
           result.Set(gv, new_prim_func);
@@ -151,8 +152,8 @@ Pass MetaScheduleApplyDatabase(ffi::Optional<ffi::String> work_dir, bool enable_
 }
 
 Pass MetaScheduleTuneIRMod(ffi::Map<ffi::String, runtime::Tensor> params, ffi::String work_dir,
-                           Integer max_trials_global,
-                           ffi::Optional<Integer> max_trials_per_task = std::nullopt,
+                           int64_t max_trials_global,
+                           ffi::Optional<int64_t> max_trials_per_task = std::nullopt,
                            ffi::Optional<ffi::Array<ffi::String>> op_names = std::nullopt) {
   Target target = Target::Current(false);
   auto pass_func = [=](IRModule m, PassContext ctx) {
@@ -166,7 +167,7 @@ Pass MetaScheduleTuneIRMod(ffi::Map<ffi::String, runtime::Tensor> params, ffi::S
                           /*traceable*/ true);
 }
 
-Pass MetaScheduleTuneTIR(ffi::String work_dir, Integer max_trials_global) {
+Pass MetaScheduleTuneTIR(ffi::String work_dir, int64_t max_trials_global) {
   Target target = Target::Current(false);
   ffi::TypedFunction<tirx::PrimFunc(tirx::PrimFunc, IRModule, PassContext)> pass_func =
       [=](tirx::PrimFunc f, IRModule mod, PassContext ctx) {

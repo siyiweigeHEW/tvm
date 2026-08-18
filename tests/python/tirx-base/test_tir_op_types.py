@@ -15,27 +15,30 @@
 # specific language governing permissions and limitations
 # under the License.
 # pylint: disable=missing-docstring
+import pytest
+
 import tvm
 import tvm.testing
 from tvm import tirx
+from tvm.backend.cuda import op as _cuda_op
 
 
 def test_tir_op_tvm_tuple():
-    x = tirx.Var("x", dtype="float32")
-    y = tirx.Var("y", dtype="float32")
-    z = tirx.Var("z", dtype="float32")
+    x = tirx.Var("x", ty="float32")
+    y = tirx.Var("y", ty="float32")
+    z = tirx.Var("z", ty="float32")
     expr = tirx.tvm_tuple(x, y, z, 1, 2, 3)
     assert expr.op.name == "tirx.tvm_tuple"
 
 
 def test_tir_op_tvm_struct_get():
-    x = tirx.Var("x", dtype="handle")
+    x = tirx.Var("x", ty="handle")
     expr = tirx.tvm_struct_get(x, 1, 2, dtype="int32")
     assert expr.op.name == "tirx.tvm_struct_get"
 
 
 def test_tir_op_tvm_struct_set():
-    x = tirx.Var("x", dtype="handle")
+    x = tirx.Var("x", ty="handle")
     expr = tirx.tvm_struct_set(x, 1, 2, 3)
     assert expr.op.name == "tirx.tvm_struct_set"
 
@@ -44,6 +47,19 @@ def test_tir_op_address_of():
     buffer = tirx.decl_buffer((128), "float32")
     expr = tirx.address_of(buffer[0])
     assert expr.op.name == "tirx.address_of"
+    storage = tirx.Var("storage", tvm.ir.PointerType(tvm.ir.PrimType("uint8"), "shared.dyn"))
+    pooled_buffer = tirx.decl_buffer((128), "float32", data=storage, scope="shared.dyn")
+    expected_ty = tvm.ir.PointerType(tvm.ir.PrimType("float32"), "shared.dyn")
+    assert tirx.address_of(pooled_buffer).ty == expected_ty
+    assert tirx.address_of(pooled_buffer[0]).ty == expected_ty
+    scalar_address = tirx.address_of(tirx.Var("value", "uint32"))
+    assert scalar_address.ty == tvm.ir.PointerType(tvm.ir.PrimType("uint32"))
+
+
+def test_tir_op_trace_pointer():
+    pointer = tirx.Var("pointer", tvm.ir.PointerType(tvm.ir.PrimType("float32")))
+    traced = tirx.trace([pointer])
+    assert traced.ty == pointer.ty
 
 
 def test_tir_op_lookup_param():
@@ -52,19 +68,23 @@ def test_tir_op_lookup_param():
 
 
 def test_tir_op_reinterpret():
-    x = tirx.Var("x", dtype="int32")
+    x = tirx.Var("x", ty="int32")
     expr = tirx.reinterpret("float32", x)
     assert expr.op.name == "tirx.reinterpret"
+    with pytest.raises(TypeError, match="scalar 64-bit integer source"):
+        tirx.reinterpret("handle", x)
+    pointer = tirx.reinterpret("handle", tirx.Var("address", ty="uint64"))
+    assert pointer.ty == tvm.ir.PointerType(tvm.ir.PrimType("void"))
 
 
 def test_tir_op_isnullptr():
-    x = tirx.Var("x", dtype="int32")
+    x = tirx.Var("x", ty="int32")
     expr = tirx.isnullptr(x)
     assert expr.op.name == "tirx.isnullptr"
 
 
 def test_tir_op_call_assume():
-    x = tirx.Var("x", dtype="int32")
+    x = tirx.Var("x", ty="int32")
     expr = tirx.assume(cond=x)
     assert expr.op.name == "tirx.assume"
 
@@ -75,7 +95,7 @@ def test_tir_op_call_undef():
 
 
 def test_tir_op_call_likely():
-    x = tirx.Var("x", dtype="int32")
+    x = tirx.Var("x", ty="int32")
     expr = tirx.likely(cond=x)
     assert expr.op.name == "tirx.likely"
 
@@ -96,8 +116,14 @@ def test_tir_op_type_annotation():
 
 def test_tir_op_tvm_access_ptr():
     buffer = tirx.decl_buffer((128), "float32")
-    expr = tirx.tvm_access_ptr("float32", buffer.data, 0, 1, 2)
-    assert expr.op.name == "tirx.tvm_access_ptr"
+    for ptype in ("float32", tvm.ir.PrimType("float32")):
+        expr = tirx.tvm_access_ptr(ptype, buffer.data, 0, 1, 2)
+        assert expr.op.name == "tirx.tvm_access_ptr"
+        assert expr.ty == tvm.ir.PointerType(tvm.ir.PrimType("float32"))
+
+    for dtype in ("uint8", tvm.ir.PrimType("uint8")):
+        offset_expr = tirx.ptr_byte_offset(buffer.data, 16, dtype)
+        assert offset_expr.ty == tvm.ir.PointerType(tvm.ir.PrimType("uint8"))
 
 
 def test_tir_op_tvm_throw_last_error():
@@ -149,8 +175,7 @@ def test_tir_op_ptx_mma():
     buffer_a = tirx.decl_buffer([32], "int4", scope="local")
     buffer_b = tirx.decl_buffer([16], "uint4", scope="local")
     buffer_c = tirx.decl_buffer([4], "int32", scope="local")
-    expr = tirx.ptx_mma(
-        "int32",
+    expr = _cuda_op.ptx_legacy_mma(
         "m8n8k32",
         "row",
         "col",
@@ -165,50 +190,23 @@ def test_tir_op_ptx_mma():
         0,
         False,
     )
-    assert expr.op.name == "tirx.ptx_mma"
-
-
-def test_tir_op_ptx_mma_sp():
-    buffer_a = tirx.decl_buffer([32], "int4", scope="local")
-    buffer_b = tirx.decl_buffer([16], "uint4", scope="local")
-    buffer_c = tirx.decl_buffer([4], "int32", scope="local")
-    buffer_d = tirx.decl_buffer([1], "uint32", scope="local")
-    expr = tirx.ptx_mma_sp(
-        "int32",
-        "m8n8k32",
-        "row",
-        "col",
-        "int4",
-        "uint4",
-        "int32",
-        buffer_a.data,
-        0,
-        buffer_b.data,
-        0,
-        buffer_c.data,
-        0,
-        buffer_d.data,
-        0,
-        0,
-        False,
-    )
-    assert expr.op.name == "tirx.ptx_mma_sp"
+    assert expr.op.name == "tirx.ptx_legacy.mma"
 
 
 def test_tir_op_mma_store():
-    x = tirx.Var("x", dtype="int32")
-    y = tirx.Var("y", dtype="int32")
+    x = tirx.Var("x", ty="int32")
+    y = tirx.Var("y", ty="int32")
     buffer_w = tirx.decl_buffer([16, 8], dtype="int32", scope="warp", offset_factor=1)
     buffer = tirx.decl_buffer(
         [16, 16], dtype="int32", scope="global", offset_factor=1, strides=[x, y]
     )
-    expr = tirx.mma_store(
+    expr = _cuda_op.mma_store(
         "int32",
         16,
         16,
         buffer.access_ptr("w"),
         buffer_w.data,
-        buffer_w.elem_offset,
+        buffer_w.ty.elem_offset,
         x,
     )
     assert expr.op.name == "tirx.mma_store"
@@ -216,71 +214,26 @@ def test_tir_op_mma_store():
 
 def test_tir_op_mma_fill():
     buffer_w = tirx.decl_buffer([16, 8], dtype="int32", scope="warp", offset_factor=1)
-    expr = tirx.mma_fill("int32", 8, buffer_w.data, buffer_w.elem_offset)
+    expr = _cuda_op.mma_fill("int32", 8, buffer_w.data, buffer_w.ty.elem_offset)
     assert expr.op.name == "tirx.mma_fill"
-
-
-def test_op_ptx_ldmatrix():
-    buffer_shared = tirx.decl_buffer([16, 16], "float16", scope="shared")
-    buffer_local = tirx.decl_buffer([8], "float16", scope="local")
-    expr = tirx.ptx_ldmatrix(
-        "float16", False, 4, ".b16", buffer_local.data, 0, buffer_shared.data, 0
-    )
-    assert expr.op.name == "tirx.ptx_ldmatrix"
 
 
 def test_op_ptx_cp_async():
     buffer_shared = tirx.decl_buffer([16, 16], "float16", scope="shared")
     buffer_local = tirx.decl_buffer([8], "float16", scope="local")
-    expr = tirx.ptx_cp_async("float16", buffer_shared.data, 0, buffer_local.data, 0, 16)
-    assert expr.op.name == "tirx.ptx_cp_async"
+    expr = _cuda_op.ptx_cp_async_legacy(buffer_shared.data, 0, buffer_local.data, 0, 16)
+    assert expr.op.name == "tirx.s_tir.cp_async_raw"
 
-
-def test_op_ptx_cp_async_bulk():
-    buffer_shared = tirx.decl_buffer([16, 16], "float16", scope="shared")
-    buffer_local = tirx.decl_buffer([8], "float16", scope="local")
-    expr = tirx.ptx_cp_async_bulk("float16", buffer_shared.data, 0, buffer_local.data, 0, 16, 0)
-    assert expr.op.name == "tirx.ptx_cp_async_bulk"
-
-
-def test_op_ptx_commit_group():
-    expr = tirx.ptx_commit_group()
-    assert expr.op.name == "tirx.ptx_commit_group"
-
-
-def test_op_ptx_wait_group():
-    expr = tirx.ptx_wait_group(8)
-    assert expr.op.name == "tirx.ptx_wait_group"
-
-
-def test_op_ptx_cp_async_barrier():
-    expr = tirx.ptx_cp_async_barrier(0)
-    assert expr.op.name == "tirx.ptx_cp_async_barrier"
-
-
-def test_op_ptx_init_barrier_thread_count():
-    expr = tirx.ptx_init_barrier_thread_count(0, 32)
-    assert expr.op.name == "tirx.ptx_init_barrier_thread_count"
-
-
-def test_op_ptx_arrive_barrier():
-    expr = tirx.ptx_arrive_barrier(0)
-    assert expr.op.name == "tirx.ptx_arrive_barrier"
-
-
-def test_op_ptx_arrive_barrier_expect_tx():
-    expr = tirx.ptx_arrive_barrier_expect_tx(0, 32)
-    assert expr.op.name == "tirx.ptx_arrive_barrier_expect_tx"
-
-
-def test_op_ptx_wait_barrier():
-    expr = tirx.ptx_wait_barrier(0)
-    assert expr.op.name == "tirx.ptx_wait_barrier"
-
-
-def test_op_create_barriers():
-    expr = tirx.create_barriers(16)
-    assert expr.op.name == "tirx.create_barriers"
+    inner_dst = tirx.tvm_access_ptr("float16", buffer_shared.data, 2, 8, 1)
+    inner_src = tirx.tvm_access_ptr("float16", buffer_local.data, 4, 8, 1)
+    expr = _cuda_op.ptx_cp_async_legacy("float16", inner_dst, 3, inner_src, 5, 16)
+    # Raw-form layout: (dst, dst_off, src, src_off, cp_size), offsets folded.
+    for access_ptr, expected_offset in zip((expr.args[0], expr.args[2]), [5, 9]):
+        assert access_ptr.op.name == "tirx.tvm_access_ptr"
+        assert access_ptr.args[1].op.name == "tirx.buffer_data"
+        assert isinstance(access_ptr.args[1].args[0], tirx.Var)
+        simplified_offset = tvm.arith.Analyzer().simplify(access_ptr.args[2])
+        assert int(simplified_offset) == expected_offset
 
 
 def test_tir_op_vectorlow():
@@ -298,9 +251,9 @@ def test_tir_op_vectorhigh():
 
 
 def test_tir_op_dp4a():
-    vec1 = tirx.Var("vec1", dtype="int8x4")
-    vec2 = tirx.Var("vec2", dtype="int8x4")
-    acc = tirx.Var("acc", dtype="int32")
+    vec1 = tirx.Var("vec1", ty="int8x4")
+    vec2 = tirx.Var("vec2", ty="int8x4")
+    acc = tirx.Var("acc", ty="int32")
     expr = tirx.dp4a(vec1, vec2, acc)
     assert expr.op.name == "tirx.dp4a"
 
@@ -313,22 +266,22 @@ def test_tir_op_vectorcombine():
 
 
 def test_tir_op_shift_left():
-    x = tirx.Var("x", dtype="int32")
-    y = tirx.Var("x", dtype="int32")
+    x = tirx.Var("x", ty="int32")
+    y = tirx.Var("x", ty="int32")
     expr = tirx.shift_left(x, y)
     assert expr.op.name == "tirx.shift_left"
 
 
 def test_tir_op_shift_right():
-    x = tirx.Var("x", dtype="int32")
-    y = tirx.Var("x", dtype="int32")
+    x = tirx.Var("x", ty="int32")
+    y = tirx.Var("x", ty="int32")
     expr = tirx.shift_right(x, y)
     assert expr.op.name == "tirx.shift_right"
 
 
 def test_tir_op_bitwise():
-    x = tirx.Var("x", dtype="int32")
-    y = tirx.Var("y", dtype="int32")
+    x = tirx.Var("x", ty="int32")
+    y = tirx.Var("y", ty="int32")
     expr = tirx.bitwise_and(x, y)
     assert expr.op.name == "tirx.bitwise_and"
     expr = tirx.bitwise_or(x, y)

@@ -16,6 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/s_tir/stmt.h>
 #include <tvm/s_tir/transform.h>
@@ -76,10 +77,10 @@ struct AsyncStridedMemCopyFinder : private StmtExprVisitor {
         }
 
         // get store buffer; assert it exists and is contiguous given it uses a single index
-        auto bufferstore = bufferstorenode->buffer.as<BufferNode>();
+        auto bufferstore = bufferstorenode->buffer.as<BufferTypeNode>();
 
         // get load buffer; assert it exists and is contiguous given it uses a single index
-        auto bufferload = bufferloadnode->buffer.as<BufferNode>();
+        auto bufferload = bufferloadnode->buffer.as<BufferTypeNode>();
 
         if (!bufferstore || !bufferload) {
           StmtExprVisitor::VisitStmt_(attrStmt);
@@ -91,7 +92,7 @@ struct AsyncStridedMemCopyFinder : private StmtExprVisitor {
         // Use DetectIterMap to detect whether store index is non-contiguous.
         arith::Analyzer analyzer;
         auto store_iter_map = DetectIterMap(store_index, input_iters, 1,
-                                            arith::IterMapLevel::Surjective, &analyzer, false);
+                                            arith::IterMapLevel::Surjective, analyzer, false);
         if (!store_iter_map->errors.empty()) {
           found_ = true;
         }
@@ -101,7 +102,7 @@ struct AsyncStridedMemCopyFinder : private StmtExprVisitor {
 
         // Use DetectIterMap to detect whether load index is non-contiguous.
         auto load_iter_map = DetectIterMap(load_index, input_iters, 1,
-                                           arith::IterMapLevel::Surjective, &analyzer, false);
+                                           arith::IterMapLevel::Surjective, analyzer, false);
         if (!load_iter_map->errors.empty()) {
           found_ = true;
         }
@@ -113,7 +114,7 @@ struct AsyncStridedMemCopyFinder : private StmtExprVisitor {
   }
 
   bool found_ = false;
-  ffi::Map<Var, Range> input_iters = ffi::Map<Var, Range>();
+  ffi::Map<PrimVar, Range> input_iters = ffi::Map<PrimVar, Range>();
 };
 
 }  // namespace s_tir
@@ -151,7 +152,7 @@ class DisallowAsyncStridedMemCopyNode : public PostprocNode {
           pass_list.push_back(tirx::transform::FlattenBuffer());
           pass_list.push_back(tirx::transform::BF16ComputeLegalize());
           pass_list.push_back(tirx::transform::NarrowDataType(32));
-          pass_list.push_back(tirx::transform::Simplify());
+          pass_list.push_back(tirx::transform::StmtSimplify());
           pass_list.push_back(s_tir::transform::InjectVirtualThread());
           pass_list.push_back(s_tir::transform::InjectDoubleBuffer());
           pass_list.push_back(tirx::transform::VectorizeLoop(true));
@@ -173,7 +174,7 @@ class DisallowAsyncStridedMemCopyNode : public PostprocNode {
   }
   // Inherited from PostprocNode
   Postproc Clone() const {
-    ObjectPtr<DisallowAsyncStridedMemCopyNode> n =
+    ffi::ObjectPtr<DisallowAsyncStridedMemCopyNode> n =
         ffi::make_object<DisallowAsyncStridedMemCopyNode>(*this);
     return Postproc(n);
   }
@@ -191,7 +192,7 @@ class DisallowAsyncStridedMemCopyNode : public PostprocNode {
 };
 
 Postproc Postproc::DisallowAsyncStridedMemCopy() {
-  ObjectPtr<DisallowAsyncStridedMemCopyNode> n =
+  ffi::ObjectPtr<DisallowAsyncStridedMemCopyNode> n =
       ffi::make_object<DisallowAsyncStridedMemCopyNode>();
   return Postproc(n);
 }

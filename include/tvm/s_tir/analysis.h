@@ -48,7 +48,7 @@ namespace tirx {
  *           - third: opaque regions
  */
 TVM_DLL ffi::Array<ffi::Array<BufferRegion>> GetSBlockAccessRegion(
-    const SBlock& block, const ffi::Map<Var, Buffer>& buffer_var_map);
+    const SBlock& block, const ffi::Map<Var, BufferVar>& buffer_var_map);
 
 /*!
  * \brief Auto detect the block read/write region according to its body stmt. An opaque access will
@@ -59,7 +59,7 @@ TVM_DLL ffi::Array<ffi::Array<BufferRegion>> GetSBlockAccessRegion(
  * \return An array only consisting of the read regions and write regions of the input block
  */
 TVM_DLL ffi::Array<ffi::Array<BufferRegion>> GetSBlockReadWriteRegion(
-    const SBlock& block, const ffi::Map<Var, Buffer>& buffer_var_map);
+    const SBlock& block, const ffi::Map<Var, BufferVar>& buffer_var_map);
 
 /*!
  * \brief Detect the lowest common ancestor(LCA) of buffer access, including both high-level
@@ -69,7 +69,7 @@ TVM_DLL ffi::Array<ffi::Array<BufferRegion>> GetSBlockReadWriteRegion(
  * \return The Map from buffer to the LCA of all access to it. The lca is function root if the
  *         return stmt is std::nullopt.
  */
-TVM_DLL ffi::Map<Buffer, ffi::Optional<Stmt>> DetectBufferAccessLCA(const PrimFunc& func);
+TVM_DLL ffi::Map<BufferVar, ffi::Optional<Stmt>> DetectBufferAccessLCA(const PrimFunc& func);
 
 /*!
  * \brief Find the "anchor block" of the given module.
@@ -90,8 +90,9 @@ const tirx::SBlockNode* FindAnchorBlock(const IRModule& mod);
 }  // namespace tirx
 
 namespace arith {
+class AnalyzerObj;
 class Analyzer;
-}
+}  // namespace arith
 
 namespace s_tir {
 
@@ -138,14 +139,15 @@ struct MemCpyDetails {
  * \param analyzer The analyzer with which to check any algebraic expressions
  * \returns The source and destination regions being copied, if the loop is equivalent to memcpy.
  */
-TVM_DLL std::optional<MemCpyDetails> IdentifyMemCpy(const For& loop, arith::Analyzer* analyzer);
+TVM_DLL std::optional<MemCpyDetails> IdentifyMemCpy(const For& loop,
+                                                    const arith::Analyzer& analyzer);
 
 /*!
  * \brief Calculate the allocated memory per scope in bytes needed inside the TIR PrimFunc
  * \param func The TIR PrimFunc for which the allocated memory size to be calculated
  * \return Allocated memory size per scope in bytes.
  */
-TVM_DLL ffi::Map<ffi::String, ffi::Map<ffi::String, Integer>> CalculateAllocatedBytes(
+TVM_DLL ffi::Map<ffi::String, ffi::Map<ffi::String, int64_t>> CalculateAllocatedBytes(
     const PrimFunc& func);
 
 /*!
@@ -153,7 +155,7 @@ TVM_DLL ffi::Map<ffi::String, ffi::Map<ffi::String, Integer>> CalculateAllocated
  * \param mod The IRModule for which the allocated memory size has to be calculated
  * \return Allocated memory size per scope in bytes for each function.
  */
-TVM_DLL ffi::Map<ffi::String, ffi::Map<ffi::String, Integer>> CalculateAllocatedBytes(
+TVM_DLL ffi::Map<ffi::String, ffi::Map<ffi::String, int64_t>> CalculateAllocatedBytes(
     const IRModule& mod);
 
 /**
@@ -168,7 +170,7 @@ TVM_DLL ffi::Array<tvm::transform::Pass> GetVTCMCompactionPasses();
  * \param limit The limit to check.
  * \return true if the VTCM usage is within the provided limit.
  */
-TVM_DLL bool VerifyVTCMLimit(const IRModule& mod, Integer limit);
+TVM_DLL bool VerifyVTCMLimit(const IRModule& mod, int64_t limit);
 
 /*!
  * \brief Verifies that the VTCM usage of the given prim_func is within the provided limit.
@@ -176,7 +178,7 @@ TVM_DLL bool VerifyVTCMLimit(const IRModule& mod, Integer limit);
  * \param limit The limit to check.
  * \return true if the VTCM usage is within the provided limit.
  */
-TVM_DLL bool VerifyVTCMLimit(const PrimFunc& func, Integer limit);
+TVM_DLL bool VerifyVTCMLimit(const PrimFunc& func, int64_t limit);
 
 namespace transform {
 

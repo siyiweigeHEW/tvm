@@ -24,10 +24,12 @@
 
 #include <tvm/arith/bound.h>
 #include <tvm/arith/iter_affine_map.h>
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/optional.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/buffer.h>
+#include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt.h>
 
 #include <optional>
@@ -42,9 +44,9 @@ namespace s_tir {
 using namespace tvm::tirx;
 
 std::variant<MemCpyDetails, std::string> IdentifyMemCpyImpl(const For& loop,
-                                                            arith::Analyzer* analyzer) {
+                                                            arith::AnalyzerObj* analyzer) {
   ffi::Map<Var, arith::IntSet> loop_intervals;
-  ffi::Map<Var, Range> loop_ranges;
+  ffi::Map<PrimVar, Range> loop_ranges;
   PrimExpr total_loop_iterations = 1;
 
   // Walk through the loop nest, stopping at the first loop whose body
@@ -104,8 +106,9 @@ std::variant<MemCpyDetails, std::string> IdentifyMemCpyImpl(const For& loop,
   // for i in T.serial(16):
   //     B[i] = A[T.abs(i-8)]
 
-  auto src_iter_map = arith::DetectIterMap({src_index}, loop_ranges, Bool(true),
-                                           arith::IterMapLevel::Bijective, analyzer);
+  arith::Analyzer analyzer_ref = ffi::GetRef<arith::Analyzer>(analyzer);
+  auto src_iter_map = arith::DetectIterMap({src_index}, loop_ranges, IntImm::Bool(true),
+                                           arith::IterMapLevel::Bijective, analyzer_ref);
   if (src_iter_map->errors.size()) {
     return static_cast<const std::stringstream&>(std::stringstream()
                                                  << "arith::DetectIterMap(src) returned "
@@ -114,8 +117,8 @@ std::variant<MemCpyDetails, std::string> IdentifyMemCpyImpl(const For& loop,
                                                  << " for src_index = " << src_index)
         .str();
   }
-  auto dst_iter_map = arith::DetectIterMap({dst_index}, loop_ranges, Bool(true),
-                                           arith::IterMapLevel::Bijective, analyzer);
+  auto dst_iter_map = arith::DetectIterMap({dst_index}, loop_ranges, IntImm::Bool(true),
+                                           arith::IterMapLevel::Bijective, analyzer_ref);
   if (dst_iter_map->errors.size()) {
     return static_cast<const std::stringstream&>(std::stringstream()
                                                  << "arith::DetectIterMap(dst) returned "
@@ -274,8 +277,8 @@ std::variant<MemCpyDetails, std::string> IdentifyMemCpyImpl(const For& loop,
   return MemCpyDetails{src_region, dst_region};
 }
 
-std::optional<MemCpyDetails> IdentifyMemCpy(const For& loop, arith::Analyzer* analyzer) {
-  auto result = IdentifyMemCpyImpl(loop, analyzer);
+std::optional<MemCpyDetails> IdentifyMemCpy(const For& loop, const arith::Analyzer& analyzer) {
+  auto result = IdentifyMemCpyImpl(loop, analyzer.get());
   if (auto* ptr = std::get_if<MemCpyDetails>(&result)) {
     return *ptr;
   } else {
@@ -287,17 +290,17 @@ std::optional<MemCpyDetails> IdentifyMemCpy(const For& loop, arith::Analyzer* an
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("s_tir.analysis._identify_memcpy", [](const Stmt& stmt) {
-    ffi::Array<ObjectRef> output;
+    ffi::Array<ffi::ObjectRef> output;
 
     struct Visitor : arith::IRVisitorWithAnalyzer {
-      explicit Visitor(ffi::Array<ObjectRef>* output) : output(output) {}
-      ffi::Array<ObjectRef>* output;
+      explicit Visitor(ffi::Array<ffi::ObjectRef>* output) : output(output) {}
+      ffi::Array<ffi::ObjectRef>* output;
 
      private:
       using IRVisitorWithAnalyzer::VisitStmt_;
       void VisitStmt_(const ForNode* op) override {
         For loop = ffi::GetRef<For>(op);
-        auto result = IdentifyMemCpyImpl(loop, &(Visitor::analyzer_));
+        auto result = IdentifyMemCpyImpl(loop, Visitor::analyzer_.get());
         if (auto* ptr = std::get_if<MemCpyDetails>(&result)) {
           output->push_back(ffi::Array{ptr->source, ptr->dest});
         } else if (auto* ptr = std::get_if<std::string>(&result)) {

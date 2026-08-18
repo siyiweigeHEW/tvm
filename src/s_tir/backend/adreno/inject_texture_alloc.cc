@@ -27,7 +27,7 @@
 #include <tvm/tirx/stmt_functor.h>
 
 #include "../../../arith/ir_mutator_with_analyzer.h"
-#include "../../../runtime/texture.h"
+#include "../../../backend/opencl/runtime/texture.h"
 #include "../../../tirx/transform/ir_utils.h"
 
 namespace tvm {
@@ -46,9 +46,9 @@ class TextureAllocInjector : public arith::IRMutatorWithAnalyzer {
  public:
   static PrimFunc Inject(PrimFunc func) {
     arith::Analyzer ana;
-    auto pass = TextureAllocInjector(&ana);
+    auto pass = TextureAllocInjector(ana);
     auto writer = func.CopyOnWrite();
-    pass.MarkBufferMapShapes(func);
+    pass.MarkBufferParamShapes(func);
     writer->body = pass.VisitStmt(func->body);
     return func;
   }
@@ -59,11 +59,11 @@ class TextureAllocInjector : public arith::IRMutatorWithAnalyzer {
   using IRMutatorWithAnalyzer::VisitStmt;
   using IRMutatorWithAnalyzer::VisitStmt_;
 
-  explicit TextureAllocInjector(arith::Analyzer* ana) : IRMutatorWithAnalyzer(ana) {}
+  explicit TextureAllocInjector(const arith::Analyzer& ana) : IRMutatorWithAnalyzer(ana) {}
 
   Stmt VisitStmt_(const AllocBufferNode* op) final {
     Stmt stmt = StmtExprMutator::VisitStmt_(op);
-    std::string storage_scope = GetStorageScope(op->buffer->data);
+    std::string storage_scope = op->buffer.scope();
     if (IsTextureStorage(storage_scope)) {
       op = stmt.as<AllocBufferNode>();
       const auto& extents = op->buffer->shape;
@@ -76,21 +76,21 @@ class TextureAllocInjector : public arith::IRMutatorWithAnalyzer {
 
       size_t axis = DefaultTextureLayoutSeparator(extents.size(), storage_scope);
       auto texture = ApplyTexture2DFlattening<PrimExpr>(extents, extents.size(), axis);
-      ffi::Array<PrimExpr> args;
+      ffi::Array<Expr> args;
       args.push_back(StringImm(storage_scope));
-      args.push_back(IntImm(DataType::Int(64), 3));
-      args.push_back(Call(DataType::Handle(), builtin::tvm_stack_make_shape(),
+      args.push_back(IntImm::Int64(3));
+      args.push_back(Call(PointerType(PrimType::Int(64)), builtin::tvm_stack_make_shape(),
                           {texture.width, texture.height, texture.depth}));
-      args.push_back(IntImm(DataType::Int(64), channel_size));
-      stmt = Bind(op->buffer->data,
-                  Call(op->buffer->data.dtype(), builtin::nd_mem_alloc_with_scope(), args));
+      args.push_back(IntImm::Int64(channel_size));
+      stmt = DeclBuffer(
+          op->buffer, Call(op->buffer.DataPointerType(), builtin::nd_mem_alloc_with_scope(), args));
     }
     return stmt;
   }
 
  protected:
   std::string GetStorageScope(const Var& buffer_var) {
-    auto* ptr = buffer_var->type_annotation.as<PointerTypeNode>();
+    auto* ptr = buffer_var->ty.as<PointerTypeNode>();
     TVM_FFI_ICHECK(ptr) << "Buffer Var's type annotation must be of PointerType";
     return ptr->storage_scope;
   }

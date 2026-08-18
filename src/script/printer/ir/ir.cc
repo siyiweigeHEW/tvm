@@ -35,15 +35,24 @@ struct SortableFunction {
       : priority(0), gv(obj.first), func(obj.second) {
     if (gv->name_hint == "main") {
       priority = 1000;
-    } else if (obj.second->GetTypeKey() == "tirx.PrimFunc") {
-      priority = 1;
-    } else if (obj.second->GetTypeKey() == "relax.expr.ExternFunc") {
-      priority = 2;
-    } else if (obj.second->GetTypeKey() == "relax.expr.Function") {
-      priority = 3;
+    } else if (func.defined()) {
+      if (func->GetTypeKey() == "tirx.PrimFunc") {
+        priority = 1;
+      } else if (func->GetTypeKey() == "relax.expr.ExternFunc") {
+        priority = 2;
+      } else if (func->GetTypeKey() == "relax.expr.Function") {
+        priority = 3;
+      } else {
+        TVM_FFI_THROW(TypeError) << "TVMScript cannot print functions of type: "
+                                 << func->GetTypeKey();
+      }
     } else {
-      TVM_FFI_THROW(TypeError) << "TVMScript cannot print functions of type: "
-                               << obj.second->GetTypeKey();
+      // PrimFuncPass may leave undefined GlobalVar slots when transforming
+      // this function (see tirx/ir/transform.cc); this transient state may
+      // be encountered during the internal call Dump(mod) executed in
+      // PrimFuncPass during debugging.
+      priority = 999;
+      LOG(INFO) << "Function " << gv->name_hint << " is undefined";
     }
   }
 
@@ -55,9 +64,28 @@ struct SortableFunction {
   }
 };
 
+ffi::Optional<ffi::String> GetTypeVarDeclarationName(const StmtDoc& stmt) {
+  const auto* assign = stmt.as<AssignDocNode>();
+  if (assign == nullptr || !assign->rhs.has_value()) {
+    return std::nullopt;
+  }
+  const auto* lhs = assign->lhs.as<IdDocNode>();
+  const auto* call = assign->rhs.value().as<CallDocNode>();
+  if (lhs == nullptr || call == nullptr) {
+    return std::nullopt;
+  }
+  const auto* callee = call->callee.as<IdDocNode>();
+  if (callee == nullptr || callee->name != "TypeVar") {
+    return std::nullopt;
+  }
+  return lhs->name;
+}
+
 TVM_STATIC_IR_FUNCTOR(IRDocsifier, vtable)
     .set_dispatch<IRModule>("", [](IRModule mod, AccessPath p, IRDocsifier d) -> Doc {
       std::vector<SortableFunction> functions;
+      ffi::Array<StmtDoc> type_var_decls;
+      std::unordered_set<ffi::String> declared_type_vars;
       for (const auto& kv : mod->functions) {
         functions.push_back(SortableFunction(kv));
       }
@@ -66,7 +94,7 @@ TVM_STATIC_IR_FUNCTOR(IRDocsifier, vtable)
       (*f)->AddDispatchToken(d, "ir");
       IdDoc module_doc = d->Define(mod, f(), GetBindingName(d).value_or("Module"));
       (*f)->global_infos = &mod->global_infos;
-      if (mod->attrs.defined() && !mod->attrs->dict.empty()) {
+      if (!mod->attrs->dict.empty()) {
         (*f)->stmts.push_back(
             ExprStmtDoc(IR(d, "module_attrs")  //
                             ->Call({d->AsDoc<ExprDoc>(mod->attrs, p->Attr("attrs"))})));
@@ -92,6 +120,14 @@ TVM_STATIC_IR_FUNCTOR(IRDocsifier, vtable)
         Doc doc = d->AsDoc(base_func, p->Attr("functions")->MapItem(gv));
         d->cfg->binding_names.pop_back();
         if (const auto* stmt_block = doc.as<StmtBlockDocNode>()) {
+          for (const StmtDoc& stmt : stmt_block->stmts) {
+            if (ffi::Optional<ffi::String> name = GetTypeVarDeclarationName(stmt)) {
+              if (!declared_type_vars.count(name.value())) {
+                declared_type_vars.insert(name.value());
+                type_var_decls.push_back(stmt);
+              }
+            }
+          }
           (*f)->stmts.push_back(stmt_block->stmts.back());
           (*f)->stmts.back()->source_paths = std::move(doc->source_paths);
         } else if (auto stmt = doc.as<StmtDoc>()) {
@@ -109,7 +145,12 @@ TVM_STATIC_IR_FUNCTOR(IRDocsifier, vtable)
               << " produced Doc type of " << doc->GetTypeKey();
         }
       }
-      return HeaderWrapper(d, ClassDoc(module_doc, {IR(d, "ir_module")}, (*f)->stmts));
+      ClassDoc class_doc(module_doc, {IR(d, "ir_module")}, (*f)->stmts);
+      if (type_var_decls.empty()) {
+        return HeaderWrapper(d, class_doc);
+      }
+      type_var_decls.push_back(class_doc);
+      return HeaderWrapper(d, StmtBlockDoc(type_var_decls));
     });
 
 TVM_STATIC_IR_FUNCTOR(IRDocsifier, vtable)
@@ -160,15 +201,15 @@ TVM_STATIC_IR_FUNCTOR(IRDocsifier, vtable)
           });
     });
 
-std::string ReprPrintIRModule(const ObjectRef& mod, const PrinterConfig& cfg) {
+std::string ReprPrintIRModule(const ffi::ObjectRef& mod, const PrinterConfig& cfg) {
   return ReprPrintIR(mod, cfg);
 }
 
-TVM_SCRIPT_REPR(GlobalVarNode, ReprPrintIR);
-TVM_SCRIPT_REPR(DictAttrsNode, ReprPrintIR);
-TVM_SCRIPT_REPR(FuncTypeNode, ReprPrintIR);
-TVM_SCRIPT_REPR(RangeNode, ReprPrintIR);
-TVM_SCRIPT_REPR(IRModuleNode, ReprPrintIRModule);
+TVM_REGISTER_SCRIPT_AS_REPR(GlobalVarNode, ReprPrintIR);
+TVM_REGISTER_SCRIPT_AS_REPR(DictAttrsNode, ReprPrintIR);
+TVM_REGISTER_SCRIPT_AS_REPR(FuncTypeNode, ReprPrintIR);
+TVM_REGISTER_SCRIPT_AS_REPR(RangeNode, ReprPrintIR);
+TVM_REGISTER_SCRIPT_AS_REPR(IRModuleNode, ReprPrintIRModule);
 
 }  // namespace printer
 }  // namespace script

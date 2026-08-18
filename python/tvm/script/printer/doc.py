@@ -255,11 +255,12 @@ class OperationKind(IntEnum):
     GtE = 23
     And = 24
     Or = 25
-    _BinaryEnd = 26
+    MatMul = 26
+    _BinaryEnd = 27
 
-    _SpecialStart = 27
-    IfThenElse = 28
-    _SpecialEnd = 29
+    _SpecialStart = 28
+    IfThenElse = 29
+    _SpecialEnd = 30
 
     # pylint: enable=invalid-name
 
@@ -461,6 +462,7 @@ class FunctionDoc(StmtDoc):
     decorators: Sequence[ExprDoc]
     return_type: ExprDoc | None
     body: Sequence[StmtDoc]
+    type_params: Sequence[Doc]
 
     def __init__(
         self,
@@ -469,6 +471,7 @@ class FunctionDoc(StmtDoc):
         decorators: list[ExprDoc],
         return_type: ExprDoc | None,
         body: list[StmtDoc],
+        type_params: list[Doc] | None = None,
     ):
         self.__init_handle_by_constructor__(
             _ffi_api.FunctionDoc,  # type: ignore # pylint: disable=no-member
@@ -477,6 +480,7 @@ class FunctionDoc(StmtDoc):
             decorators,
             return_type,
             body,
+            type_params or [],
         )
 
 

@@ -69,7 +69,7 @@ void InlinePostBlocks(Schedule sch, Trace anchor_trace, Target target) {
   std::unordered_set<std::string> get_sblock_names;
   for (const auto& inst : anchor_trace->insts) {
     if (inst->kind.same_as(kind_get_sblock)) {
-      auto block_name = Downcast<ffi::String>(inst->attrs[0]);
+      auto block_name = inst->attrs[0].as_or_throw<ffi::String>();
       get_sblock_names.insert(block_name);
     }
   }
@@ -121,18 +121,18 @@ std::vector<SBlockRV> ApplyAnchorTrace(Schedule sch, Trace anchor_trace) {
   const auto block_names_orig = GetSBlockNames(sch->mod());
   const auto sch_orig = sch->Copy();
 
-  std::unordered_map<const Object*, const Object*> rv_map;
+  std::unordered_map<const ffi::Object*, const ffi::Object*> rv_map;
   // Blocks and loops that appear in the anchor trace but are not part of the target schedule.
-  std::unordered_set<SBlockRV, ObjectPtrHash, ObjectPtrEqual> foreign_blocks;
-  std::unordered_set<LoopRV, ObjectPtrHash, ObjectPtrEqual> foreign_loops;
+  std::unordered_set<SBlockRV, ffi::ObjectPtrHash, ffi::ObjectPtrEqual> foreign_blocks;
+  std::unordered_set<LoopRV, ffi::ObjectPtrHash, ffi::ObjectPtrEqual> foreign_loops;
 
   // Instructions in the anchor trace can be applied only if all inputs are part of the target
   // schedule.
   auto is_inst_applicable = [&foreign_blocks, &foreign_loops](Instruction inst) {
     for (auto input : inst->inputs) {
       if (input == nullptr) continue;
-      if ((input.as<SBlockRVNode>() && foreign_blocks.count(Downcast<SBlockRV>(input))) ||
-          (input.as<LoopRVNode>() && foreign_loops.count(Downcast<LoopRV>(input)))) {
+      if ((input.as<SBlockRVNode>() && foreign_blocks.count(input.as_or_throw<SBlockRV>())) ||
+          (input.as<LoopRVNode>() && foreign_loops.count(input.as_or_throw<LoopRV>()))) {
         return false;
       }
     }
@@ -145,9 +145,9 @@ std::vector<SBlockRV> ApplyAnchorTrace(Schedule sch, Trace anchor_trace) {
       // to the target schedule.
       for (auto output : inst->outputs) {
         if (output.as<SBlockRVNode>()) {
-          foreign_blocks.insert(Downcast<SBlockRV>(output));
+          foreign_blocks.insert(output.as_or_throw<SBlockRV>());
         } else if (output.as<LoopRVNode>()) {
-          foreign_loops.insert(Downcast<LoopRV>(output));
+          foreign_loops.insert(output.as_or_throw<LoopRV>());
         }
       }
       continue;
@@ -156,16 +156,16 @@ std::vector<SBlockRV> ApplyAnchorTrace(Schedule sch, Trace anchor_trace) {
     ffi::Array<Any> inputs = TranslateInputRVs(inst->inputs, rv_map);
 
     if (inst->kind.same_as(kind_get_sblock) &&
-        !HasBlock(sch, Downcast<ffi::String>(inst->attrs[0]))) {
+        !HasBlock(sch, inst->attrs[0].as_or_throw<ffi::String>())) {
       // The anchor trace does get_sblock on a block that is not part of the target schedule.
-      auto block = Downcast<SBlockRV>(inst->outputs[0]);
+      auto block = inst->outputs[0].as_or_throw<SBlockRV>();
       foreign_blocks.insert(block);
       continue;
     } else if (inst->kind.same_as(kind_reverse_compute_inline)) {
       // The anchor trace does reverse_compute_inline on a block, but the block with the same name
       // in the target schedule cannot be reverse compute inline-ed.
       // In such cases, it should be possible to apply compute_inline instead.
-      auto block = Downcast<SBlockRV>(inputs[0]);
+      auto block = inputs[0].as_or_throw<SBlockRV>();
       auto block_sref = sch->GetSRef(block);
       if (!CanReverseComputeInline(sch->state(), block_sref)) {
         TVM_FFI_ICHECK(CanComputeInline(sch->state(), block_sref));
@@ -174,7 +174,7 @@ std::vector<SBlockRV> ApplyAnchorTrace(Schedule sch, Trace anchor_trace) {
       }
     } else if (inst->kind.same_as(kind_compute_inline)) {
       // Similar to the reverse_compute_inline case above.
-      auto block = Downcast<SBlockRV>(inputs[0]);
+      auto block = inputs[0].as_or_throw<SBlockRV>();
       auto block_sref = sch->GetSRef(block);
       auto state = sch->state();
       if (!CanComputeInline(state, block_sref)) {
@@ -256,14 +256,14 @@ void ScheduleUsingAnchorTrace(Schedule sch, const Trace& anchor_trace, const tvm
   } else if (target->kind->name == "llvm" || target->kind->name == "hexagon") {
     sch->Parallel(sch->Fuse(sch->GetLoops(last_block)));
   } else if (IsGPUTarget(target->kind->name)) {
-    auto max_threads_per_block = target->GetAttr<Integer>("max_threads_per_block");
-    TVM_FFI_CHECK(max_threads_per_block.defined(), ValueError)
+    auto max_threads_per_block = target->GetAttr<int64_t>("max_threads_per_block");
+    TVM_FFI_CHECK(max_threads_per_block.has_value(), ValueError)
         << "missing attribute `max_threads_per_block` in the target";
 
     auto auto_bind_rule =
         ScheduleRule::AutoBind(/*max_threadblocks=*/256,
-                               /*thread_extents*/ ffi::Array<Integer>{32, 64, 128, 256, 512, 1024},
-                               max_threads_per_block.value()->value);
+                               /*thread_extents*/ ffi::Array<int64_t>{32, 64, 128, 256, 512, 1024},
+                               max_threads_per_block.value());
     auto_bind_rule->Apply(sch, last_block);
   }
 }

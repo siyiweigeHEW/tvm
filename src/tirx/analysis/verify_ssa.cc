@@ -23,6 +23,7 @@
  *  SSA requires each varaible to be only defined once.
  * \file verify_ssa.cc
  */
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/analysis.h>
@@ -40,7 +41,7 @@ class SSAVerifier final : public StmtExprVisitor {
  public:
   bool is_ssa_{true};
 
-  void VisitExpr(const PrimExpr& n) final {
+  void VisitExpr(const Expr& n) final {
     if (!is_ssa_) return;
     StmtExprVisitor::VisitExpr(n);
   }
@@ -57,7 +58,7 @@ class SSAVerifier final : public StmtExprVisitor {
     // (let x = 1 in x + 1) * (let x = 1 in x + 1)
     auto it = def_map_.find(op->var);
     if (it != def_map_.end()) {
-      if (!deep_equal_(it->second, op->value)) {
+      if (!deep_equal_(it->second.as_or_throw<PrimExpr>(), op->value)) {
         is_ssa_ = false;
         return;
       }
@@ -76,7 +77,7 @@ class SSAVerifier final : public StmtExprVisitor {
     StmtExprVisitor::VisitStmt_(op);
   }
   void VisitStmt_(const AllocBufferNode* op) final {
-    MarkDef(op->buffer->data, op->buffer->data);
+    MarkDef(op->buffer.var(), op->buffer.var());
     StmtExprVisitor::VisitStmt_(op);
   }
 
@@ -92,15 +93,17 @@ class SSAVerifier final : public StmtExprVisitor {
       MarkDef(param, param);
     }
 
-    for (auto kv : func->buffer_map) {
-      this->DefineBuffer(kv.second);
+    for (const Var& param : func->params) {
+      if (auto buffer = param.as<BufferVar>()) {
+        this->DefineBuffer(buffer.value());
+      }
     }
     this->VisitStmt(func->body);
   }
 
-  void DefineBuffer(const Buffer& buffer) {
+  void DefineBuffer(const BufferVar& buffer) {
     match_scope_ = true;
-    this->VisitExpr(buffer->data);
+    this->VisitExpr(buffer.var());
     for (size_t i = 0; i < buffer->shape.size(); ++i) {
       this->VisitExpr(buffer->shape[i]);
     }
@@ -116,7 +119,7 @@ class SSAVerifier final : public StmtExprVisitor {
   }
 
  private:
-  void MarkDef(const Var& var, PrimExpr value, bool allow_dup = false) {
+  void MarkDef(const Var& var, Expr value, bool allow_dup = false) {
     if (def_map_.count(var) != 0) {
       if (!allow_dup) {
         is_ssa_ = false;
@@ -131,7 +134,7 @@ class SSAVerifier final : public StmtExprVisitor {
   // deep equal
   ExprDeepEqual deep_equal_;
   // def map, for let, maps to the bind value, for others maps to self.
-  std::unordered_map<Var, PrimExpr> def_map_;
+  std::unordered_map<Var, Expr> def_map_;
 };
 
 bool VerifySSA(const PrimFunc& func) {

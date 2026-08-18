@@ -19,7 +19,7 @@
 
 #include <gtest/gtest.h>
 #include <tvm/ir/module.h>
-#include <tvm/node/functor.h>
+#include <tvm/ir/node_functor.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
@@ -32,12 +32,12 @@
 TEST(IRF, Basic) {
   using namespace tvm;
   using namespace tvm::tirx;
-  Var x("x");
+  PrimVar x("x");
   auto z = x + 1;
 
-  NodeFunctor<int(const ObjectRef& n, int b)> f;
-  f.set_dispatch<VarNode>([](const ObjectRef& n, int b) { return b; });
-  f.set_dispatch<AddNode>([](const ObjectRef& n, int b) { return b + 2; });
+  NodeFunctor<int(const ffi::ObjectRef& n, int b)> f;
+  f.set_dispatch<VarNode>([](const ffi::ObjectRef& n, int b) { return b; });
+  f.set_dispatch<AddNode>([](const ffi::ObjectRef& n, int b) { return b + 2; });
   TVM_FFI_ICHECK_EQ(f(x, 2), 2);
   TVM_FFI_ICHECK_EQ(f(z, 2), 4);
 }
@@ -46,10 +46,10 @@ TEST(IRF, CountVar) {
   using namespace tvm;
   using namespace tvm::tirx;
   int n_var = 0;
-  Var x("x"), y;
+  PrimVar x("x"), y("y");
 
   auto z = x + 1 + y + y;
-  tirx::PostOrderVisit(z, [&n_var](const ObjectRef& n) {
+  tirx::PostOrderVisit(z, [&n_var](const ffi::ObjectRef& n) {
     if (n.as<VarNode>()) ++n_var;
   });
   TVM_FFI_ICHECK_EQ(n_var, 2);
@@ -58,15 +58,16 @@ TEST(IRF, CountVar) {
 TEST(IRF, PreOrderVisit) {
   using namespace tvm;
   using namespace tvm::tirx;
-  Stmt init = IfThenElse(const_true(), Evaluate(Integer(0)), Evaluate(Integer(0)));
-  Stmt body = Evaluate(Integer(1));
+  Stmt init =
+      IfThenElse(IntImm::Bool(true), Evaluate(IntImm::Int32(0)), Evaluate(IntImm::Int32(0)));
+  Stmt body = Evaluate(IntImm::Int32(1));
   SBlock block(/*iter_vars=*/{}, /*reads=*/{},
                /*writes=*/{}, /*name_hint=*/"block", /*body=*/body,
                /*init=*/init);
   bool init_visited = false;
   bool stopped_at_if = true;
   bool body_visited = false;
-  PreOrderVisit(block, [&](const ObjectRef& n) -> bool {
+  PreOrderVisit(block, [&](const ffi::ObjectRef& n) -> bool {
     if (n->IsInstance<IfThenElseNode>()) {
       init_visited = true;
       return false;
@@ -92,10 +93,10 @@ TEST(IRF, PreOrderVisit) {
 TEST(IRF, ExprTransform) {
   using namespace tvm;
   using namespace tvm::tirx;
-  Var x("x");
+  PrimVar x("x");
   auto z = x + 1;
 
-  class MyExprFunctor : public tirx::ExprFunctor<int(const PrimExpr&, int)> {
+  class MyExprFunctor : public tirx::ExprFunctor<int(const Expr&, int)> {
    public:
     int VisitExpr_(const VarNode* op, int b) final { return b; }
     int VisitExpr_(const IntImmNode* op, int b) final { return op->value; }
@@ -109,17 +110,17 @@ TEST(IRF, ExprTransform) {
   try {
     f(z - 1, 2);
     TVM_FFI_THROW(InternalError) << "should fail";
-  } catch (Error&) {
+  } catch (tvm::ffi::Error&) {
   }
 }
 
 TEST(IRF, ExprVisit) {
   using namespace tvm;
   using namespace tvm::tirx;
-  Var x("x");
+  PrimVar x("x");
   auto z = x + 1;
 
-  class MyVisitor : public tirx::ExprFunctor<void(const PrimExpr&)>,
+  class MyVisitor : public tirx::ExprFunctor<void(const Expr&)>,
                     public tirx::StmtFunctor<void(const Stmt&)> {
    public:
     int count = 0;
@@ -140,7 +141,7 @@ TEST(IRF, ExprVisit) {
 TEST(IRF, StmtVisitor) {
   using namespace tvm;
   using namespace tvm::tirx;
-  Var x("x");
+  PrimVar x("x");
   class MyVisitor : public StmtExprVisitor {
    public:
     int count = 0;
@@ -151,9 +152,8 @@ TEST(IRF, StmtVisitor) {
   auto fmaketest = [&]() {
     auto z = x + 1;
     Stmt eval_body = Evaluate(z);
-    DataType dtype = DataType::Float(32);
-    Var data_var("b", PointerType(PrimType(dtype)));
-    Buffer buf(data_var, dtype, {z, z}, {}, PrimExpr(), "b", 0, 0, BufferType::kDefault);
+    PrimType dtype = PrimType::Float(32);
+    BufferVar buf("b", BufferType("global", dtype, {z, z}, {}, PrimExpr(), 0, 0));
     // AllocBuffer is flat (no body). Return as SeqStmt with eval.
     return SeqStmt({AllocBuffer(buf), eval_body});
   };
@@ -165,32 +165,34 @@ TEST(IRF, StmtVisitor) {
   {
     // tests for block and block_realize
     Stmt body = fmaketest();
-    DataType dtype = DataType::Float(32);
-    Var buf_var("b", PointerType(PrimType(dtype)));
-    Buffer buffer = decl_buffer({16});
-    body = SeqStmt({DeclBuffer(buffer), std::move(body)});
+    PrimType dtype = PrimType::Float(32);
+    tirx::Var buf_var("b", PointerType(dtype));
+    BufferVar buffer = decl_buffer({16});
+    body = SeqStmt({DeclBuffer(buffer, buf_var), std::move(body)});
     BufferRegion buffer_region(buffer, {Range::FromMinExtent(x + 1, 1)});
     MatchBufferRegion match_buffer_region(decl_buffer({1}), buffer_region);
 
     // construct block and block_realize
     SBlock block = SBlock({}, {buffer_region}, {buffer_region}, "block", body, body, {},
                           {match_buffer_region});
-    Stmt block_realize = SBlockRealize({}, const_true(), block);
+    Stmt block_realize = SBlockRealize({}, IntImm::Bool(true), block);
 
     v.count = 0;
     v(block_realize);
     // x visited in: reads range (1), writes range (1), match_buffers range (1),
     // init DeclBuffer(0) + AllocBuffer shape(2) + Evaluate(1) = 3,
     // body DeclBuffer(0) + AllocBuffer shape(2) + Evaluate(1) = 3.
-    // Total: 1 + 1 + 1 + 3 + 3 = 9.
-    TVM_FFI_ICHECK_EQ(v.count, 9);
+    // The block's read/write BufferTypes each visit their dependent shape once,
+    // in addition to the ranges, match buffer, init, and body.
+    // Total: 2 + 2 + 1 + 3 + 3 = 11.
+    TVM_FFI_ICHECK_EQ(v.count, 11);
   }
 }
 
 TEST(IRF, StmtMutator) {
   using namespace tvm;
   using namespace tvm::tirx;
-  Var x("x");
+  PrimVar x("x");
 
   class MyVisitor : public tirx::StmtMutator, public tirx::ExprMutator {
    public:
@@ -199,15 +201,14 @@ TEST(IRF, StmtMutator) {
 
    protected:
     // implementation
-    PrimExpr VisitExpr_(const AddNode* op) final { return op->a; }
+    Expr VisitExpr_(const AddNode* op) final { return op->a; }
     Stmt VisitStmt_(const SeqStmtNode* op) final { return StmtMutator::VisitSeqStmt_(op, true); }
-    PrimExpr VisitExpr(const PrimExpr& expr) final { return ExprMutator::VisitExpr(expr); }
+    Expr VisitExpr(const Expr& expr) final { return ExprMutator::VisitExpr(expr); }
   };
   auto fmakealloc = [&]() {
     auto z = x + 1;
-    DataType dtype = DataType::Float(32);
-    Var data_var("b", PointerType(PrimType(dtype)));
-    Buffer buf(data_var, dtype, {1, z}, {}, PrimExpr(), "b", 0, 0, BufferType::kDefault);
+    PrimType dtype = PrimType::Float(32);
+    BufferVar buf("b", BufferType("global", dtype, {1, z}, {}, PrimExpr(), 0, 0));
     return AllocBuffer(buf);
   };
 
@@ -257,7 +258,7 @@ TEST(IRF, StmtMutator) {
 
   {
     auto body =
-        Evaluate(Call(DataType::Int(32), builtin::call_extern(), {StringImm("xyz"), x + 1}));
+        Evaluate(Call(PrimType::Int(32), builtin::call_extern(), {StringImm("xyz"), x + 1}));
     auto res = v(std::move(body));
     TVM_FFI_ICHECK(res.as<EvaluateNode>()->value.as<CallNode>()->args[1].same_as(x));
   }
@@ -298,8 +299,9 @@ TEST(IRF, StmtMutator) {
     // tests for block and block_realize
     // AllocBuffer and DeclBuffer are flat (no body), placed as siblings in SeqStmt
     Stmt eval_body = Evaluate(x + 1);
-    Buffer buffer = decl_buffer({16});
-    Stmt decl = DeclBuffer(buffer);
+    BufferVar buffer = decl_buffer({16});
+    tirx::Var buffer_data("buffer_data", buffer.DataPointerType());
+    Stmt decl = DeclBuffer(buffer, buffer_data);
     Stmt alloc = fmakealloc();
     // body is: DeclBuffer, AllocBuffer, Evaluate
     Stmt body = SeqStmt({decl, alloc, eval_body});
@@ -308,7 +310,7 @@ TEST(IRF, StmtMutator) {
     // construct block and block_realize
     SBlock block = SBlock({}, {buffer_region}, {buffer_region}, "block", body, body, {},
                           {match_buffer_region});
-    Stmt block_realize = SBlockRealize({}, const_true(), block);
+    Stmt block_realize = SBlockRealize({}, IntImm::Bool(true), block);
     body = v(std::move(block_realize));
     // the body should be changed
     SBlock new_block = body.as<SBlockRealizeNode>()->block;
@@ -329,32 +331,32 @@ TEST(IRF, StmtMutator) {
 TEST(IRF, Substitute) {
   using namespace tvm;
   using namespace tvm::tirx;
-  DataType dtype = DataType::Float(32);
-  Var x("x", PointerType(PrimType(dtype), ""));
-  Var n("n", DataType::Int(32));
+  PrimType dtype = PrimType::Float(32);
+  tirx::Var x("x", PointerType(dtype, ""));
+  PrimVar n("n", PrimType::Int(32));
 
   auto fmakebuffer = [&]() {
-    return Buffer{/*data=*/x,
-                  /*dtype=*/DataType::Float(32),
-                  /*shape=*/{n},
-                  /*strides=*/{},
-                  /*elem_offset=*/NullValue<PrimExpr>(),
-                  /*name=*/"buf",
-                  /*data_alignment=*/1,
-                  /*offset_factor=*/1,
-                  /*buffer_type=*/BufferType::kDefault};
+    return BufferVar("buf", BufferType(/*storage_scope=*/"global",
+                                       /*dtype=*/PrimType::Float(32),
+                                       /*shape=*/{n},
+                                       /*strides=*/{},
+                                       /*elem_offset=*/PrimExpr(),
+                                       /*data_alignment=*/1,
+                                       /*offset_factor=*/1));
   };
 
   {
-    // test substitute buffer data var and shape var via DeclBuffer
-    Var y = x.copy_with_suffix("subst");
-    Var m("m", DataType::Int(32));
-    Buffer buffer = fmakebuffer();
-    Stmt store = BufferStore(buffer, FloatImm(dtype, 0), {IntImm(DataType::Int(32), 0)});
-    Stmt decl = SeqStmt({DeclBuffer(buffer), store});
-    auto f_subst = [&](const Var& var) -> ffi::Optional<PrimExpr> {
-      if (var.same_as(x)) return y;
-      if (var.same_as(n)) return m;
+    // Test substitution of an explicit DeclBuffer source and a dependent
+    // BufferType shape.  Changing the type creates one fresh Var identity
+    // that is shared by the declaration and every use.
+    tirx::Var y = x.CopyWithSuffix("subst");
+    PrimVar m("m", PrimType::Int(32));
+    BufferVar buffer = fmakebuffer();
+    Stmt store = BufferStore(buffer, FloatImm(dtype, 0), {IntImm::Int32(0)});
+    Stmt decl = SeqStmt({DeclBuffer(buffer, x), store});
+    auto f_subst = [&](const tirx::Var& var) -> ffi::Optional<Expr> {
+      if (var.same_as(x)) return Expr(y);
+      if (var.same_as(n)) return Expr(m);
       return std::nullopt;
     };
     Stmt new_decl = Substitute(decl, f_subst);
@@ -362,15 +364,19 @@ TEST(IRF, Substitute) {
     TVM_FFI_ICHECK(seq_node != nullptr);
     auto* decl_node = seq_node->seq[0].as<DeclBufferNode>();
     TVM_FFI_ICHECK(decl_node != nullptr);
-    TVM_FFI_ICHECK(decl_node->buffer->data.same_as(y));
+    TVM_FFI_ICHECK(decl_node->data.same_as(y));
     TVM_FFI_ICHECK(decl_node->buffer->shape[0].same_as(m));
+    TVM_FFI_ICHECK(!decl_node->buffer.same_as(buffer));
+    auto* store_node = seq_node->seq[1].as<BufferStoreNode>();
+    TVM_FFI_ICHECK(store_node != nullptr);
+    TVM_FFI_ICHECK(store_node->buffer.same_as(decl_node->buffer));
   }
 
   {
     // test identity substitution on expression
-    Buffer buffer = fmakebuffer();
-    PrimExpr expr = BufferLoad(buffer, {IntImm(DataType::Int(32), 0)});
-    auto f_subst = [&](const Var& var) -> ffi::Optional<PrimExpr> { return var; };
+    BufferVar buffer = fmakebuffer();
+    PrimExpr expr = BufferLoad(buffer, {IntImm::Int32(0)});
+    auto f_subst = [&](const tirx::Var& var) -> ffi::Optional<Expr> { return Expr(var); };
     PrimExpr new_expr = Substitute(expr, f_subst);
     // the expression is not changed
     TVM_FFI_ICHECK(new_expr.same_as(expr));

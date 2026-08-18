@@ -56,8 +56,8 @@ def test_normalize_relax_function():
 
     After = relax.transform.NormalizeGlobalVar()(Before)
 
-    assert not relax.analysis.well_formed(Before)
-    assert relax.analysis.well_formed(After)
+    assert not relax.analysis.check_well_formed(Before)
+    relax.analysis.well_formed(After)
     assert_structural_equal(After, Expected)
 
 
@@ -65,7 +65,7 @@ def test_normalize_relax_function():
 def test_normalize_tir_function():
     @I.ir_module(check_well_formed=False)
     class Before:
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def f(x: T.Buffer((1,), "int32")):
             x[0] = T.int32(0)
 
@@ -78,20 +78,20 @@ def test_normalize_tir_function():
 
     @I.ir_module
     class Expected:
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def f1(x: T.Buffer((1,), "int32")):
             x[0] = 0
 
         @R.function
         def f() -> R.Tensor((1,), dtype="int32"):
             cls = Expected
-            gv = R.call_tir(cls.f1, R.tuple(), out_sinfo=R.Tensor((1,), dtype="int32"))
+            gv = R.call_tir(cls.f1, R.tuple(), out_ty=R.Tensor((1,), dtype="int32"))
             return gv
 
     After = relax.transform.NormalizeGlobalVar()(Before)
 
-    assert not relax.analysis.well_formed(Before)
-    assert relax.analysis.well_formed(After)
+    assert not relax.analysis.check_well_formed(Before)
+    relax.analysis.well_formed(After)
     assert_structural_equal(After, Expected)
 
 

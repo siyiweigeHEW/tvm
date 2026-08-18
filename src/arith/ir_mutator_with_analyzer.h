@@ -25,11 +25,13 @@
 #define TVM_ARITH_IR_MUTATOR_WITH_ANALYZER_H_
 
 #include <tvm/arith/analyzer.h>
+#include <tvm/ffi/cast.h>
 #include <tvm/ir/scope_stack.h>
-#include <tvm/support/with.h>
+#include <tvm/ir/with_context.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/stmt_functor.h>
 
+#include <unordered_set>
 #include <utility>
 
 namespace tvm {
@@ -46,7 +48,8 @@ namespace arith {
  */
 class IRMutatorWithAnalyzer : public tirx::StmtExprMutator {
  public:
-  explicit IRMutatorWithAnalyzer(Analyzer* analyzer) : analyzer_(analyzer) {}
+  explicit IRMutatorWithAnalyzer(const Analyzer& analyzer) : analyzer_(analyzer.get()) {}
+  explicit IRMutatorWithAnalyzer(AnalyzerObj* analyzer) : analyzer_(analyzer) {}
 
   using StmtExprMutator::VisitExpr_;
   using StmtExprMutator::VisitStmt_;
@@ -59,19 +62,19 @@ class IRMutatorWithAnalyzer : public tirx::StmtExprMutator {
   tirx::Stmt VisitStmt_(const tirx::AttrStmtNode* op) override;
   tirx::Stmt VisitStmt_(const tirx::AssertStmtNode* op) override;
   tirx::Stmt VisitStmt_(const tirx::SeqStmtNode* op) override;
-  PrimExpr VisitExpr_(const tirx::LetNode* op) override;
-  PrimExpr VisitExpr_(const tirx::SelectNode* op) override;
-  PrimExpr VisitExpr_(const tirx::CallNode* op) override;
-  PrimExpr VisitExpr_(const tirx::ReduceNode* op) override;
+  Expr VisitExpr_(const tirx::LetNode* op) override;
+  Expr VisitExpr_(const tirx::SelectNode* op) override;
+  Expr VisitExpr_(const CallNode* op) override;
+  Expr VisitExpr_(const tirx::ReduceNode* op) override;
 
  protected:
   /*!
-   * \brief Mark the all the buffer shape values in the buffer map as positive value.
+   * \brief Mark all buffer-parameter shape values as positive values.
    *
    * \note call this function before Visit function's body to maximize
    *       simplification efficiency
    */
-  void MarkBufferMapShapes(const tirx::PrimFunc& func);
+  void MarkBufferParamShapes(const tirx::PrimFunc& func);
 
   /*!
    * \brief Use internal bound information to perform inter map simplification of indices.
@@ -81,7 +84,7 @@ class IRMutatorWithAnalyzer : public tirx::StmtExprMutator {
                                                   bool non_trivial_only);
 
   /*! \brief internal analyzer field. */
-  Analyzer* analyzer_;
+  AnalyzerObj* analyzer_;
   /*! \brief Scope stack for accumulated assert constraints. */
   ScopeStack<WithGroup<ConstraintContext>> constraint_scope_;
   // the following two fields are useful in case we want
@@ -89,7 +92,7 @@ class IRMutatorWithAnalyzer : public tirx::StmtExprMutator {
   // expensive and we only encourage doing them during
   // necessary cases like layout remapping
   /*! \brief Recorded loop iterators */
-  ffi::Map<Var, Range> iter_vars_;
+  ffi::Map<tirx::PrimVar, Range> iter_vars_;
   /*! \brief iterator predicates */
   ffi::Array<PrimExpr> iter_predicates_;
   /*!
@@ -99,8 +102,12 @@ class IRMutatorWithAnalyzer : public tirx::StmtExprMutator {
    */
   template <typename FLambda>
   void WithRecordIterPredicate(PrimExpr condition, FLambda callback) {
-    auto f_use_itervar = [this](const tirx::VarNode* v) {
-      return iter_vars_.count(ffi::GetRef<tirx::Var>(v));
+    std::unordered_set<const tirx::VarNode*> iter_var_nodes;
+    for (const auto& [var, _] : iter_vars_) {
+      iter_var_nodes.insert(var.get());
+    }
+    auto f_use_itervar = [&iter_var_nodes](const tirx::VarNode* v) {
+      return iter_var_nodes.count(v);
     };
     // simple heuristics for detecting predicate
     if (tirx::UsesVar(condition, f_use_itervar)) {

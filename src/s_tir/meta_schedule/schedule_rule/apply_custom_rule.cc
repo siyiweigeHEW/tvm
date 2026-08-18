@@ -17,6 +17,7 @@
  * under the License.
  */
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/runtime/logging.h>
 
 #include "../utils.h"
 
@@ -28,7 +29,7 @@ class ApplyCustomRuleNode : public ScheduleRuleNode {
  public:
   // Inherited from ScheduleRuleNode
   void InitializeWithTuneContext(const TuneContext& context) final {
-    TVM_FFI_CHECK(context->target.defined(), ValueError)
+    TVM_FFI_CHECK(context->target.has_value(), ValueError)
         << "Target is not defined in the tune context.";
     this->target_ = context->target;
   }
@@ -40,7 +41,7 @@ class ApplyCustomRuleNode : public ScheduleRuleNode {
   // Inherited from ScheduleRuleNode
   ffi::Array<s_tir::Schedule> Apply(const s_tir::Schedule& sch,
                                     const s_tir::SBlockRV& block_rv) final {
-    TVM_FFI_CHECK(this->target_.defined(), ValueError)
+    TVM_FFI_CHECK(this->target_.has_value(), ValueError)
         << "ApplyCustomRule is not initialized with TuneContext that has a Target.";
     ffi::Array<ffi::String> keys = this->target_.value()->keys;
     if (ffi::Optional<ffi::String> ann =
@@ -69,7 +70,7 @@ class ApplyCustomRuleNode : public ScheduleRuleNode {
 
   // Inherited from ScheduleRuleNode
   ScheduleRule Clone() const final {
-    ObjectPtr<ApplyCustomRuleNode> n = ffi::make_object<ApplyCustomRuleNode>(*this);
+    ffi::ObjectPtr<ApplyCustomRuleNode> n = ffi::make_object<ApplyCustomRuleNode>(*this);
     n->target_ = target_;
     return ScheduleRule(n);
   }
@@ -86,7 +87,7 @@ class ApplyCustomRuleNode : public ScheduleRuleNode {
 };
 
 ScheduleRule ScheduleRule::ApplyCustomRule() {
-  ObjectPtr<ApplyCustomRuleNode> n = ffi::make_object<ApplyCustomRuleNode>();
+  ffi::ObjectPtr<ApplyCustomRuleNode> n = ffi::make_object<ApplyCustomRuleNode>();
   return ScheduleRule(n);
 }
 

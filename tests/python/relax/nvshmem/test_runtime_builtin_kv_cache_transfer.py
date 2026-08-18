@@ -16,13 +16,19 @@
 # under the License.
 # ruff: noqa: E501, E741, F401
 import enum
+import functools
 import itertools
 from typing import Optional, Union
 
 import numpy as np
 import pytest
+
+pytest.importorskip("scipy")
+
 import scipy.special
 import torch
+import tvm_ffi
+from tvm_ffi import Shape
 
 import tvm
 import tvm.testing
@@ -41,7 +47,6 @@ from tvm.relax.frontend.nn.llm.kv_cache import (
     tree_attn,
     tree_attn_with_paged_kv_cache,
 )
-from tvm.runtime import ShapeTuple
 from tvm.s_tir import dlight as dl
 
 
@@ -72,7 +77,7 @@ rope_theta = 1e4
 rope_scaling = {}
 dtype = None
 dtype_torch = None
-device = tvm.cuda(rank)
+device = None
 device_torch = torch.device(f"cuda:{rank}")
 
 fclear = None
@@ -108,7 +113,7 @@ fcopy_single_page = None
 fcompact_copy = None
 
 
-def set_global_func(head_dim, dtype):
+def set_global_func(head_dim, dtype, target):
     global fclear, fadd_sequence, fremove_sequence, ffork_sequence, fenable_sliding_window_for_seq
     global fpopn, fbegin_forward, fend_forward, fcommit_accepted_token_tree_nodes
     global fattention_with_fuse_qkv, fis_empty, fdebug_get_kv
@@ -145,7 +150,6 @@ def set_global_func(head_dim, dtype):
     fdisagg_mark_send = tvm.get_global_func("vm.builtin.kv_cache_disagg_mark_send")
     fdisagg_prepare_recv = tvm.get_global_func("vm.builtin.kv_cache_disagg_prepare_recv")
 
-    target = tvm.target.Target.from_device(device)
     builts = []
     for tir_func in [
         _kv_cache_transpose_append(num_kv_heads, head_dim, dtype),
@@ -196,7 +200,7 @@ def set_global_func(head_dim, dtype):
 def create_kv_cache(head_dim, dtype, rope_mode, support_sliding_window):
     fcreate = tvm.get_global_func("vm.builtin.paged_attention_kv_cache_create")
     cache = fcreate(
-        tvm.runtime.ShapeTuple(
+        tvm_ffi.Shape(
             [
                 reserved_nseq,
                 maximum_total_seq_length,
@@ -205,12 +209,12 @@ def create_kv_cache(head_dim, dtype, rope_mode, support_sliding_window):
                 int(support_sliding_window),
             ]
         ),
-        tvm.runtime.ShapeTuple([0, num_layers]),
+        tvm_ffi.Shape([0, num_layers]),
         num_qo_heads,
         num_kv_heads,
         head_dim,
         head_dim,  # v_head_dim
-        tvm.runtime.ShapeTuple([int(AttnKind.MHA) for _ in range(num_layers)]),
+        tvm_ffi.Shape([int(AttnKind.MHA) for _ in range(num_layers)]),
         False,  # enable_kv_transfer
         rope_mode,
         rope_scale,
@@ -256,8 +260,42 @@ def kv_cache_and_config(request):
     global head_dim, sm_scale, dtype
     head_dim, dtype, rope_mode, support_sliding_window = request.param
     sm_scale = head_dim ** (-0.5)
-    set_global_func(head_dim, dtype)
-    return create_kv_cache(*request.param), rope_mode, support_sliding_window
+    target = tvm.testing.run_with_gpu_lock(_get_cuda_target)
+    set_global_func(head_dim, dtype, target)
+    return request.param
+
+
+def _get_cuda_target():
+    return tvm.target.Target.from_device(tvm.cuda(rank))
+
+
+def _run_with_kv_cache(test):
+    @functools.wraps(test)
+    def wrapper(kv_cache_and_config):
+        def run_device_session():
+            global device
+            device = tvm.cuda(rank)
+            head_dim, dtype, rope_mode, support_sliding_window = kv_cache_and_config
+            try:
+                cache = create_kv_cache(head_dim, dtype, rope_mode, support_sliding_window)
+                return test((cache, rope_mode, support_sliding_window))
+            finally:
+                device = None
+
+        def run_and_check():
+            if comm is None:
+                return run_device_session()
+            comm.Barrier()
+            try:
+                return run_device_session()
+            finally:
+                comm.Barrier()
+
+        if comm is None or rank == 0:
+            return tvm.testing.run_with_gpu_lock(run_and_check)
+        return run_and_check()
+
+    return wrapper
 
 
 def verify_cached_kv(kv_cache, seq_ids, expected_k, expected_v):
@@ -373,10 +411,10 @@ def apply_attention(
     if not only_update_host:
         fbegin_forward(
             kv_cache,
-            ShapeTuple(seq_ids),
-            ShapeTuple(append_lengths),
+            Shape(seq_ids),
+            Shape(append_lengths),
             (
-                ShapeTuple(flattened_token_tree_parent_ptr)
+                Shape(flattened_token_tree_parent_ptr)
                 if flattened_token_tree_parent_ptr is not None
                 else None
             ),
@@ -569,7 +607,7 @@ def apply_attention(
         seq_ids = [seq_id for seq_id, _ in batch]
         if not only_update_host:
             fcommit_accepted_token_tree_nodes(
-                kv_cache, ShapeTuple(seq_ids), ShapeTuple(accepted_leaf_indices)
+                kv_cache, Shape(seq_ids), Shape(accepted_leaf_indices)
             )
         for i, (accepted_leaf_idx, (seq_id, append_length)) in enumerate(
             zip(accepted_leaf_indices, batch)
@@ -627,6 +665,7 @@ def apply_attention(
 
 
 @pytest.mark.skip(reason="Require NVSHMEM")
+@_run_with_kv_cache
 def test_paged_attention_kv_cache_prefill_and_decode(kv_cache_and_config):
     kv_cache, rope_mode, support_sliding_window = kv_cache_and_config
     if support_sliding_window and rope_mode == RopeMode.NORMAL:
@@ -651,6 +690,7 @@ def test_paged_attention_kv_cache_prefill_and_decode(kv_cache_and_config):
 
 
 @pytest.mark.skip(reason="Require NVSHMEM")
+@_run_with_kv_cache
 def test_paged_attention_kv_cache_transfer(kv_cache_and_config):
     kv_cache, rope_mode, support_sliding_window = kv_cache_and_config
     if support_sliding_window:
@@ -685,7 +725,7 @@ def test_paged_attention_kv_cache_transfer(kv_cache_and_config):
         remote_pos_maps = comm.bcast(remote_pos_maps, root=1)
         comm.Barrier()
         for seq_id in prefill_len.keys():
-            fdisagg_mark_send(kv_cache, seq_id, 0, ShapeTuple(remote_pos_maps[seq_id]), 1)
+            fdisagg_mark_send(kv_cache, seq_id, 0, Shape(remote_pos_maps[seq_id]), 1)
         for batch in prefill_operation_seq:
             apply_attention(kv_cache, rope_mode, batch, cached_k, cached_v, skip_add_sequence=True)
         device.sync()
@@ -725,17 +765,4 @@ def init_nvshmem(num_workers, pe_offset):
 
 
 if __name__ == "__main__":
-    # To run this test, install mpi4py first, and then run
-    # mpirun -np 2 python tests/python/relax/nvshmem/test_runtime_builtin_kv_cache_transfer.py
-    HEAD_DIMS = [128]
-    DTYPES = ["float16"]
-    ROPE_MODES = [RopeMode.NONE]
-    SUPPORT_SLIDING_WINDOW = [False]
-    init_nvshmem(2, rank)
-    for head_dim, dtype, rope_mode, support_sliding_window in itertools.product(
-        HEAD_DIMS, DTYPES, ROPE_MODES, SUPPORT_SLIDING_WINDOW
-    ):
-        set_global_func(head_dim, dtype)
-        cache = create_kv_cache(head_dim, dtype, rope_mode, support_sliding_window)
-        cache_and_config = (cache, rope_mode, support_sliding_window)
-        test_paged_attention_kv_cache_transfer(cache_and_config)
+    tvm.testing.main()

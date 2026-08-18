@@ -20,11 +20,11 @@
 #define TVM_S_TIR_META_SCHEDULE_UTILS_H_
 
 #include <tvm/arith/analyzer.h>
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/extra/json.h>
 #include <tvm/ffi/extra/serialization.h>
 #include <tvm/ffi/optional.h>
-#include <tvm/node/cast.h>
-#include <tvm/runtime/object.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/s_tir/meta_schedule/arg_info.h>
 #include <tvm/s_tir/meta_schedule/builder.h>
 #include <tvm/s_tir/meta_schedule/cost_model.h>
@@ -41,7 +41,6 @@
 #include <tvm/s_tir/meta_schedule/tune_context.h>
 #include <tvm/s_tir/schedule/schedule.h>
 #include <tvm/support/io.h>
-#include <tvm/support/parallel_for.h>
 #include <tvm/support/serializer.h>
 #include <tvm/tirx/transform.h>
 
@@ -52,14 +51,15 @@
 #include <utility>
 #include <vector>
 
-#include "../../support/array.h"
 #include "../../support/base64.h"
 #include "../../support/bytes_io.h"
-#include "../../support/nd_int_set.h"
-#include "../../support/table_printer.h"
 #include "../../support/utils.h"
 #include "../schedule/primitive.h"
 #include "../schedule/utils.h"
+#include "../support/array_utils.h"
+#include "../support/nd_int_set.h"
+#include "../support/parallel_for.h"
+#include "../support/table_printer.h"
 
 #define TVM_PY_LOG(logging_level, logger)                                       \
   ::tvm::s_tir::meta_schedule::PyLogMessage(__FILE__, __LINE__, logger,         \
@@ -91,7 +91,7 @@ class PyLogMessage {
   explicit PyLogMessage(const char* filename, int lineno, ffi::Function logger, Level logging_level)
       : filename_(filename), lineno_(lineno), logger_(logger), logging_level_(logging_level) {}
 
-  TVM_NO_INLINE ~PyLogMessage() {
+  TVM_FFI_NO_INLINE ~PyLogMessage() {
     TVM_FFI_ICHECK(logging_level_ != Level::CLEAR)
         << "Cannot use CLEAR as logging level in TVM_PY_LOG, please use TVM_PY_LOG_CLEAR_SCREEN.";
     if (this->logger_ != nullptr) {
@@ -170,7 +170,7 @@ inline void clear_logging(const char* file, int lineno, ffi::Function logging_fu
 }
 
 /*! \brief The type of the random state */
-using TRandState = support::LinearCongruentialEngine::TRandState;
+using TRandState = LinearCongruentialEngine::TRandState;
 
 /*!
  * \brief Get the base64 encoded result of a string.
@@ -226,7 +226,7 @@ inline ffi::String SHash2Str(Workload::THashCode hash_code) { return std::to_str
  * \param obj The TVM object.
  * \return The hex string representation of the hash code.
  */
-inline ffi::String SHash2Hex(const ObjectRef& obj) {
+inline ffi::String SHash2Hex(const ffi::ObjectRef& obj) {
   std::ostringstream os;
   size_t hash_code = 0;
   if (obj.defined()) {
@@ -242,9 +242,9 @@ inline ffi::String SHash2Hex(const ObjectRef& obj) {
  * \param rand_state The random state to be forked
  * \return The forked random state
  */
-inline support::LinearCongruentialEngine::TRandState ForkSeed(
-    support::LinearCongruentialEngine::TRandState* rand_state) {
-  return support::LinearCongruentialEngine(rand_state).ForkSeed();
+inline LinearCongruentialEngine::TRandState ForkSeed(
+    LinearCongruentialEngine::TRandState* rand_state) {
+  return LinearCongruentialEngine(rand_state).ForkSeed();
 }
 
 /*!
@@ -254,12 +254,12 @@ inline support::LinearCongruentialEngine::TRandState ForkSeed(
  * \param n The number of forks
  * \return The forked random states
  */
-inline std::vector<support::LinearCongruentialEngine::TRandState> ForkSeed(
-    support::LinearCongruentialEngine::TRandState* rand_state, int n) {
-  std::vector<support::LinearCongruentialEngine::TRandState> results;
+inline std::vector<LinearCongruentialEngine::TRandState> ForkSeed(
+    LinearCongruentialEngine::TRandState* rand_state, int n) {
+  std::vector<LinearCongruentialEngine::TRandState> results;
   results.reserve(n);
   for (int i = 0; i < n; ++i) {
-    results.push_back(support::LinearCongruentialEngine(rand_state).ForkSeed());
+    results.push_back(LinearCongruentialEngine(rand_state).ForkSeed());
   }
   return results;
 }
@@ -330,14 +330,24 @@ struct ThreadedTraceApply {
    */
   ffi::Optional<s_tir::Schedule> Apply(const IRModule& mod, const s_tir::Trace& trace,
                                        TRandState* rand_state) {
-    s_tir::Schedule sch =
-        s_tir::Schedule::Traced(mod,
-                                /*rand_state=*/ForkSeed(rand_state),
-                                /*debug_mode=*/0,
-                                /*error_render_level=*/s_tir::ScheduleErrorRenderLevel::kNone);
-
-    trace->ApplyToSchedule(sch, /*remove_postproc=*/true);
-    sch->EnterPostproc();
+    s_tir::Schedule sch{nullptr};
+    try {
+      sch = s_tir::Schedule::Traced(mod,
+                                    /*rand_state=*/ForkSeed(rand_state),
+                                    /*debug_mode=*/0,
+                                    /*error_render_level=*/
+                                    s_tir::ScheduleErrorRenderLevel::kNone);
+      trace->ApplyToSchedule(sch, /*remove_postproc=*/true);
+      sch->EnterPostproc();
+    } catch (const s_tir::ScheduleError& e) {
+      TVM_PY_LOG(WARNING, nullptr) << "Trace replay failed with ScheduleError: " << e.what();
+      this->trace_fail_counter_++;
+      return std::nullopt;
+    } catch (const std::exception& e) {
+      TVM_PY_LOG(WARNING, nullptr) << "Trace replay failed with exception: " << e.what();
+      this->trace_fail_counter_++;
+      return std::nullopt;
+    }
 
     for (int i = 0; i < n_; ++i) {
       Item& item = items_[i];
@@ -364,6 +374,10 @@ struct ThreadedTraceApply {
   /*! \brief Returns a string summarizing the failures on each postprocessor */
   std::string SummarizeFailures() const {
     std::ostringstream os;
+    os << "Trace replay failures: " << this->trace_fail_counter_.load() << " failure(s)";
+    if (n_ > 0) {
+      os << "\n";
+    }
     for (int i = 0; i < n_; ++i) {
       const Item& item = items_[i];
       os << "Postproc #" << i << " [" << item.postproc  //
@@ -374,6 +388,9 @@ struct ThreadedTraceApply {
     }
     return os.str();
   }
+
+  /*! \brief Returns the number of trace replay failures. */
+  int TraceFailCount() const { return this->trace_fail_counter_.load(); }
 
  private:
   /*! \brief A helper data structure that stores the fail count for each postprocessor. */
@@ -386,6 +403,8 @@ struct ThreadedTraceApply {
 
   /*! \brief The number of total postprocessors. */
   int n_;
+  /*! \brief The thread-safe trace replay failure counter. */
+  std::atomic<int> trace_fail_counter_{0};
   /*! \brief The pointer to the list of postprocessor items. */
   Item* items_;
 };
@@ -396,7 +415,7 @@ struct ThreadedTraceApply {
  * \return The number of cores.
  */
 inline int GetTargetNumCores(const Target& target) {
-  int num_cores = target->GetAttr<Integer>("num-cores").value_or(-1).IntValue();
+  int num_cores = target->GetAttr<int64_t>("num-cores").value_or(-1);
   if (num_cores == -1) {
     static const auto f_cpu_count = tvm::ffi::Function::GetGlobal("s_tir.meta_schedule.cpu_count");
     TVM_FFI_CHECK(f_cpu_count.has_value(), ValueError)
@@ -436,7 +455,7 @@ inline double GetRunMsMedian(const RunnerResult& runner_result) {
  * \param obj The object to be converted
  * \return The array of floating point numbers
  */
-inline ffi::Array<FloatImm> AsFloatArray(const ObjectRef& obj) {
+inline ffi::Array<FloatImm> AsFloatArray(const ffi::ObjectRef& obj) {
   const ffi::ArrayObj* arr = obj.as<ffi::ArrayObj>();
   TVM_FFI_CHECK(arr, TypeError) << "Expect an array, but gets: " << obj->GetTypeKey();
   ffi::Array<FloatImm> results;
@@ -444,7 +463,7 @@ inline ffi::Array<FloatImm> AsFloatArray(const ObjectRef& obj) {
   for (Any val : *arr) {
     auto float_value = [&]() -> FloatImm {
       if (auto opt_int_imm = val.try_cast<IntImm>()) {
-        return FloatImm(DataType::Float(32), (*opt_int_imm)->value);
+        return FloatImm(PrimType::Float(32), (*opt_int_imm)->value);
       } else if (auto opt_float_imm = val.try_cast<FloatImm>()) {
         return *std::move(opt_float_imm);
       } else {
@@ -464,10 +483,10 @@ inline ffi::Array<FloatImm> AsFloatArray(const ObjectRef& obj) {
  * \param obj The object to be converted
  * \return The array of integers
  */
-inline ffi::Array<Integer> AsIntArray(const ObjectRef& obj) {
+inline ffi::Array<int64_t> AsIntArray(const ffi::ObjectRef& obj) {
   const ffi::ArrayObj* arr = obj.as<ffi::ArrayObj>();
   TVM_FFI_CHECK(arr, TypeError) << "Expect an array, but gets: " << obj->GetTypeKey();
-  ffi::Array<Integer> results;
+  ffi::Array<int64_t> results;
   results.reserve(arr->size());
   for (Any val : *arr) {
     auto int_value = [&]() -> int64_t {
@@ -478,7 +497,7 @@ inline ffi::Array<Integer> AsIntArray(const ObjectRef& obj) {
         TVM_FFI_UNREACHABLE();
       }
     }();
-    results.push_back(Integer(int_value));
+    results.push_back(int_value);
   }
   return results;
 }
@@ -511,7 +530,7 @@ struct SortTuningRecordByMeanRunSecs {
  * \param dst The destination space generator.
  */
 inline void CloneRules(const SpaceGeneratorNode* src, SpaceGeneratorNode* dst) {
-  if (src->sch_rules.defined()) {
+  if (src->sch_rules.has_value()) {
     ffi::Array<ScheduleRule> original = src->sch_rules.value();
     ffi::Array<ScheduleRule> sch_rules;
     sch_rules.reserve(original.size());
@@ -520,7 +539,7 @@ inline void CloneRules(const SpaceGeneratorNode* src, SpaceGeneratorNode* dst) {
     }
     dst->sch_rules = std::move(sch_rules);
   }
-  if (src->postprocs.defined()) {
+  if (src->postprocs.has_value()) {
     ffi::Array<Postproc> original = src->postprocs.value();
     ffi::Array<Postproc> postprocs;
     postprocs.reserve(original.size());
@@ -529,7 +548,7 @@ inline void CloneRules(const SpaceGeneratorNode* src, SpaceGeneratorNode* dst) {
     }
     dst->postprocs = std::move(postprocs);
   }
-  if (src->mutator_probs.defined()) {
+  if (src->mutator_probs.has_value()) {
     ffi::Map<Mutator, FloatImm> original = src->mutator_probs.value();
     ffi::Map<Mutator, FloatImm> mutator_probs;
     for (const auto& kv : original) {
@@ -607,9 +626,9 @@ class SBlockCollector : public tirx::StmtVisitor {
       }
     };
 
-    if (sch_->func_working_on().defined()) {
+    if (sch_->func_working_on().has_value()) {
       GlobalVar gv = sch_->func_working_on().value();
-      tirx::PrimFunc func = Downcast<tirx::PrimFunc>(sch_->mod()->functions[gv]);
+      tirx::PrimFunc func = sch_->mod()->functions[gv].as_or_throw<tirx::PrimFunc>();
       f_collect(func, gv->name_hint);
     } else {
       for (const auto& [gv, base_func] : sch_->mod()->functions) {
@@ -635,9 +654,9 @@ class SBlockCollector : public tirx::StmtVisitor {
 
     // If filter function is provided, use it to selectively collect blocks.
     // Otherwise collect all blocks.
-    Bool collect_block = Bool(true);
+    bool collect_block = true;
     if (f_block_filter_ != nullptr) {
-      collect_block = f_block_filter_(ffi::GetRef<tirx::SBlock>(block)).cast<Bool>();
+      collect_block = f_block_filter_(ffi::GetRef<tirx::SBlock>(block)).cast<IntImm>()->value != 0;
     }
     if (collect_block) {
       blocks_to_collect_.push_back(block->name_hint);

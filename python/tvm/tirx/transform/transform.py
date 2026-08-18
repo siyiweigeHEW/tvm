@@ -20,8 +20,8 @@
 import enum
 from collections.abc import Callable
 
-from ... import ffi as _ffi
-from ... import ir as _ir
+import tvm_ffi as _ffi
+
 from . import _ffi_api
 from . import function_pass as _fpass
 
@@ -107,7 +107,7 @@ def PointerValueTypeRewrite():
 
 
 @_ffi.register_object("tirx.transform.UnrollLoopConfig")
-class UnrollLoopConfig(_ir.Attrs):
+class UnrollLoopConfig(_ffi.Object):
     """Config for unroll loop pass"""
 
 
@@ -125,7 +125,7 @@ def UnrollLoop():
 
 
 @_ffi.register_object("tirx.transform.RemoveNoOpConfig")
-class RemoveNoOpConfig(_ir.Attrs):
+class RemoveNoOpConfig(_ffi.Object):
     """Config for remove no op pass"""
 
 
@@ -211,20 +211,20 @@ def CommonSubexprElim():
     return _ffi_api.CommonSubexprElim()  # type: ignore
 
 
-@_ffi.register_object("tirx.transform.SimplifyConfig")
-class SimplifyConfig(_ir.Attrs):
-    """Config for simplify pass"""
+@_ffi.register_object("tirx.transform.StmtSimplifyConfig")
+class StmtSimplifyConfig(_ffi.Object):
+    """Config for stmt simplify pass"""
 
 
-def Simplify():
-    """Run arithmetic simplifications on the statements and expressions.
+def StmtSimplify():
+    """Run statement-level arithmetic simplifications on the TIR PrimFunc.
 
     Returns
     -------
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.Simplify()  # type: ignore
+    return _ffi_api.StmtSimplify()  # type: ignore
 
 
 def ConvertSSA():
@@ -245,41 +245,27 @@ def ConvertSSA():
     return _ffi_api.ConvertSSA()  # type: ignore
 
 
-def LowerCustomDatatypes():
-    """Lower custom datatypes.
-
-    See tvm::datatypes::Registry for more information on adding custom datatypes.
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.LowerCustomDatatypes()  # type: ignore
-
-
 def MakePackedAPI():
     """Transform the PrimFuncs in the module to a packed func API.
 
-    Prior to this pass, the PrimFunc may have Buffer arguments defined
-    in the `PrimFuncNode::buffer_map`.  This pass consumes the
-    `buffer_map`, using it to generate arguments that implement
-    the packed based TVM FFI API.
+    Prior to this pass, the PrimFunc may have parameters annotated with
+    `BufferType`.  This pass consumes those annotations to generate
+    arguments that implement the packed based TVM FFI API.
 
-    For static shapes, the `BufferNode::shape`, `BufferNode::strides`,
-    and `BufferNode::elem_offset` member variables are used to
+    For static shapes, the `BufferType::shape`, `BufferType::strides`,
+    and `BufferType::elem_offset` fields are used to
     generate runtime checks on the corresponding member variables in
     the user-provided `DLTensor*` or `tvm.runtime.tensor` argument.  (e.g. A
     PrimFunc that accepts a buffer of shape `[16,32]` validates that
     the `DLTensor::shape` array is `[16,32]`.)
 
-    For dynamic Buffers, in which one or more of these `BufferNode` member
-    variables use `tirx.Var` that are not defined by other PrimFunc
+    For dynamic Buffers, in which one or more of these `BufferType` fields
+    use `tirx.Var` that are not defined by other PrimFunc
     parameters, these are instead used to define the variables based on
     the corresponding `DLTensor` members.  (e.g. A PrimFunc that accepts a
-    buffer of shape `[tirx.Var("n"), tirx.Var("m")]`, when passed a
-    `DLTensor` of shape `[16,32]`, will define `n = 16` and `n=32`, based
-    on the argument's shape.
+    buffer of shape `[tirx.Var("n", "int64"), tirx.Var("m", "int64")]`,
+    when passed a `DLTensor` of shape `[16, 32]`, will define `n = 16` and
+    `m = 32`, based on the argument's shape.
 
     Returns
     -------
@@ -289,24 +275,12 @@ def MakePackedAPI():
     return _ffi_api.MakePackedAPI()  # type: ignore
 
 
-def AnnotateDeviceRegions():
-    """Annotate locations that should be run on the device
-
-    Insert `AttrStmt` nodes specifying a target on which regions
-    within the PrimFunc should be executed.  Only modifies functions
-    that have a `tvm::attr::kTarget` attribute, and where that target
-    defines a host.
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.AnnotateDeviceRegions()  # type: ignore
-
-
 def SplitHostDevice():
-    """Split the function into a host function and device functions.
+    """Annotate, split, and lower host/device functions.
+
+    This pass first annotates device regions within host functions,
+    then splits them into host and device-side PrimFuncs, and finally
+    lowers host-to-device calls into the device kernel launch ABI.
 
     Returns
     -------
@@ -314,28 +288,6 @@ def SplitHostDevice():
         The result pass
     """
     return _ffi_api.SplitHostDevice()  # type: ignore
-
-
-def LowerDeviceKernelLaunch():
-    """Lower cross-device function calls.
-
-    Prior to this pass, host to device calls are represented as
-    subroutine calls, with environment parameters (e.g. env_thread)
-    specified internally.  The device function is an internal
-    function, without a `tvm::attr::kGlobalSymbol` attribute.
-
-    After this pass, host to device calls are represented as
-    tvm_call_packed built-in.  The device function is an
-    externally-exposed function, with a non-empty
-    `tvm::attr::kGlobalSymbol` attribute.
-
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.LowerDeviceKernelLaunch()  # type: ignore
 
 
 def SkipAssert():
@@ -383,7 +335,7 @@ def LowerIntrin():
 
 
 def NarrowDataType(target_bits: int):
-    """Narrow down PrimExpr datatype in stmt to target_bits.
+    """Narrow down Expr datatype in stmt to target_bits.
 
     Parameters
     ----------
@@ -429,7 +381,7 @@ def VerifyMemory():
 
 
 @_ffi.register_object("s_tir.transform.HoistIfThenElseConfig")
-class HoistIfThenElseConfig(_ir.Attrs):
+class HoistIfThenElseConfig(_ffi.Object):
     """Config for hoist if then else pass"""
 
 
@@ -483,7 +435,7 @@ class HoistedLetBindings(enum.Flag):
 
 
 @_ffi.register_object("s_tir.transform.HoistExpressionConfig")
-class HoistExpressionConfig(_ir.Attrs):
+class HoistExpressionConfig(_ffi.Object):
     """Config for hoist expression pass"""
 
 
@@ -535,3 +487,41 @@ def Filter(fcond: Callable):
         The result pass
     """
     return _ffi_api.Filter(fcond)  # type: ignore
+
+
+def TilePrimitiveDispatch():
+    """Lower TIRx tile primitive calls through the active backend dispatch table.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.TilePrimitiveDispatch()  # type: ignore
+
+
+def LowerTIRx():
+    """Lower TIR to a lower-level IR.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.LowerTIRx()  # type: ignore
+
+
+def LowerTIRxOpaque():
+    """Lower opaque constructs in TIRX programs.
+
+    Handles AllocBuffer lowering, For(thread_binding) to AttrStmt(thread_extent)
+    conversion, unit loop elimination, and pragma annotation handling.
+    This is the tirx-specific counterpart of s_tir.LowerOpaqueBlock,
+    without any SBlock/SBlockRealize handling.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.LowerTIRxOpaque()  # type: ignore

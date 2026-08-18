@@ -32,7 +32,7 @@ namespace meta_schedule {
 ffi::Map<ffi::String, FloatImm> ProfilerNode::Get() const {
   ffi::Map<ffi::String, FloatImm> ret;
   for (const auto& kv : stats_sec) {
-    ret.Set(kv.first, FloatImm(DataType::Float(64), kv.second));
+    ret.Set(kv.first, FloatImm(PrimType::Float(64), kv.second));
   }
   return ret;
 }
@@ -73,7 +73,7 @@ ffi::String ProfilerNode::Table() const {
 }
 
 Profiler::Profiler() {
-  ObjectPtr<ProfilerNode> n = ffi::make_object<ProfilerNode>();
+  ffi::ObjectPtr<ProfilerNode> n = ffi::make_object<ProfilerNode>();
   n->stats_sec.clear();
   n->total_timer = nullptr;
   data_ = n;

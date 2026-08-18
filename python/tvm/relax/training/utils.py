@@ -23,9 +23,10 @@ from tvm_ffi import register_global_func
 
 import tvm
 from tvm import relax
+from tvm.ir import Call
 from tvm.relax.block_builder import BlockBuilder
 
-from ..expr import Call, Function, Var
+from ..expr import Function, Var
 from . import _ffi_api
 
 
@@ -46,6 +47,7 @@ def AppendLoss(
     They should be like:
 
     .. code-block:: python
+
         @R.function
         def backbone(input_instances, parameters, states):
             with R.dataflow():
@@ -72,6 +74,7 @@ def AppendLoss(
     loss. It will be like:
 
     .. code-block:: python
+
         @R.function
         def backbone_loss(input_instances, parameters, states, targets):
             with R.dataflow():
@@ -102,6 +105,7 @@ def AppendLoss(
     Examples
     --------
     .. code-block:: python
+
         @I.ir_module
         class Module
             @R.function
@@ -126,6 +130,7 @@ def AppendLoss(
     Will get
 
     .. code-block:: python
+
         @I.ir_module
         class Module
             @R.function

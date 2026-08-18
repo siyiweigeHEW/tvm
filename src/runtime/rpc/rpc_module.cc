@@ -21,11 +21,13 @@
  * \file rpc_module.cc
  * \brief RPC runtime module.
  */
+#include <tvm/ffi/cast.h>
+#include <tvm/ffi/container/tensor.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ffi/string.h>
 #include <tvm/runtime/device_api.h>
-#include <tvm/runtime/profiling.h>
+#include <tvm/runtime/timer.h>
 
 #include <chrono>
 #include <cstring>
@@ -66,7 +68,7 @@ Tensor TensorFromRemoteOpaqueHandle(std::shared_ptr<RPCSession> sess, void* hand
       if (space_.object_handle != nullptr) {
         try {
           space_.sess->FreeHandle(space_.object_handle);
-        } catch (const Error& e) {
+        } catch (const ffi::Error& e) {
           // fault tolerance to remote close
         }
       }
@@ -86,7 +88,7 @@ Tensor TensorFromRemoteOpaqueHandle(std::shared_ptr<RPCSession> sess, void* hand
 /*!
  * \brief A wrapped remote function as a ffi::Function.
  */
-class RPCWrappedFunc : public Object {
+class RPCWrappedFunc : public ffi::Object {
  public:
   RPCWrappedFunc(void* handle, std::shared_ptr<RPCSession> sess) : handle_(handle), sess_(sess) {}
 
@@ -153,7 +155,7 @@ class RPCWrappedFunc : public Object {
   ~RPCWrappedFunc() {
     try {
       sess_->FreeHandle(handle_);
-    } catch (const Error& e) {
+    } catch (const ffi::Error& e) {
       // fault tolerance to remote close
     }
   }
@@ -188,7 +190,7 @@ class RPCModuleNode final : public ffi::ModuleObj {
     if (module_handle_ != nullptr) {
       try {
         sess_->FreeHandle(module_handle_);
-      } catch (const Error& e) {
+      } catch (const ffi::Error& e) {
         // fault tolerance to remote close
       }
       module_handle_ = nullptr;
@@ -332,7 +334,7 @@ void RPCWrappedFunc::WrapRemoteReturnToValue(ffi::PackedArgs args, ffi::Any* rv)
     TVM_FFI_ICHECK_EQ(args.size(), 2);
     void* handle = args[1].cast<void*>();
     auto n = ffi::make_object<RPCObjectRefObj>(handle, sess_);
-    *rv = ObjectRef(n);
+    *rv = ffi::ObjectRef(n);
   } else {
     TVM_FFI_ICHECK_EQ(args.size(), 2);
     *rv = args[1];
@@ -398,7 +400,7 @@ inline void CPUCacheFlushImpl(const char* addr, unsigned int len) {
 inline void CPUCacheFlush(int begin_index, const ffi::PackedArgs& args) {
   for (int i = begin_index; i < args.size(); i++) {
     CPUCacheFlushImpl(static_cast<char*>((args[i].cast<DLTensor*>()->data)),
-                      GetDataSize(*(args[i].cast<DLTensor*>())));
+                      ffi::GetDataSize(*(args[i].cast<DLTensor*>())));
   }
 }
 
@@ -413,7 +415,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
              Device dev;
              dev.device_type = static_cast<DLDeviceType>(device_type);
              dev.device_id = device_id;
-             if (opt_mod.defined()) {
+             if (opt_mod.has_value()) {
                ffi::Module m = opt_mod.value();
                std::string tkey = m->kind();
                if (tkey == "rpc") {
@@ -432,9 +434,9 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                  ffi::Optional<ffi::Function> pf = m->GetFunction(name);
                  TVM_FFI_ICHECK(pf.has_value())
                      << "Cannot find " << name << "` in the global registry";
-                 return profiling::WrapTimeEvaluator(
-                     *pf, dev, number, repeat, min_repeat_ms, limit_zero_time_iterations,
-                     cooldown_interval_ms, repeats_to_cooldown, cache_flush_bytes, f_preproc);
+                 return WrapTimeEvaluator(*pf, dev, number, repeat, min_repeat_ms,
+                                          limit_zero_time_iterations, cooldown_interval_ms,
+                                          repeats_to_cooldown, cache_flush_bytes, f_preproc);
                }
              } else {
                auto pf = tvm::ffi::Function::GetGlobal(name);
@@ -447,9 +449,9 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                      << "Cannot find " << f_preproc_name << " in the global function";
                  f_preproc = *pf_preproc;
                }
-               return profiling::WrapTimeEvaluator(
-                   *pf, dev, number, repeat, min_repeat_ms, limit_zero_time_iterations,
-                   cooldown_interval_ms, repeats_to_cooldown, cache_flush_bytes, f_preproc);
+               return WrapTimeEvaluator(*pf, dev, number, repeat, min_repeat_ms,
+                                        limit_zero_time_iterations, cooldown_interval_ms,
+                                        repeats_to_cooldown, cache_flush_bytes, f_preproc);
              }
            })
       .def_packed("cache_flush_cpu_non_first_arg",

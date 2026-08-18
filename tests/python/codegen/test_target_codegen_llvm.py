@@ -23,29 +23,69 @@ import pytest
 
 import tvm
 import tvm.testing
-from tvm.contrib import clang, utils
 from tvm.script import ir as I
 from tvm.script import tirx as T
+from tvm.support import clang, utils
 from tvm.target.codegen import llvm_get_intrinsic_name, llvm_lookup_intrinsic_id
+from tvm.testing import env
 
 
-@tvm.testing.requires_llvm
-def test_llvm_intrin():
-    @I.ir_module
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
+def test_duplicate_primfunc_global_symbol_diagnostic():
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
+        def first_unique_key(A: T.Buffer((1,), "float32")):
+            T.func_attr({"global_symbol": "dup_symbol", "tirx.noalias": True})
+            A[0] = T.float32(1)
+
+        @T.prim_func(s_tir=True)
+        def second_unique_key(A: T.Buffer((1,), "float32")):
+            T.func_attr({"global_symbol": "dup_symbol", "tirx.noalias": True})
+            A[0] = T.float32(2)
+
+    with pytest.raises(
+        tvm.error.InternalError, match="Duplicate PrimFunc global_symbol 'dup_symbol'"
+    ) as err:
+        tvm.compile(Module, target="llvm")
+    assert "first_unique_key" in str(err.value)
+    assert "second_unique_key" in str(err.value)
+
+
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
+def test_unique_primfunc_global_symbols_compile():
+    @I.ir_module(s_tir=True)
+    class Module:
+        @T.prim_func(s_tir=True)
+        def first_unique_key(A: T.Buffer((1,), "float32")):
+            T.func_attr({"global_symbol": "dup_symbol_a", "tirx.noalias": True})
+            A[0] = T.float32(1)
+
+        @T.prim_func(s_tir=True)
+        def second_unique_key(A: T.Buffer((1,), "float32")):
+            T.func_attr({"global_symbol": "dup_symbol_b", "tirx.noalias": True})
+            A[0] = T.float32(2)
+
+    tvm.compile(Module, target="llvm")
+
+
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
+def test_llvm_intrin():
+    @I.ir_module(s_tir=True)
+    class Module:
+        @T.prim_func(s_tir=True)
         def main(A: T.handle("float32")):
             A_buf = T.decl_buffer((4,), "float32", data=A)
-            T.evaluate(T.Call("void", "tirx.prefetch", [T.address_of(A_buf[0]), 0, 3, 1]))
+            T.evaluate(T.Call("tirx.prefetch", [T.address_of(A_buf[0]), 0, 3, 1], ret_ty="void"))
 
     fcode = tvm.compile(Module)
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_llvm_void_intrin():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(A: T.handle("uint8")):
             # Create an intrinsic that returns void.
             T.call_llvm_intrin("", "llvm.assume", T.bool(True))
@@ -53,7 +93,7 @@ def test_llvm_void_intrin():
     fcode = tvm.compile(Module)
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_llvm_intrinsic_id():
     orig_name = "llvm.x86.sse2.pmadd.wd"
     intrin_id = llvm_lookup_intrinsic_id(orig_name)
@@ -61,7 +101,7 @@ def test_llvm_intrinsic_id():
     assert orig_name == name
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_llvm_overloaded_intrin():
     # Name lookup for overloaded intrinsics in LLVM 4- requires a name
     # that includes the overloaded types.
@@ -71,9 +111,9 @@ def test_llvm_overloaded_intrin():
     # int1 is the type for the is_zero_undef parameter
     int1_zero = tvm.tirx.const(0, "int1")
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(A: T.Buffer((1, 1), "int32"), C: T.Buffer((1, 1), "int32")):
             with T.sblock("C"):
                 T.reads()
@@ -83,11 +123,11 @@ def test_llvm_overloaded_intrin():
     f = tvm.compile(Module, target="llvm")
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_llvm_lookup_intrin():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(A: T.handle("uint8x8")):
             A_buf = T.decl_buffer((1,), "uint8x8", data=A)
             T.evaluate(T.call_llvm_pure_intrin("uint8x8", "llvm.ctpop.v8i8", T.uint32(1), A_buf[0]))
@@ -95,14 +135,14 @@ def test_llvm_lookup_intrin():
     fcode = tvm.compile(Module, None)
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_llvm_large_uintimm():
     value = (1 << 63) + 123
     large_val = tvm.tirx.const(value, "uint64")
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(A: T.Buffer((), "uint64")):
             T.func_attr({"tirx.noalias": True})
             with T.sblock("A"):
@@ -118,11 +158,11 @@ def test_llvm_large_uintimm():
     assert a.numpy() == value + 3
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_llvm_multi_parallel():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(A: T.Buffer((128,), "float32"), C: T.Buffer((128,), "float32")):
             T.func_attr({"tirx.noalias": True})
             B = T.sblock_alloc_buffer((128,))
@@ -150,12 +190,12 @@ def test_llvm_multi_parallel():
     tvm.testing.assert_allclose(c.numpy(), np.sqrt(a.numpy() + 1) * 2 + 2, rtol=1e-5)
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_llvm_flip_pipeline():
     def check_llvm(nn, base):
-        @I.ir_module
+        @I.ir_module(s_tir=True)
         class Module:
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def main(A: T.Buffer((nn + base,), "float32"), C: T.Buffer((nn,), "float32")):
                 T.func_attr({"tirx.noalias": True})
                 for i_0 in T.parallel((nn + 3) // 4):
@@ -180,14 +220,14 @@ def test_llvm_flip_pipeline():
     check_llvm(128, 1)
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_llvm_vadd_pipeline():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(var_A: T.handle, var_B: T.handle, var_C: T.handle):
             T.func_attr({"tirx.noalias": True})
-            n = T.int32(is_size_var=True)
+            n = T.int32()
             A = T.match_buffer(var_A, (n,))
             B = T.match_buffer(var_B, (n,))
             C = T.match_buffer(var_C, (n,))
@@ -210,12 +250,12 @@ def test_llvm_vadd_pipeline():
     tvm.testing.assert_allclose(c.numpy(), a.numpy() + b.numpy())
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_llvm_madd_pipeline():
     def check_llvm(nn, base, stride):
-        @I.ir_module
+        @I.ir_module(s_tir=True)
         class Module:
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def main(
                 A: T.Buffer((nn + base, stride), "float32"),
                 C: T.Buffer((nn, stride), "float32"),
@@ -246,11 +286,11 @@ def test_llvm_madd_pipeline():
         check_llvm(4, 0, 3)
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_llvm_temp_space():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(A: T.Buffer((1024,), "float32"), C: T.Buffer((1024,), "float32")):
             T.func_attr({"tirx.noalias": True})
             B = T.sblock_alloc_buffer((1024,))
@@ -276,14 +316,14 @@ def test_llvm_temp_space():
     tvm.testing.assert_allclose(c.numpy(), a.numpy() + 1 + 1)
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_multiple_func():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def fadd1(var_A: T.handle, var_B: T.handle, var_C: T.handle):
             T.func_attr({"tirx.noalias": True})
-            n = T.int32(is_size_var=True)
+            n = T.int32()
             A = T.match_buffer(var_A, (n,))
             B = T.match_buffer(var_B, (n,))
             C = T.match_buffer(var_C, (n,))
@@ -294,10 +334,10 @@ def test_multiple_func():
                     T.writes(C[v_i])
                     C[v_i] = A[v_i] + B[v_i]
 
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def fadd2(var_A: T.handle, var_B: T.handle, var_C: T.handle):
             T.func_attr({"tirx.noalias": True})
-            n = T.int32(is_size_var=True)
+            n = T.int32()
             A = T.match_buffer(var_A, (n,))
             B = T.match_buffer(var_B, (n,))
             C = T.match_buffer(var_C, (n,))
@@ -321,11 +361,11 @@ def test_multiple_func():
     tvm.testing.assert_allclose(c.numpy(), a.numpy() + b.numpy())
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_llvm_condition():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(A: T.Buffer((64,), "float32"), C: T.Buffer((64,), "float32")):
             T.func_attr({"tirx.noalias": True})
             for i in range(64):
@@ -347,11 +387,11 @@ def test_llvm_condition():
     tvm.testing.assert_allclose(c.numpy(), c_np)
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_llvm_bool():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(A: T.Buffer((64,), "int32"), C: T.Buffer((64,), "float32")):
             T.func_attr({"tirx.noalias": True})
             for i in range(64):
@@ -371,11 +411,11 @@ def test_llvm_bool():
     tvm.testing.assert_allclose(c.numpy(), c_np)
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_llvm_cast_float_to_bool():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(A: T.Buffer((4,), "float32"), C: T.Buffer((4,), "bool")):
             T.func_attr({"tirx.noalias": True})
             for i in range(4):
@@ -395,11 +435,11 @@ def test_llvm_cast_float_to_bool():
     tvm.testing.assert_allclose(c.numpy(), c_np)
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_rank_zero():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(
             A: T.Buffer((64,), "float32"),
             scale: T.Buffer((), "float32"),
@@ -432,11 +472,11 @@ def test_rank_zero():
     tvm.testing.assert_allclose(d.numpy(), d_np)
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_rank_zero_bound_checkers():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(
             A: T.Buffer((64,), "float32"),
             scale: T.Buffer((), "float32"),
@@ -470,11 +510,11 @@ def test_rank_zero_bound_checkers():
         tvm.testing.assert_allclose(d.numpy(), d_np)
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_alignment():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def test_alignment(A: T.Buffer((1024,), "float32"), B: T.Buffer((1024,), "float32")):
             T.func_attr({"tirx.noalias": True})
             for i_0 in range(128):
@@ -518,8 +558,74 @@ def test_alignment():
     assert has_call_to_assume()
 
 
-@tvm.testing.requires_llvm
-def test_llvm_div():
+def _llvm_div_cases():
+    dividend_ranges = [
+        (-12, -12),
+        (-11, -1),
+        (-11, 0),
+        (0, 0),
+        (12, 12),
+        (1, 11),
+        (0, 11),
+        (-11, 11),
+    ]
+    divisor_ranges = [
+        (-11, -1),
+        (-11, 1),
+        (-4, -4),
+        (-2, -2),
+        (1, 11),
+        (0, 11),
+        (4, 4),
+        (2, 2),
+        (-11, 11),
+    ]
+
+    for start, end in dividend_ranges:
+        for dstart, dend in divisor_ranges:
+            for dtype in ["int32", "int8"]:
+                for floor_div in [False, True]:
+                    yield pytest.param(
+                        start,
+                        end,
+                        dstart,
+                        dend,
+                        dtype,
+                        floor_div,
+                        id=f"{dtype}-{'floor' if floor_div else 'trunc'}-{start}:{end}-{dstart}:{dend}",
+                    )
+            if start >= 0 and dstart >= 0:
+                for floor_div in [False, True]:
+                    yield pytest.param(
+                        start,
+                        end,
+                        dstart,
+                        dend,
+                        "uint32",
+                        floor_div,
+                        id=f"uint32-{'floor' if floor_div else 'trunc'}-{start}:{end}-{dstart}:{dend}",
+                    )
+
+    for dstart, dend in [(0, 11), (1, 11), (2, 2), (4, 4)]:
+        for start, end in [(123, 133), (0, 255)]:
+            for floor_div in [False, True]:
+                yield pytest.param(
+                    start,
+                    end,
+                    dstart,
+                    dend,
+                    "uint8",
+                    floor_div,
+                    id=f"uint8-{'floor' if floor_div else 'trunc'}-{start}:{end}-{dstart}:{dend}",
+                )
+
+
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
+@pytest.mark.parametrize(
+    "start,end,dstart,dend,dtype,floor_div",
+    list(_llvm_div_cases()),
+)
+def test_llvm_div(start, end, dstart, dend, dtype, floor_div):
     """Check that the semantics of div and mod is correct"""
 
     def check(start, end, dstart, dend, dtype, floor_div=False):
@@ -545,9 +651,9 @@ def test_llvm_div():
         else:
             clipb = lambda x: T.min(_dend, T.max(_dstart, x))
 
-        @I.ir_module
+        @I.ir_module(s_tir=True)
         class Module:
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def main(
                 A: T.Buffer((a_size,), dtype),
                 B: T.Buffer((b_size,), dtype),
@@ -618,54 +724,17 @@ def test_llvm_div():
                         f"but should be {mref}"
                     )
 
-    # Try different ranges to cover different cases
-    for start, end in [
-        (-12, -12),
-        (-11, -1),
-        (-11, 0),
-        (0, 0),
-        (12, 12),
-        (1, 11),
-        (0, 11),
-        (-11, 11),
-    ]:
-        for dstart, dend in [
-            (-11, -1),
-            (-11, 1),
-            (-4, -4),
-            (-2, -2),
-            (1, 11),
-            (0, 11),
-            (4, 4),
-            (2, 2),
-            (-11, 11),
-        ]:
-            if end < start or dend < dstart or (dend == 0 and dstart == 0) or dend == 0:
-                continue
-            check(start, end, dstart, dend, "int32", floor_div=False)
-            check(start, end, dstart, dend, "int32", floor_div=True)
-            check(start, end, dstart, dend, "int8", floor_div=False)
-            check(start, end, dstart, dend, "int8", floor_div=True)
-            if start >= 0 and dstart >= 0:
-                check(start, end, dstart, dend, "uint32", floor_div=False)
-                check(start, end, dstart, dend, "uint32", floor_div=True)
-
-    # Additional tests for uint8
-    for dstart, dend in [(0, 11), (1, 11), (2, 2), (4, 4)]:
-        check(123, 133, dstart, dend, "uint8", floor_div=False)
-        check(123, 133, dstart, dend, "uint8", floor_div=True)
-        check(0, 255, dstart, dend, "uint8", floor_div=False)
-        check(0, 255, dstart, dend, "uint8", floor_div=True)
+    check(start, end, dstart, dend, dtype, floor_div)
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_llvm_fp_math():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class RecipModule:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(var_A: T.handle, var_B: T.handle):
             T.func_attr({"tirx.noalias": True})
-            n = T.int32(is_size_var=True)
+            n = T.int32()
             A = T.match_buffer(var_A, (n,))
             B = T.match_buffer(var_B, (n,))
             for i in range(n):
@@ -685,12 +754,12 @@ def test_llvm_fp_math():
         f_recip(a, b)
         tvm.testing.assert_allclose(b.numpy(), np.zeros((n,), "float32"))
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class SigmoidModule:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(var_A: T.handle, var_B: T.handle):
             T.func_attr({"tirx.noalias": True})
-            n = T.int32(is_size_var=True)
+            n = T.int32()
             A = T.match_buffer(var_A, (n,))
             B = T.match_buffer(var_B, (n,))
             for i in range(n):
@@ -709,11 +778,11 @@ def test_llvm_fp_math():
         tvm.testing.assert_allclose(b.numpy(), np.zeros((n,), "float32"))
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_dwarf_debug_information():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(
             A: T.Buffer((1024,), "float32"),
             B: T.Buffer((1024,), "float32"),
@@ -797,14 +866,14 @@ def test_dwarf_debug_information():
     check_llvm_ir()
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_llvm_bf16():
     def dotest(do_vectorize):
         loop_kind = T.vectorized if do_vectorize else T.serial
 
-        @I.ir_module
+        @I.ir_module(s_tir=True)
         class Module:
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def main(
                 A: T.Buffer((32,), "bfloat16"),
                 B: T.Buffer((32,), "bfloat16"),
@@ -835,11 +904,11 @@ def test_llvm_bf16():
     dotest(False)
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_llvm_crt_static_lib():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(
             A: T.Buffer((32,), "bfloat16"),
             B: T.Buffer((32,), "bfloat16"),
@@ -862,25 +931,25 @@ def test_llvm_crt_static_lib():
         module.write_to_file(temp.relpath("test.o"))
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_llvm_order_functions():
     """Check that functions in the LLVM module are ordered alphabetically."""
 
     # Note: the order is alphabetical because that's a predictable ordering. Any predictable
     # ordering will work fine, but if the ordering changes, this test will need to be updated.
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def Danny(v: T.float32) -> T.float32:
-            T.ret(T.call_extern("float32", "Dave", v))
+            return T.call_extern("float32", "Dave", v)
 
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def Sammy(v: T.float32) -> T.float32:
-            T.ret(T.call_extern("float32", "Eve", v))
+            return T.call_extern("float32", "Eve", v)
 
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def Kirby(v: T.float32) -> T.float32:
-            T.ret(T.call_extern("float32", "Fred", v))
+            return T.call_extern("float32", "Fred", v)
 
     ir_text = tvm.tirx.build(Module, target="llvm").inspect_source("ll")
     # Skip functions whose names start with _.
@@ -888,7 +957,7 @@ def test_llvm_order_functions():
     assert matches == sorted(matches)
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 @tvm.testing.skip_if_32bit
 def test_llvm_import():
     """all-platform-minimal-test: check shell dependent clang behavior."""
@@ -908,9 +977,9 @@ def test_llvm_import():
         ll_code = clang.create_llvm(cc_code, output=ll_path)
         import_val = ll_path if use_file else ll_code
 
-        @I.ir_module
+        @I.ir_module(s_tir=True)
         class Module:
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def main(A: T.Buffer((10,), "float32"), B: T.Buffer((10,), "float32")):
                 T.func_attr({"tirx.noalias": True})
                 for i in T.serial(10, annotations={"pragma_import_llvm": import_val}):
@@ -931,11 +1000,11 @@ def test_llvm_import():
     check_llvm(use_file=False)
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_llvm_scalar_concat():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(x: T.int32, y: T.int32, buffer: T.Buffer((1,), "int32x2")):
             buffer[0] = T.Shuffle([x, y], [0, 1])
 
@@ -945,32 +1014,32 @@ def test_llvm_scalar_concat():
         m = tvm.compile(Module, target="llvm")
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_raise_exception_during_codegen():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(A: T.Buffer((4, 4), "float32"), B: T.Buffer((4, 4), "float32")) -> None:
             T.func_attr({"tirx.noalias": True})
             for i in T.parallel(4):
                 for j in T.parallel(4):
                     B[i, j] = A[i, j] * 2.0
 
-    with pytest.raises(tvm.TVMError) as e:
+    with pytest.raises(RuntimeError) as e:
         tvm.compile(Module, target="llvm")
     msg = str(e)
     assert msg.find("Nested parallel loop is not supported") != -1
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_llvm_target_attributes():
     """Check that when LLVM codegen creates new functions, they get the same target
     attributes as the original function.
     """
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def test_func(var_A: T.handle, var_B: T.handle, var_C: T.handle, tindex: T.int32):
             T.func_attr({"tirx.noalias": True})
             A = T.match_buffer(var_A, (tindex,))
@@ -1028,7 +1097,7 @@ def test_llvm_target_attributes():
         assert re.match('.*"target-features"=".*[+]avx512f.*".*', attribute_definitions[attr_num])
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_llvm_assume():
     """
     Check that LLVM does not error out when generating code with tirx.assume.
@@ -1036,9 +1105,9 @@ def test_llvm_assume():
     related instructions get removed during optimizations
     """
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(A: T.Buffer((4, 4), "int32"), B: T.Buffer((14,), "int32")):
             T.func_attr({"tirx.noalias": True})
             A_1 = T.decl_buffer((16,), "int32", data=A.data)
@@ -1051,7 +1120,7 @@ def test_llvm_assume():
     m = tvm.compile(Module, target="llvm")
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_debug_symbol_for_float64():
     """Check that LLVM can define DWARF debug type for float64
 
@@ -1060,9 +1129,9 @@ def test_debug_symbol_for_float64():
     prevents lowering to the PackedFunc API.
     """
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(a: T.handle("float64"), b: T.handle("float64"), n: T.int64):
             T.func_attr({"calling_conv": 2})
             A = T.decl_buffer(16, "float64", data=a)
@@ -1073,15 +1142,31 @@ def test_debug_symbol_for_float64():
     tvm.compile(Module, target="llvm")
 
 
-@tvm.testing.requires_llvm
-def test_subroutine_call():
-    @I.ir_module
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
+def test_debug_symbol_for_buffer_var():
+    """BufferVars use their physical data pointer type in LLVM debug info."""
+
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
+        def main(A: T.Buffer((16,), "float32"), B: T.Buffer((16,), "float32")):
+            C = T.alloc_buffer((16,), "float32")
+            for i in T.parallel(16):
+                C[i] = A[i]
+                B[i] = C[i]
+
+    tvm.compile(Module, target="llvm")
+
+
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
+def test_subroutine_call():
+    @I.ir_module(s_tir=True)
+    class Module:
+        @T.prim_func(s_tir=True)
         def main(A: T.Buffer(1, dtype="float32")):
             Module.subroutine(A.data)
 
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def subroutine(A_data: T.handle("float32")):
             # The calling_conv parameter is to prevent MakePackedAPI
             # from changing the call signature of the subroutine.
@@ -1099,13 +1184,13 @@ def test_subroutine_call():
     assert arr.numpy()[0] == 42.0
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_call_packed_returning_void():
     """Allow codegen of PackedFunc calls returning void
 
     The LLVM codegen uses the CallNode's dtype to cast the return type
     of the PackedFunc into the appropriate LLVM output type.  However,
-    there is no API type for `DataType::Void()`.  When the return type
+    there is no runtime dtype value for a void return.  When the return type
     of a PackedFunc is void, the generated code should not attempt to
     read the return value.
 
@@ -1115,14 +1200,14 @@ def test_call_packed_returning_void():
     for the packed function call.
     """
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main():
             T.Call(
-                "void",
                 tvm.ir.Op.get("tirx.tvm_call_packed"),
                 ["dummy_function_name"],
+                ret_ty="void",
             )
 
     # Error occurred during build, as part of
@@ -1130,7 +1215,7 @@ def test_call_packed_returning_void():
     built = tvm.compile(Module, target="llvm")
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_call_packed_without_string_arg():
     """The first argument to tvm_call_packed must be a string
 
@@ -1140,48 +1225,64 @@ def test_call_packed_without_string_arg():
     a segfault during codegen.
     """
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(A: T.Buffer(1, "float32")):
-            T.Call("int32", tvm.ir.Op.get("tirx.tvm_call_packed"), [A.data])
+            T.Call(tvm.ir.Op.get("tirx.tvm_call_packed"), [A.data], ret_ty="int32")
 
-    with pytest.raises(tvm.TVMError):
+    with pytest.raises(RuntimeError):
         built = tvm.compile(Module, target="llvm")
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_call_extern_returning_void():
     """Like test_call_packed_returning_void, but for call_extern"""
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main():
-            T.Call("void", tvm.ir.Op.get("tirx.call_extern"), ["dummy_function_name"])
+            T.Call(tvm.ir.Op.get("tirx.call_extern"), ["dummy_function_name"], ret_ty="void")
 
     built = tvm.compile(Module, target="llvm")
 
 
 def test_invalid_volatile_masked_buffer_load():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(b: T.handle):
             B = T.match_buffer(b, [4])
             A = T.alloc_buffer((4,), annotations={"tirx.volatile": True})
             B[0:4] = A.vload([T.Ramp(0, 1, 4)], predicate=T.Broadcast(T.bool(True), 4))
 
     err_msg = "The masked load intrinsic does not support declaring load as volatile."
-    with pytest.raises(tvm.TVMError, match=err_msg):
+    with pytest.raises(RuntimeError, match=err_msg):
+        with tvm.target.Target("llvm"):
+            tvm.compile(Module)
+
+
+def test_invalid_volatile_masked_decl_buffer_load():
+    @I.ir_module(s_tir=True)
+    class Module:
+        @T.prim_func(s_tir=True)
+        def main(b: T.handle):
+            B = T.match_buffer(b, [4])
+            A = T.alloc_buffer((4,), annotations={"tirx.volatile": True})
+            A_alias = T.decl_buffer((4,), data=A.data)
+            B[0:4] = A_alias.vload([T.Ramp(0, 1, 4)], predicate=T.Broadcast(T.bool(True), 4))
+
+    err_msg = "The masked load intrinsic does not support declaring load as volatile."
+    with pytest.raises(RuntimeError, match=err_msg):
         with tvm.target.Target("llvm"):
             tvm.compile(Module)
 
 
 def test_invalid_volatile_masked_buffer_store():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main():
             A = T.alloc_buffer((4,), annotations={"tirx.volatile": True})
             A.vstore(
@@ -1191,7 +1292,7 @@ def test_invalid_volatile_masked_buffer_store():
             )
 
     err_msg = "The masked store intrinsic does not support declaring store as volatile."
-    with pytest.raises(tvm.TVMError, match=err_msg):
+    with pytest.raises(RuntimeError, match=err_msg):
         with tvm.target.Target("llvm"):
             tvm.compile(Module)
 
@@ -1199,9 +1300,9 @@ def test_invalid_volatile_masked_buffer_store():
 def test_int_parameter():
     """Boolean may be passed to functions accepting int"""
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(arg: T.int32) -> T.int32:
             T.func_attr({"target": T.target("llvm")})
             if arg > 0:
@@ -1220,9 +1321,9 @@ def test_int_parameter():
 def test_bool_parameter():
     """Integers may be passed to functions accepting bool"""
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(arg: T.bool) -> T.int32:
             T.func_attr({"target": T.target("llvm")})
             if arg:
@@ -1244,9 +1345,9 @@ def test_bool_parameter():
 def test_bool_return_value():
     """Booleans may be returned from a PrimFunc"""
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(value: T.int32) -> T.bool:
             T.func_attr({"target": T.target("llvm")})
             return value < 10

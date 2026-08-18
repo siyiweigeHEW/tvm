@@ -17,6 +17,7 @@
  * under the License.
  */
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/runtime/logging.h>
 
 #include "../../../target/canonicalizer/llvm/arm_aprofile.h"
 #include "../utils.h"
@@ -48,10 +49,10 @@ ffi::String GetRuleKindFromTarget(const Target& target) {
     ffi::Map<ffi::String, ffi::Any> target_json =
         target::canonicalizer::llvm::aprofile::Canonicalize(target->ToConfig());
 
-    if (Downcast<Bool>(target_json.at("feature.has_dotprod"))) {
+    if (target_json.at("feature.has_dotprod").cast<bool>()) {
       return "dotprod";
     }
-    if (Downcast<Bool>(target_json.at("feature.has_asimd"))) {
+    if (target_json.at("feature.has_asimd").cast<bool>()) {
       return "asimd";
     }
     return "llvm";
@@ -89,10 +90,10 @@ ffi::String GetRuleKindFromTarget(const Target& target) {
 }
 
 void SpaceGeneratorNode::InitializeWithTuneContext(const TuneContext& context) {
-  if (context->target.defined() &&  //
-      !(sch_rules.defined() &&      //
-        postprocs.defined() &&      //
-        mutator_probs.defined())) {
+  if (context->target.has_value() &&  //
+      !(sch_rules.has_value() &&      //
+        postprocs.has_value() &&      //
+        mutator_probs.has_value())) {
     ffi::String kind = GetRuleKindFromTarget(context->target.value());
     ffi::Array<ScheduleRule> default_sch_rules;
     ffi::Array<Postproc> default_postprocs;
@@ -141,27 +142,27 @@ void SpaceGeneratorNode::InitializeWithTuneContext(const TuneContext& context) {
       TVM_FFI_THROW(InternalError) << "Unsupported kind: " << kind;
       throw;
     }
-    if (!sch_rules.defined()) {
+    if (!sch_rules.has_value()) {
       sch_rules = default_sch_rules;
     }
-    if (!postprocs.defined()) {
+    if (!postprocs.has_value()) {
       postprocs = default_postprocs;
     }
-    if (!mutator_probs.defined()) {
+    if (!mutator_probs.has_value()) {
       mutator_probs = default_mutator_probs;
     }
   }
-  if (sch_rules.defined()) {
+  if (sch_rules.has_value()) {
     for (ScheduleRule i : sch_rules.value()) {
       i->InitializeWithTuneContext(context);
     }
   }
-  if (postprocs.defined()) {
+  if (postprocs.has_value()) {
     for (Postproc i : postprocs.value()) {
       i->InitializeWithTuneContext(context);
     }
   }
-  if (mutator_probs.defined()) {
+  if (mutator_probs.has_value()) {
     for (const auto& kv : mutator_probs.value()) {
       Mutator mutator = kv.first;
       mutator->InitializeWithTuneContext(context);
@@ -192,7 +193,7 @@ SpaceGenerator SpaceGenerator::PySpaceGenerator(
     ffi::Optional<ffi::Map<Mutator, FloatImm>> mutator_probs,
     FInitializeWithTuneContext f_initialize_with_tune_context,
     FGenerateDesignSpace f_generate_design_space, FClone f_clone) {
-  ObjectPtr<PySpaceGeneratorNode> n = ffi::make_object<PySpaceGeneratorNode>();
+  ffi::ObjectPtr<PySpaceGeneratorNode> n = ffi::make_object<PySpaceGeneratorNode>();
   n->sch_rules = sch_rules;
   n->postprocs = postprocs;
   n->mutator_probs = mutator_probs;

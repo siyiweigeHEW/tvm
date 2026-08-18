@@ -42,9 +42,9 @@ namespace tirx {
     }                                         \
   }
 
-#define IR_EXPR_VISITOR_DEFAULT_DISPATCH(OP)                             \
-  vtable.template set_dispatch<OP>([](const ObjectRef& n, TSelf* self) { \
-    self->StmtExprVisitor::VisitExpr_(static_cast<const OP*>(n.get()));  \
+#define IR_EXPR_VISITOR_DEFAULT_DISPATCH(OP)                                  \
+  vtable.template set_dispatch<OP>([](const ffi::ObjectRef& n, TSelf* self) { \
+    self->StmtExprVisitor::VisitExpr_(static_cast<const OP*>(n.get()));       \
   });
 
 #define PY_STMT_VISITOR_DISPATCH(OP, PY_FUNC) \
@@ -56,22 +56,22 @@ namespace tirx {
     }                                         \
   }
 
-#define PY_STMT_VISITOR_DEFAULT_DISPATCH(OP)                             \
-  vtable.template set_dispatch<OP>([](const ObjectRef& n, TSelf* self) { \
-    self->StmtExprVisitor::VisitStmt_(static_cast<const OP*>(n.get()));  \
+#define PY_STMT_VISITOR_DEFAULT_DISPATCH(OP)                                  \
+  vtable.template set_dispatch<OP>([](const ffi::ObjectRef& n, TSelf* self) { \
+    self->StmtExprVisitor::VisitStmt_(static_cast<const OP*>(n.get()));       \
   });
 
-#define PY_EXPR_MUTATOR_DISPATCH(OP, PY_FUNC)  \
-  PrimExpr VisitExpr_(const OP* op) override { \
-    if (PY_FUNC != nullptr) {                  \
-      return PY_FUNC(op).cast<PrimExpr>();     \
-    } else {                                   \
-      return StmtExprMutator::VisitExpr_(op);  \
-    }                                          \
+#define PY_EXPR_MUTATOR_DISPATCH(OP, PY_FUNC) \
+  Expr VisitExpr_(const OP* op) override {    \
+    if (PY_FUNC != nullptr) {                 \
+      return PY_FUNC(op).cast<Expr>();        \
+    } else {                                  \
+      return StmtExprMutator::VisitExpr_(op); \
+    }                                         \
   }
 
 #define PY_EXPR_MUTATOR_DEFAULT_DISPATCH(OP)                                   \
-  vtable.template set_dispatch<OP>([](const ObjectRef& n, TSelf* self) {       \
+  vtable.template set_dispatch<OP>([](const ffi::ObjectRef& n, TSelf* self) {  \
     return self->StmtExprMutator::VisitExpr_(static_cast<const OP*>(n.get())); \
   });
 
@@ -85,16 +85,16 @@ namespace tirx {
   }
 
 #define PY_STMT_MUTATOR_DEFAULT_DISPATCH(OP)                                   \
-  vtable.template set_dispatch<OP>([](const ObjectRef& n, TSelf* self) {       \
+  vtable.template set_dispatch<OP>([](const ffi::ObjectRef& n, TSelf* self) {  \
     return self->StmtExprMutator::VisitStmt_(static_cast<const OP*>(n.get())); \
   });
 
 /*! \brief The python interface of StmtExprVisitor. */
-class PyStmtExprVisitorNode : public Object, public StmtExprVisitor {
+class PyStmtExprVisitorNode : public ffi::Object, public StmtExprVisitor {
  private:
   using TSelf = PyStmtExprVisitorNode;
-  using FExprType = tvm::NodeFunctor<void(const ObjectRef& n, TSelf* self)>;
-  using FStmtType = tvm::NodeFunctor<void(const ObjectRef& n, TSelf* self)>;
+  using FExprType = tvm::NodeFunctor<void(const ffi::ObjectRef& n, TSelf* self)>;
+  using FStmtType = tvm::NodeFunctor<void(const ffi::ObjectRef& n, TSelf* self)>;
 
  public:
   // Expression functions
@@ -102,8 +102,6 @@ class PyStmtExprVisitorNode : public Object, public StmtExprVisitor {
   ffi::Function f_visit_expr{nullptr};
   /*! \brief The packed function to the `VisitExpr_(const VarNode* op)` function. */
   ffi::Function f_visit_var{nullptr};
-  /*! \brief The packed function to the `VisitExpr_(const SizeVarNode* op)` function. */
-  ffi::Function f_visit_size_var{nullptr};
   /*! \brief The packed function to the `VisitExpr_(const BufferLoadNode* op)` function. */
   ffi::Function f_visit_buffer_load{nullptr};
   /*! \brief The packed function to the `VisitExpr_(const ProducerLoadNode* op)` function. */
@@ -200,7 +198,7 @@ class PyStmtExprVisitorNode : public Object, public StmtExprVisitor {
   using StmtExprVisitor::VisitExpr;
   using StmtExprVisitor::VisitStmt;
 
-  void DefaultVisitExpr(const PrimExpr& expr) {
+  void DefaultVisitExpr(const Expr& expr) {
     static FExprType vtable = InitExprVTable();
     vtable(expr, this);
   }
@@ -216,7 +214,7 @@ class PyStmtExprVisitorNode : public Object, public StmtExprVisitor {
   }
 
   static constexpr const bool _type_mutable = true;
-  TVM_FFI_DECLARE_OBJECT_INFO("tirx.PyStmtExprVisitor", PyStmtExprVisitorNode, Object);
+  TVM_FFI_DECLARE_OBJECT_INFO("tirx.PyStmtExprVisitor", PyStmtExprVisitorNode, ffi::Object);
 
  private:
   // Statement functions
@@ -235,7 +233,6 @@ class PyStmtExprVisitorNode : public Object, public StmtExprVisitor {
   PY_STMT_VISITOR_DISPATCH(SBlockRealizeNode, f_visit_sblock_realize);
   // Expression functions
   PY_EXPR_VISITOR_DISPATCH(VarNode, f_visit_var);
-  PY_EXPR_VISITOR_DISPATCH(SizeVarNode, f_visit_size_var);
   PY_EXPR_VISITOR_DISPATCH(BufferLoadNode, f_visit_buffer_load);
   PY_EXPR_VISITOR_DISPATCH(ProducerLoadNode, f_visit_producer_load);
   PY_EXPR_VISITOR_DISPATCH(LetNode, f_visit_let);
@@ -273,7 +270,6 @@ class PyStmtExprVisitorNode : public Object, public StmtExprVisitor {
     FExprType vtable;
     // Set dispatch
     IR_EXPR_VISITOR_DEFAULT_DISPATCH(VarNode);
-    IR_EXPR_VISITOR_DEFAULT_DISPATCH(SizeVarNode);
     IR_EXPR_VISITOR_DEFAULT_DISPATCH(BufferLoadNode);
     IR_EXPR_VISITOR_DEFAULT_DISPATCH(ProducerLoadNode);
     IR_EXPR_VISITOR_DEFAULT_DISPATCH(LetNode);
@@ -333,9 +329,9 @@ class PyStmtExprVisitorNode : public Object, public StmtExprVisitor {
  * \brief Managed reference to PyStmtExprVisitorNode.
  * \sa PyStmtExprVisitorNode
  */
-class PyStmtExprVisitor : public ObjectRef {
+class PyStmtExprVisitor : public ffi::ObjectRef {
  public:
-  explicit PyStmtExprVisitor(ObjectPtr<PyStmtExprVisitorNode> data) : ObjectRef(data) {
+  explicit PyStmtExprVisitor(ffi::ObjectPtr<PyStmtExprVisitorNode> data) : ffi::ObjectRef(data) {
     TVM_FFI_ICHECK(data != nullptr);
   }
   TVM_DLL static PyStmtExprVisitor MakePyStmtExprVisitor(ffi::Function f_visit_stmt,            //
@@ -354,7 +350,6 @@ class PyStmtExprVisitor : public ObjectRef {
                                                          ffi::Function f_visit_block,           //
                                                          ffi::Function f_visit_sblock_realize,  //
                                                          ffi::Function f_visit_var,             //
-                                                         ffi::Function f_visit_size_var,        //
                                                          ffi::Function f_visit_buffer_load,     //
                                                          ffi::Function f_visit_producer_load,   //
                                                          ffi::Function f_visit_let,             //
@@ -386,7 +381,7 @@ class PyStmtExprVisitor : public ObjectRef {
                                                          ffi::Function f_visit_int_imm,         //
                                                          ffi::Function f_visit_float_imm,       //
                                                          ffi::Function f_visit_string_imm) {
-    ObjectPtr<PyStmtExprVisitorNode> n = ffi::make_object<PyStmtExprVisitorNode>();
+    ffi::ObjectPtr<PyStmtExprVisitorNode> n = ffi::make_object<PyStmtExprVisitorNode>();
     n->f_visit_stmt = std::move(f_visit_stmt);
     n->f_visit_expr = std::move(f_visit_expr);
     // Set statement functions
@@ -405,7 +400,6 @@ class PyStmtExprVisitor : public ObjectRef {
     n->f_visit_sblock_realize = std::move(f_visit_sblock_realize);
     // Set expression functions
     n->f_visit_var = std::move(f_visit_var);
-    n->f_visit_size_var = std::move(f_visit_size_var);
     n->f_visit_buffer_load = std::move(f_visit_buffer_load);
     n->f_visit_producer_load = std::move(f_visit_producer_load);
     n->f_visit_let = std::move(f_visit_let);
@@ -440,16 +434,16 @@ class PyStmtExprVisitor : public ObjectRef {
     return PyStmtExprVisitor(n);
   }
 
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(PyStmtExprVisitor, ObjectRef,
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(PyStmtExprVisitor, ffi::ObjectRef,
                                                 PyStmtExprVisitorNode);
 };
 
 /*! \brief The python interface of StmtExprMutator. */
-class PyStmtExprMutatorNode : public Object, public StmtExprMutator {
+class PyStmtExprMutatorNode : public ffi::Object, public StmtExprMutator {
  private:
   using TSelf = PyStmtExprMutatorNode;
-  using FExprType = tvm::NodeFunctor<PrimExpr(const ObjectRef& n, TSelf* self)>;
-  using FStmtType = tvm::NodeFunctor<Stmt(const ObjectRef& n, TSelf* self)>;
+  using FExprType = tvm::NodeFunctor<Expr(const ffi::ObjectRef& n, TSelf* self)>;
+  using FStmtType = tvm::NodeFunctor<Stmt(const ffi::ObjectRef& n, TSelf* self)>;
 
  public:
   // Expression functions
@@ -457,8 +451,6 @@ class PyStmtExprMutatorNode : public Object, public StmtExprMutator {
   ffi::Function f_visit_expr{nullptr};
   /*! \brief The packed function to the `VisitExpr_(const VarNode* op)` function. */
   ffi::Function f_visit_var{nullptr};
-  /*! \brief The packed function to the `VisitExpr_(const SizeVarNode* op)` function. */
-  ffi::Function f_visit_size_var{nullptr};
   /*! \brief The packed function to the `VisitExpr_(const BufferLoadNode* op)` function. */
   ffi::Function f_visit_buffer_load{nullptr};
   /*! \brief The packed function to the `VisitExpr_(const ProducerLoadNode* op)` function. */
@@ -555,9 +547,9 @@ class PyStmtExprMutatorNode : public Object, public StmtExprMutator {
   using StmtExprMutator::VisitExpr;
   using StmtExprMutator::VisitStmt;
 
-  void DefaultVisitExpr(const PrimExpr& expr) {
+  Expr DefaultVisitExpr(const Expr& expr) {
     static FExprType vtable = InitExprVTable();
-    vtable(expr, this);
+    return vtable(expr, this);
   }
 
   void DefaultVisitStmt(const Stmt& stmt) {
@@ -571,7 +563,7 @@ class PyStmtExprMutatorNode : public Object, public StmtExprMutator {
   }
 
   static constexpr const bool _type_mutable = true;
-  TVM_FFI_DECLARE_OBJECT_INFO("tirx.PyStmtExprMutator", PyStmtExprMutatorNode, Object);
+  TVM_FFI_DECLARE_OBJECT_INFO("tirx.PyStmtExprMutator", PyStmtExprMutatorNode, ffi::Object);
 
  private:
   // Statement functions
@@ -590,7 +582,6 @@ class PyStmtExprMutatorNode : public Object, public StmtExprMutator {
   PY_STMT_MUTATOR_DISPATCH(SBlockRealizeNode, f_visit_sblock_realize);
   // Expression functions
   PY_EXPR_MUTATOR_DISPATCH(VarNode, f_visit_var);
-  PY_EXPR_MUTATOR_DISPATCH(SizeVarNode, f_visit_size_var);
   PY_EXPR_MUTATOR_DISPATCH(BufferLoadNode, f_visit_buffer_load);
   PY_EXPR_MUTATOR_DISPATCH(ProducerLoadNode, f_visit_producer_load);
   PY_EXPR_MUTATOR_DISPATCH(LetNode, f_visit_let);
@@ -628,7 +619,6 @@ class PyStmtExprMutatorNode : public Object, public StmtExprMutator {
     FExprType vtable;
     // Set dispatch
     PY_EXPR_MUTATOR_DEFAULT_DISPATCH(VarNode);
-    PY_EXPR_MUTATOR_DEFAULT_DISPATCH(SizeVarNode);
     PY_EXPR_MUTATOR_DEFAULT_DISPATCH(BufferLoadNode);
     PY_EXPR_MUTATOR_DEFAULT_DISPATCH(ProducerLoadNode);
     PY_EXPR_MUTATOR_DEFAULT_DISPATCH(LetNode);
@@ -685,9 +675,9 @@ class PyStmtExprMutatorNode : public Object, public StmtExprMutator {
 };
 
 /*! \brief Managed reference to PyStmtExprMutatorNode. */
-class PyStmtExprMutator : public ObjectRef {
+class PyStmtExprMutator : public ffi::ObjectRef {
  public:
-  explicit PyStmtExprMutator(ObjectPtr<PyStmtExprMutatorNode> data) : ObjectRef(data) {
+  explicit PyStmtExprMutator(ffi::ObjectPtr<PyStmtExprMutatorNode> data) : ffi::ObjectRef(data) {
     TVM_FFI_ICHECK(data != nullptr);
   }
   /*!
@@ -710,7 +700,6 @@ class PyStmtExprMutator : public ObjectRef {
                                                          ffi::Function f_visit_block,           //
                                                          ffi::Function f_visit_sblock_realize,  //
                                                          ffi::Function f_visit_var,             //
-                                                         ffi::Function f_visit_size_var,        //
                                                          ffi::Function f_visit_buffer_load,     //
                                                          ffi::Function f_visit_producer_load,   //
                                                          ffi::Function f_visit_let,             //
@@ -742,7 +731,7 @@ class PyStmtExprMutator : public ObjectRef {
                                                          ffi::Function f_visit_int_imm,         //
                                                          ffi::Function f_visit_float_imm,       //
                                                          ffi::Function f_visit_string_imm) {
-    ObjectPtr<PyStmtExprMutatorNode> n = ffi::make_object<PyStmtExprMutatorNode>();
+    ffi::ObjectPtr<PyStmtExprMutatorNode> n = ffi::make_object<PyStmtExprMutatorNode>();
     n->f_visit_stmt = std::move(f_visit_stmt);
     n->f_visit_expr = std::move(f_visit_expr);
     // Statement functions
@@ -761,7 +750,6 @@ class PyStmtExprMutator : public ObjectRef {
     n->f_visit_sblock_realize = std::move(f_visit_sblock_realize);
     // Expression functions
     n->f_visit_var = std::move(f_visit_var);
-    n->f_visit_size_var = std::move(f_visit_size_var);
     n->f_visit_buffer_load = std::move(f_visit_buffer_load);
     n->f_visit_producer_load = std::move(f_visit_producer_load);
     n->f_visit_let = std::move(f_visit_let);
@@ -796,7 +784,7 @@ class PyStmtExprMutator : public ObjectRef {
     return PyStmtExprMutator(n);
   }
 
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(PyStmtExprMutator, ObjectRef,
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(PyStmtExprMutator, ffi::ObjectRef,
                                                 PyStmtExprMutatorNode);
 };
 
@@ -821,13 +809,13 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()
       .def("tirx.PyStmtExprVisitorDefaultVisitExpr",
-           [](PyStmtExprVisitor visitor, const PrimExpr& expr) { visitor->DefaultVisitExpr(expr); })
+           [](PyStmtExprVisitor visitor, const Expr& expr) { visitor->DefaultVisitExpr(expr); })
       .def("tirx.PyStmtExprVisitorDefaultVisitStmt",
            [](PyStmtExprVisitor visitor, const Stmt& stmt) { visitor->DefaultVisitStmt(stmt); })
       .def("tirx.PyStmtExprVisitorVisitStmt",
            [](PyStmtExprVisitor visitor, const Stmt& stmt) { visitor->VisitStmt(stmt); })
       .def("tirx.PyStmtExprVisitorVisitExpr",
-           [](PyStmtExprVisitor visitor, const PrimExpr& expr) { visitor->VisitExpr(expr); });
+           [](PyStmtExprVisitor visitor, const Expr& expr) { visitor->VisitExpr(expr); });
 }
 
 // StmtExprMutator
@@ -835,7 +823,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()
       .def("tirx.PyStmtExprMutatorDefaultVisitExpr",
-           [](PyStmtExprMutator mutator, const PrimExpr& expr) {
+           [](PyStmtExprMutator mutator, const Expr& expr) {
              return mutator->DefaultVisitExpr(expr);
            })
       .def("tirx.PyStmtExprMutatorDefaultVisitStmt",
@@ -843,7 +831,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
              return mutator->DefaultVisitStmt(stmt);
            })
       .def("tirx.PyStmtExprMutatorVisitExpr",
-           [](PyStmtExprMutator mutator, const PrimExpr& expr) { return mutator->VisitExpr(expr); })
+           [](PyStmtExprMutator mutator, const Expr& expr) { return mutator->VisitExpr(expr); })
       .def("tirx.PyStmtExprMutatorVisitStmt",
            [](PyStmtExprMutator mutator, const Stmt& stmt) { return mutator->VisitStmt(stmt); });
 }

@@ -39,7 +39,7 @@ ffi::Optional<s_tir::SBlockRV> TileForIntrin(s_tir::Schedule sch, s_tir::SBlockR
   if (!tiled_loop_rv) {
     return std::nullopt;
   }
-  TVM_FFI_ICHECK(tiled_loop_rv.defined());
+  TVM_FFI_ICHECK(tiled_loop_rv.has_value());
   s_tir::SBlockRV outer_block = sch->Blockize(tiled_loop_rv.value());
   sch->Annotate(outer_block, s_tir::attr::meta_schedule_auto_tensorize, ffi::String(intrin_name));
   return outer_block;
@@ -70,7 +70,7 @@ class MultiLevelTilingWithIntrinNode : public MultiLevelTilingNode {
 
   // Inherited from ScheduleRuleNode
   ScheduleRule Clone() const final {
-    ObjectPtr<MultiLevelTilingWithIntrinNode> n =
+    ffi::ObjectPtr<MultiLevelTilingWithIntrinNode> n =
         ffi::make_object<MultiLevelTilingWithIntrinNode>(*this);
     return ScheduleRule(n);
   }
@@ -102,11 +102,11 @@ class MultiLevelTilingWithIntrinNode : public MultiLevelTilingNode {
 
 ScheduleRule ScheduleRule::MultiLevelTilingWithIntrin(
     ffi::String intrin_name, ffi::String structure,
-    ffi::Optional<ffi::Array<ffi::String>> tile_binds, ffi::Optional<Integer> max_innermost_factor,
-    ffi::Optional<ffi::Array<Integer>> vector_load_lens,
+    ffi::Optional<ffi::Array<ffi::String>> tile_binds, ffi::Optional<int64_t> max_innermost_factor,
+    ffi::Optional<ffi::Array<int64_t>> vector_load_lens,
     ffi::Optional<ffi::Map<ffi::String, ffi::Any>> reuse_read,
     ffi::Optional<ffi::Map<ffi::String, ffi::Any>> reuse_write) {
-  TVM_FFI_ICHECK(tirx::TensorIntrin::Get(intrin_name).defined())
+  TVM_FFI_ICHECK(tirx::TensorIntrin::Get(intrin_name).has_value())
       << "Provided tensor intrinsic " << intrin_name << " is not registered.";
   auto node = MultiLevelTilingInitCommon<MultiLevelTilingWithIntrinNode>(
       structure, tile_binds, max_innermost_factor, vector_load_lens, reuse_read, reuse_write);

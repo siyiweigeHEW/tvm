@@ -17,6 +17,7 @@
  * under the License.
  */
 
+#include <tvm/ffi/cast.h>
 #include <tvm/s_tir/stmt.h>
 
 #include <string>
@@ -29,7 +30,7 @@ using namespace tvm::tirx;
 
 using support::NDIntSet;
 
-bool HasBuffer(const ffi::Array<BufferRegion>& buffer_regions, const Buffer& buffer) {
+bool HasBuffer(const ffi::Array<BufferRegion>& buffer_regions, const BufferVar& buffer) {
   for (const BufferRegion& buffer_region : buffer_regions) {
     if (buffer_region->buffer.same_as(buffer)) {
       return true;
@@ -39,7 +40,7 @@ bool HasBuffer(const ffi::Array<BufferRegion>& buffer_regions, const Buffer& buf
 }
 
 void RelaxBufferRegions(const ffi::Array<BufferRegion>& buffer_regions,
-                        const Buffer& buffer,                         //
+                        const BufferVar& buffer,                      //
                         const ffi::Map<Var, arith::IntSet>& var_dom,  //
                         const ffi::Map<Var, PrimExpr>& bindings,      //
                         std::vector<NDIntSet>* relaxed_regions) {
@@ -54,9 +55,9 @@ void RelaxBufferRegions(const ffi::Array<BufferRegion>& buffer_regions,
 
 class ScopeReplacer : public StmtMutator {
  public:
-  static SBlock Replace(const SBlockNode* scope_block, const Buffer& dst, const ForNode* old_loop,
-                        const ForNode* new_loop) {
-    ObjectPtr<SBlockNode> new_scope_block = ffi::make_object<SBlockNode>(*scope_block);
+  static SBlock Replace(const SBlockNode* scope_block, const BufferVar& dst,
+                        const ForNode* old_loop, const ForNode* new_loop) {
+    ffi::ObjectPtr<SBlockNode> new_scope_block = ffi::make_object<SBlockNode>(*scope_block);
     new_scope_block->body = ScopeReplacer(old_loop, new_loop)(std::move(new_scope_block->body));
     new_scope_block->alloc_buffers.push_back(dst);
     return SBlock(new_scope_block);
@@ -83,25 +84,25 @@ class ScopeReplacer : public StmtMutator {
 
 class ReadWriteAtBufferReplacer : public StmtExprMutator {
  public:
-  explicit ReadWriteAtBufferReplacer(const Buffer& src, const Buffer& dst,
+  explicit ReadWriteAtBufferReplacer(const BufferVar& src, const BufferVar& dst,
                                      ffi::Map<SBlock, SBlock>* block_sref_reuse)
       : src_(src), dst_(dst), block_sref_reuse_(block_sref_reuse) {}
 
  private:
   Stmt VisitStmt_(const BufferStoreNode* _store) final {
-    BufferStore store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(_store));
+    BufferStore store = StmtExprMutator::VisitStmt_(_store).as_or_throw<BufferStore>();
     if (store->buffer.same_as(src_)) {
-      ObjectPtr<BufferStoreNode> new_store = ffi::make_object<BufferStoreNode>(*store.get());
+      ffi::ObjectPtr<BufferStoreNode> new_store = ffi::make_object<BufferStoreNode>(*store.get());
       new_store->buffer = dst_;
       return BufferStore(new_store);
     }
     return store;
   }
 
-  PrimExpr VisitExpr_(const BufferLoadNode* _load) final {
-    BufferLoad load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(_load));
+  Expr VisitExpr_(const BufferLoadNode* _load) final {
+    BufferLoad load = StmtExprMutator::VisitExpr_(_load).as_or_throw<BufferLoad>();
     if (load->buffer.same_as(src_)) {
-      ObjectPtr<BufferLoadNode> new_load = ffi::make_object<BufferLoadNode>(*load.get());
+      ffi::ObjectPtr<BufferLoadNode> new_load = ffi::make_object<BufferLoadNode>(*load.get());
       new_load->buffer = dst_;
       return BufferLoad(new_load);
     }
@@ -110,16 +111,16 @@ class ReadWriteAtBufferReplacer : public StmtExprMutator {
 
   Stmt VisitStmt_(const SBlockNode* _block) final {
     SBlock old_block = ffi::GetRef<SBlock>(_block);
-    SBlock block = Downcast<SBlock>(StmtExprMutator::VisitStmt_(_block));
-    ObjectPtr<SBlockNode> new_block = ffi::make_object<SBlockNode>(*block.get());
+    SBlock block = StmtExprMutator::VisitStmt_(_block).as_or_throw<SBlock>();
+    ffi::ObjectPtr<SBlockNode> new_block = ffi::make_object<SBlockNode>(*block.get());
     new_block->reads = ReplaceBuffer(new_block->reads, src_, dst_);
     new_block->writes = ReplaceBuffer(new_block->writes, src_, dst_);
     block_sref_reuse_->Set(old_block, SBlock(new_block));
     return SBlock(new_block);
   }
 
-  const Buffer& src_;
-  const Buffer& dst_;
+  const BufferVar& src_;
+  const BufferVar& dst_;
   ffi::Map<SBlock, SBlock>* block_sref_reuse_;
 };
 
@@ -129,12 +130,12 @@ struct ReadWriteAtImpl {
                        int buffer_index, const ffi::String& storage_scope,
                        ffi::Map<ffi::String, Any> annotations) {
     const SBlockNode* block = TVM_SREF_TO_SBLOCK(block_sref);
-    Buffer src = GetNthAccessBuffer(self, ffi::GetRef<SBlock>(block), buffer_index,
-                                    is_read ? BufferIndexType::kRead : BufferIndexType::kWrite);
-    Buffer dst = WithScope(src, storage_scope);
+    BufferVar src = GetNthAccessBuffer(self, ffi::GetRef<SBlock>(block), buffer_index,
+                                       is_read ? BufferIndexType::kRead : BufferIndexType::kWrite);
+    BufferVar dst = WithScope(src, storage_scope);
     ReadWriteAtImpl impl(self, loop_sref, src, dst, annotations);
     std::pair<For, SBlockRealize> new_loop_block =
-        impl.MakeLoopAndBlock<is_read>(src->name + "_" + storage_scope);
+        impl.MakeLoopAndBlock<is_read>(src.name() + "_" + storage_scope);
     StmtSRef result_block_sref =
         impl.ReplaceScopeBlock(new_loop_block.first.get(), new_loop_block.second->block.get());
     impl.UpdateSBlockInfo(result_block_sref, !new_loop_block.second->iter_values.empty());
@@ -184,7 +185,7 @@ struct ReadWriteAtImpl {
       bool r_visited = false;
       bool w_visited = false;
       auto f_visit = [this, &relaxed_regions, &r_visited, &w_visited,
-                      &scope](const ObjectRef& obj) -> bool {
+                      &scope](const ffi::ObjectRef& obj) -> bool {
         const SBlockRealizeNode* realize = obj.as<SBlockRealizeNode>();
         if (realize == nullptr) {
           return true;
@@ -224,7 +225,7 @@ struct ReadWriteAtImpl {
       TVM_FFI_ICHECK(w_pos.empty() || w_pos.back() < r_pos.front());
       // Can be inserted at [0, r_pos.front()], i.e. before the first read
       insert_pos = r_pos.front();
-      // Buffer reads in [insert_pos, +oo) is rewritten
+      // BufferVar reads in [insert_pos, +oo) is rewritten
       st = insert_pos;
       ed = n_subtrees;
     } else {
@@ -259,19 +260,19 @@ struct ReadWriteAtImpl {
             ? MakeSBlock(src_, dst_, new_block_name_hint, GetLoopDomain(loop_sref_.get()), domain)
             : MakeSBlock(dst_, src_, new_block_name_hint, GetLoopDomain(loop_sref_.get()), domain);
     subtrees.insert(subtrees.begin() + insert_pos, realize);
-    ObjectPtr<ForNode> new_loop = ffi::make_object<ForNode>(*loop_);
+    ffi::ObjectPtr<ForNode> new_loop = ffi::make_object<ForNode>(*loop_);
     new_loop->body = SeqStmt(std::move(subtrees));
     return {For(new_loop), realize};
   }
 
-  SBlockRealize MakeSBlock(const Buffer& copy_from, const Buffer& copy_to,
+  SBlockRealize MakeSBlock(const BufferVar& copy_from, const BufferVar& copy_to,
                            const ffi::String& name_hint, const ffi::Map<Var, Range>& loop_domain,
                            ffi::Array<Range> domain) const {
     int n = domain.size();
     std::vector<Var> loop_vars;
     loop_vars.reserve(n);
     for (int i = 0; i < n; ++i) {
-      loop_vars.push_back(Var("ax" + std::to_string(i)));
+      loop_vars.push_back(PrimVar("ax" + std::to_string(i)));
     }
     ffi::Map<Var, PrimExpr> bindings;
     ffi::Array<IterVar> iter_vars;
@@ -282,34 +283,34 @@ struct ReadWriteAtImpl {
     indices.reserve(n);
     for (int i = 0; i < n; ++i) {
       auto f_substitute = [&loop_domain, &bindings, &iter_vars,
-                           &iter_values](const Var& var) -> ffi::Optional<PrimExpr> {
+                           &iter_values](const Var& var) -> ffi::Optional<Expr> {
         auto it = bindings.find(var);
         if (it != bindings.end()) {
           return (*it).second;
         }
         Range range = loop_domain.at(var);
-        ObjectPtr<VarNode> v = ffi::make_object<VarNode>(*var.get());
-        v->name_hint = "v" + std::to_string(iter_vars.size());
-        bindings.Set(var, Var(v));
-        iter_values.push_back(var);
-        iter_vars.push_back(IterVar(range, Var(v), IterVarType::kDataPar));
-        return Var(v);
+        Var v("v" + std::to_string(iter_vars.size()), var->ty, var->span);
+        bindings.Set(var, v.as_or_throw<PrimExpr>());
+        iter_values.push_back(var.as_or_throw<PrimExpr>());
+        iter_vars.push_back(IterVar(range, v.as_or_throw<PrimVar>(), IterVarType::kDataPar));
+        return v.as_or_throw<PrimExpr>();
       };
-      ObjectPtr<RangeNode> dom = ffi::make_object<RangeNode>(*domain[i].get());
+      ffi::ObjectPtr<RangeNode> dom = ffi::make_object<RangeNode>(*domain[i].get());
       dom->min = Substitute(std::move(dom->min), f_substitute);
       dom->extent = Substitute(std::move(dom->extent), f_substitute);
       domain.Set(i, Range(dom));
     }
     for (int i = 0; i < n; ++i) {
-      indices.push_back(domain[i]->min + loop_vars[i]);
+      indices.push_back(domain[i]->min + loop_vars[i].as_or_throw<PrimExpr>());
     }
     Stmt stmt = BufferStore(copy_to, /*value=*/BufferLoad(copy_from, indices), /*indices=*/indices);
     for (int i = n - 1; i >= 0; --i) {
-      stmt = For(loop_vars[i], Integer(0), domain[i]->extent, ForKind::kSerial, stmt);
+      stmt = For(loop_vars[i].as_or_throw<PrimVar>(), IntImm::Int32(0), domain[i]->extent,
+                 ForKind::kSerial, stmt);
     }
     return SBlockRealize(
         /*values=*/iter_values,
-        /*predicate=*/const_true(),
+        /*predicate=*/IntImm::Bool(true),
         SBlock(/*iter_vars=*/iter_vars,
                /*reads=*/{BufferRegion(copy_from, domain)},
                /*writes=*/{BufferRegion(copy_to, domain)},
@@ -321,8 +322,8 @@ struct ReadWriteAtImpl {
                /*annotations=*/annotations_));
   }
 
-  explicit ReadWriteAtImpl(ScheduleState self, const StmtSRef& loop_sref, const Buffer& src,
-                           const Buffer& dst, ffi::Map<ffi::String, Any> annotations)
+  explicit ReadWriteAtImpl(ScheduleState self, const StmtSRef& loop_sref, const BufferVar& src,
+                           const BufferVar& dst, ffi::Map<ffi::String, Any> annotations)
       : self_(self),
         loop_sref_(loop_sref),
         loop_(nullptr),
@@ -330,18 +331,18 @@ struct ReadWriteAtImpl {
         dst_(dst),
         annotations_(annotations),
         block_sref_reuse_(),
-        analyzer_(std::make_unique<arith::Analyzer>()) {
+        analyzer_(arith::Analyzer()) {
     loop_ = TVM_SREF_TO_FOR(loop_sref);
   }
 
   ScheduleState self_;
   const StmtSRef& loop_sref_;
   const ForNode* loop_;
-  const Buffer& src_;
-  const Buffer& dst_;
+  const BufferVar& src_;
+  const BufferVar& dst_;
   ffi::Map<ffi::String, Any> annotations_;
   ffi::Map<SBlock, SBlock> block_sref_reuse_;
-  std::unique_ptr<arith::Analyzer> analyzer_;
+  arith::Analyzer analyzer_;
 };
 
 StmtSRef ReadAt(ScheduleState self, const StmtSRef& loop_sref, const StmtSRef& block_sref,
@@ -370,12 +371,12 @@ struct ReadAtTraits : public UnpackedInstTraits<ReadAtTraits> {
   StmtSRef ReadAt(ScheduleState self, const StmtSRef& loop_sref, const StmtSRef& block_sref,
                   int buffer_index, const ffi::String& storage_scope);
   static SBlockRV UnpackedApplyToSchedule(Schedule sch, LoopRV loop, SBlockRV block,
-                                          Integer read_buffer_index, ffi::String storage_scope) {
+                                          IntImm read_buffer_index, ffi::String storage_scope) {
     return sch->ReadAt(loop, block, read_buffer_index->value, storage_scope);
   }
 
   static ffi::String UnpackedAsPython(ffi::Array<ffi::String> outputs, ffi::String loop,
-                                      ffi::String block, Integer read_buffer_index,
+                                      ffi::String block, IntImm read_buffer_index,
                                       ffi::String storage_scope) {
     PythonAPICall py("read_at");
     py.Input("loop", loop);
@@ -400,12 +401,12 @@ struct WriteAtTraits : public UnpackedInstTraits<WriteAtTraits> {
   static constexpr size_t kNumDecisions = 0;
 
   static SBlockRV UnpackedApplyToSchedule(Schedule sch, LoopRV loop, SBlockRV block,
-                                          Integer write_buffer_index, ffi::String storage_scope) {
+                                          IntImm write_buffer_index, ffi::String storage_scope) {
     return sch->WriteAt(loop, block, write_buffer_index->value, storage_scope);
   }
 
   static ffi::String UnpackedAsPython(ffi::Array<ffi::String> outputs, ffi::String loop,
-                                      ffi::String block, Integer write_buffer_index,
+                                      ffi::String block, IntImm write_buffer_index,
                                       ffi::String storage_scope) {
     PythonAPICall py("write_at");
     py.Input("loop", loop);

@@ -17,6 +17,7 @@
  * under the License.
  */
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/script/printer/printer.h>
 
 #include <set>
 #include <thread>
@@ -114,11 +115,12 @@ class JSONDatabaseNode : public DatabaseNode {
 
   void CommitTuningRecord(const TuningRecord& record) {
     this->tuning_records_.insert(record);
-    JSONFileAppendLine(this->path_tuning_record,
-                       JSONDumps(ffi::Array<Any>{
-                           /*workload_index=*/Integer(this->workloads2idx_.at(record->workload)),
-                           /*tuning_record=*/record->AsJSON()  //
-                       }));
+    JSONFileAppendLine(
+        this->path_tuning_record,
+        JSONDumps(ffi::Array<Any>{
+            /*workload_index=*/IntImm::Int32(this->workloads2idx_.at(record->workload)),
+            /*tuning_record=*/record->AsJSON()  //
+        }));
   }
 
   ffi::Array<TuningRecord> GetTopK(const Workload& workload, int top_k) {
@@ -159,7 +161,7 @@ class JSONDatabaseNode : public DatabaseNode {
 Database Database::JSONDatabase(ffi::String path_workload, ffi::String path_tuning_record,
                                 bool allow_missing, ffi::String mod_eq_name) {
   int num_threads = std::thread::hardware_concurrency();
-  ObjectPtr<JSONDatabaseNode> n = ffi::make_object<JSONDatabaseNode>(mod_eq_name);
+  ffi::ObjectPtr<JSONDatabaseNode> n = ffi::make_object<JSONDatabaseNode>(mod_eq_name);
   // Load `n->workloads2idx_` from `path_workload`
   std::vector<Workload> workloads;
   {
@@ -168,12 +170,12 @@ Database Database::JSONDatabase(ffi::String path_workload, ffi::String path_tuni
     n->workloads2idx_.reserve(n_objs);
     workloads.reserve(n_objs);
     for (int i = 0; i < n_objs; ++i) {
-      Workload workload = Workload::FromJSON(json_objs[i].cast<ObjectRef>());
+      Workload workload = Workload::FromJSON(json_objs[i].cast<ffi::ObjectRef>());
       auto recalc_hash = n->GetModuleEquality().Hash(workload->mod);
       // Todo(tvm-team): re-enable the shash check when we get environment
       // independent structural hash values.
       if (recalc_hash != workload->shash) {
-        ObjectPtr<WorkloadNode> wkl = ffi::make_object<WorkloadNode>(*workload.get());
+        ffi::ObjectPtr<WorkloadNode> wkl = ffi::make_object<WorkloadNode>(*workload.get());
         wkl->shash = recalc_hash;
         workload = Workload(wkl);
       }
@@ -188,7 +190,7 @@ Database Database::JSONDatabase(ffi::String path_workload, ffi::String path_tuni
     records.resize(json_objs.size(), TuningRecord{ffi::UnsafeInit()});
     support::parallel_for_dynamic(
         0, json_objs.size(), num_threads, [&](int thread_id, int task_id) {
-          auto json_obj = json_objs[task_id].cast<ObjectRef>();
+          auto json_obj = json_objs[task_id].cast<ffi::ObjectRef>();
           Workload workload{ffi::UnsafeInit()};
           try {
             const ffi::ArrayObj* arr = json_obj.as<ffi::ArrayObj>();
@@ -197,14 +199,15 @@ Database Database::JSONDatabase(ffi::String path_workload, ffi::String path_tuni
             TVM_FFI_ICHECK(workload_index >= 0 &&
                            static_cast<size_t>(workload_index) < workloads.size());
             workload = workloads[workload_index];
-            records[task_id] = TuningRecord::FromJSON(arr->at(1).cast<ObjectRef>(), workload);
+            records[task_id] = TuningRecord::FromJSON(arr->at(1).cast<ffi::ObjectRef>(), workload);
           } catch (std::runtime_error& e) {
-            TVM_FFI_THROW(ValueError) << "Unable to parse TuningRecord, on line " << (task_id + 1)
-                                      << " of file " << path_tuning_record << ". The workload is:\n"
-                                      << (workload.defined() ? workload->mod->Script() : "(null)")
-                                      << "\nThe JSONObject of TuningRecord is:\n"
-                                      << json_obj << "\nThe error message is:\n"
-                                      << e.what();
+            TVM_FFI_THROW(ValueError)
+                << "Unable to parse TuningRecord, on line " << (task_id + 1) << " of file "
+                << path_tuning_record << ". The workload is:\n"
+                << (workload.defined() ? tvm::Script(workload->mod) : "(null)")
+                << "\nThe JSONObject of TuningRecord is:\n"
+                << json_obj << "\nThe error message is:\n"
+                << e.what();
           }
         });
     for (const TuningRecord& record : records) {

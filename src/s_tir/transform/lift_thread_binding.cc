@@ -22,6 +22,7 @@
  * \brief Convert the blocks to opaque blocks which do not have block vars.
  */
 
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/s_tir/transform.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -34,7 +35,7 @@ namespace s_tir {
 using namespace tvm::tirx;
 
 std::pair<std::unordered_map<Stmt, std::vector<std::pair<IterVar, ffi::Map<ffi::String, ffi::Any>>>,
-                             ObjectPtrHash, ObjectPtrEqual>,
+                             ffi::ObjectPtrHash, ffi::ObjectPtrEqual>,
           ffi::Map<Var, Var>>
 FindLoopLCA(const Stmt& root) {
   class LCAFinder : public StmtVisitor {
@@ -59,8 +60,11 @@ FindLoopLCA(const Stmt& root) {
       IterVar& iter_var = iters[thread_tag];
       if (!iter_var.defined()) {
         iter_var = IterVar(Range::FromMinExtent(loop->min, loop->extent),  //
-                           loop->loop_var.copy_with_name(thread_tag),      //
-                           loop->thread_binding.value()->iter_type,        //
+                           loop->loop_var
+                               .as_or_throw<Var>()                   //
+                               .CopyWithName(thread_tag)             //
+                               .as_or_throw<PrimVar>(),              //
+                           loop->thread_binding.value()->iter_type,  //
                            thread_tag);
         lca[thread_tag] = stack;
         var_subst.Set(loop->loop_var, iter_var->var);
@@ -86,7 +90,7 @@ FindLoopLCA(const Stmt& root) {
   LCAFinder finder;
   finder(root);
   std::unordered_map<Stmt, std::vector<std::pair<IterVar, ffi::Map<ffi::String, ffi::Any>>>,
-                     ObjectPtrHash, ObjectPtrEqual>
+                     ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
       result;
   std::vector<std::string> sorted_thread_tags;
   for (const auto& kv : finder.lca) {
@@ -126,13 +130,13 @@ class ThreadBindingLifter : public StmtExprMutator {
         SetKernelRoot(_op);
       }
     }
-    For new_op = Downcast<For>(StmtExprMutator::VisitStmt_(_op));
+    For new_op = StmtExprMutator::VisitStmt_(_op).as_or_throw<For>();
     Stmt body = std::move(new_op.CopyOnWrite()->body);
     if (auto it = iter_lca.find(op); it != iter_lca.end()) {
       for (const auto& [iter_var, annotation] : it->second) {
         body = For(iter_var->var, iter_var->dom->min, iter_var->dom->extent,
                    ForKind::kThreadBinding, std::move(body),
-                   IterVar(Range(nullptr), Var(iter_var->thread_tag, iter_var->var->dtype),
+                   IterVar(Range(nullptr), PrimVar(iter_var->thread_tag, iter_var->var.ty()),
                            kThreadIndex, iter_var->thread_tag),
                    annotation, std::nullopt);
       }
@@ -155,17 +159,17 @@ class ThreadBindingLifter : public StmtExprMutator {
     this->var_subst = std::move(result.second);
   }
 
-  PrimExpr VisitExpr_(const VarNode* op) final {
+  Expr VisitExpr_(const VarNode* op) final {
     auto it = var_subst.find(ffi::GetRef<Var>(op));
     if (it != var_subst.end()) {
       return (*it).second;
     } else {
-      return ffi::GetRef<PrimExpr>(op);
+      return ffi::GetRef<Var>(op);
     }
   }
 
   std::unordered_map<Stmt, std::vector<std::pair<IterVar, ffi::Map<ffi::String, ffi::Any>>>,
-                     ObjectPtrHash, ObjectPtrEqual>
+                     ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
       iter_lca;
   ffi::Map<Var, Var> var_subst;
 };

@@ -19,8 +19,7 @@
 import tvm_ffi
 
 import tvm
-from tvm.runtime import Device
-from tvm.runtime.object import Object
+from tvm.runtime import Device, Object
 
 from . import _ffi_api
 
@@ -30,8 +29,8 @@ class GlobalInfo(Object):
     """Base node for all global info that can appear in the IR"""
 
     def __eq__(self, other):
-        """Compare two struct info for structural equivalence."""
-        return tvm.ir.structural_equal(self, other)
+        """Compare two global info objects for structural equivalence."""
+        return tvm_ffi.structural_equal(self, other)
 
     def __ne__(self, other):
         return not self.__eq__(other)

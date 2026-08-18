@@ -22,6 +22,7 @@
  */
 #include "ir_visitor_with_analyzer.h"
 
+#include <tvm/ir/op.h>
 #include <tvm/s_tir/stmt.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
@@ -34,15 +35,23 @@ using namespace tirx;
 
 void IRVisitorWithAnalyzer::VisitStmt_(const ForNode* op) {
   constraint_scope_.WithNewScope([&]() {
-    analyzer_.Bind(op->loop_var, Range::FromMinExtent(op->min, op->extent));
-    StmtExprVisitor::VisitStmt_(op);
+    analyzer_->Bind(op->loop_var, Range::FromMinExtent(op->min, op->extent));
+    this->VisitExpr(op->min);
+    this->VisitExpr(op->extent);
+    if (op->step.has_value()) {
+      this->VisitExpr(*op->step);
+    }
+    constraint_scope_.WithNewScope([&]() {
+      constraint_scope_.Current().Emplace(analyzer_, op->extent > IntImm(op->extent.ty(), 0));
+      this->VisitStmt(op->body);
+    });
   });
 }
 
 void IRVisitorWithAnalyzer::VisitStmt_(const SBlockNode* op) {
   constraint_scope_.WithNewScope([&]() {
     for (const auto& iter_var : op->iter_vars) {
-      analyzer_.Bind(iter_var->var, iter_var->dom);
+      analyzer_->Bind(iter_var->var, iter_var->dom);
     }
     StmtExprVisitor::VisitStmt_(op);
   });
@@ -50,7 +59,9 @@ void IRVisitorWithAnalyzer::VisitStmt_(const SBlockNode* op) {
 
 void IRVisitorWithAnalyzer::VisitStmt_(const BindNode* op) {
   this->VisitExpr(op->value);
-  analyzer_.Bind(op->var, op->value);
+  if (ffi::Optional<PrimExpr> value = op->value.as<PrimExpr>()) {
+    analyzer_->Bind(op->var, value.value());
+  }
 }
 
 void IRVisitorWithAnalyzer::VisitStmt_(const IfThenElseNode* op) {
@@ -60,13 +71,13 @@ void IRVisitorWithAnalyzer::VisitStmt_(const IfThenElseNode* op) {
     PrimExpr real_condition = ExtractRealCondition(op->condition);
 
     constraint_scope_.WithNewScope([&]() {
-      constraint_scope_.Current().Emplace(&analyzer_, real_condition);
+      constraint_scope_.Current().Emplace(analyzer_, real_condition);
       this->VisitStmt(op->then_case);
     });
     if (op->else_case) {
       constraint_scope_.WithNewScope([&]() {
-        constraint_scope_.Current().Emplace(&analyzer_,
-                                            analyzer_.rewrite_simplify(Not(real_condition)));
+        constraint_scope_.Current().Emplace(analyzer_,
+                                            analyzer_->rewrite_simplify(Not(real_condition)));
         this->VisitStmt(op->else_case.value());
       });
     }
@@ -76,9 +87,9 @@ void IRVisitorWithAnalyzer::VisitStmt_(const IfThenElseNode* op) {
 void IRVisitorWithAnalyzer::VisitStmt_(const AttrStmtNode* op) {
   constraint_scope_.WithNewScope([&]() {
     if (op->attr_key == tirx::attr::thread_extent || op->attr_key == s_tir::attr::virtual_thread) {
-      IterVar iv = Downcast<IterVar>(op->node);
+      IterVar iv = op->node.as_or_throw<IterVar>();
       TVM_FFI_ICHECK_NE(iv->thread_tag.length(), 0U);
-      analyzer_.Bind(iv->var, Range::FromMinExtent(IntImm(op->value->dtype, 0), op->value));
+      analyzer_->Bind(iv->var, Range::FromMinExtent(IntImm(op->value.ty(), 0), op->value));
     }
     StmtExprVisitor::VisitStmt_(op);
   });
@@ -86,7 +97,7 @@ void IRVisitorWithAnalyzer::VisitStmt_(const AttrStmtNode* op) {
 
 void IRVisitorWithAnalyzer::VisitStmt_(const AssertStmtNode* op) {
   this->VisitExpr(op->condition);
-  constraint_scope_.Current().Emplace(&analyzer_, op->condition);
+  constraint_scope_.Current().Emplace(analyzer_, op->condition);
 }
 
 void IRVisitorWithAnalyzer::VisitStmt_(const SeqStmtNode* op) {
@@ -96,16 +107,16 @@ void IRVisitorWithAnalyzer::VisitStmt_(const SeqStmtNode* op) {
 
 void IRVisitorWithAnalyzer::VisitExpr_(const CallNode* op) {
   // add condition context to if_then_else
-  static auto op_if_then_else = Op::Get("tirx.if_then_else");
-  if (op->op.same_as(op_if_then_else)) {
-    PrimExpr cond = op->args[0];
-    this->VisitExpr(op->args[0]);
+  static const Op& if_then_else_op = Op::Get("tirx.if_then_else");
+  if (op->op.same_as(if_then_else_op)) {
+    PrimExpr cond = op->args[0].as_or_throw<PrimExpr>();
+    this->VisitExpr(cond);
     constraint_scope_.WithNewScope([&]() {
-      constraint_scope_.Current().Emplace(&analyzer_, cond);
+      constraint_scope_.Current().Emplace(analyzer_, cond);
       this->VisitExpr(op->args[1]);
     });
     constraint_scope_.WithNewScope([&]() {
-      constraint_scope_.Current().Emplace(&analyzer_, analyzer_.rewrite_simplify(Not(cond)));
+      constraint_scope_.Current().Emplace(analyzer_, analyzer_->rewrite_simplify(Not(cond)));
       this->VisitExpr(op->args[2]);
     });
   } else {
@@ -115,13 +126,13 @@ void IRVisitorWithAnalyzer::VisitExpr_(const CallNode* op) {
 
 void IRVisitorWithAnalyzer::VisitExpr_(const LetNode* op) {
   this->VisitExpr(op->value);
-  analyzer_.Bind(op->var, op->value);
+  analyzer_->Bind(op->var, op->value);
   this->VisitExpr(op->body);
 }
 
 void IRVisitorWithAnalyzer::VisitExpr_(const ReduceNode* op) {
   for (const IterVar& iv : op->axis) {
-    analyzer_.Bind(iv->var, iv->dom);
+    analyzer_->Bind(iv->var, iv->dom);
   }
   StmtExprVisitor::VisitExpr_(op);
 }
@@ -129,7 +140,7 @@ void IRVisitorWithAnalyzer::VisitExpr_(const ReduceNode* op) {
 PrimExpr IRVisitorWithAnalyzer::ExtractRealCondition(PrimExpr condition) const {
   if (auto call = condition.as<CallNode>()) {
     if (call->op.same_as(builtin::likely())) {
-      return call->args[0];
+      return call->args[0].as_or_throw<PrimExpr>();
     }
   }
 

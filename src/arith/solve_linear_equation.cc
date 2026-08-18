@@ -24,9 +24,10 @@
 #include <tvm/arith/analyzer.h>
 #include <tvm/arith/int_solver.h>
 #include <tvm/arith/pattern.h>
+#include <tvm/ffi/dtype.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/runtime/data_type.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -132,10 +133,10 @@ void SmithNormalFormDiag(std::vector<std::vector<int64_t>>* S, std::vector<std::
           (*S)[i][j] = new_i_j;
         }
         // We have to do the same with rhs
-        PrimExpr ea = tirx::make_const((*y)[index].dtype(), a);
-        PrimExpr eb = tirx::make_const((*y)[i].dtype(), b);
-        PrimExpr e_m_g = tirx::make_const((*y)[i].dtype(), m_g);
-        PrimExpr e_n_g = tirx::make_const((*y)[index].dtype(), n_g);
+        PrimExpr ea = tirx::MakeConst((*y)[index].ty(), a);
+        PrimExpr eb = tirx::MakeConst((*y)[i].ty(), b);
+        PrimExpr e_m_g = tirx::MakeConst((*y)[i].ty(), m_g);
+        PrimExpr e_n_g = tirx::MakeConst((*y)[index].ty(), n_g);
         PrimExpr new_index_rhs = ea * (*y)[index] + eb * (*y)[i];
         PrimExpr new_i_rhs = e_n_g * (*y)[index] - e_m_g * (*y)[i];
         (*y)[index] = new_index_rhs;
@@ -192,10 +193,10 @@ void SmithNormalFormDiag(std::vector<std::vector<int64_t>>* S, std::vector<std::
           (*V)[i][j] = new_i_j;
         }
         // And apply reverse transformations to new_to_old.
-        PrimExpr ea = tirx::make_const((*x)[j].dtype(), a);
-        PrimExpr eb = tirx::make_const((*x)[index].dtype(), b);
-        PrimExpr e_m_g = tirx::make_const((*x)[index].dtype(), m_g);
-        PrimExpr e_n_g = tirx::make_const((*x)[j].dtype(), n_g);
+        PrimExpr ea = tirx::MakeConst((*x)[j].ty(), a);
+        PrimExpr eb = tirx::MakeConst((*x)[index].ty(), b);
+        PrimExpr e_m_g = tirx::MakeConst((*x)[index].ty(), m_g);
+        PrimExpr e_n_g = tirx::MakeConst((*x)[j].ty(), n_g);
         PrimExpr new_index = e_m_g * (*x)[index] + e_n_g * (*x)[j];
         PrimExpr new_j = eb * (*x)[index] - ea * (*x)[j];
         (*x)[index] = new_index;
@@ -212,13 +213,13 @@ void SmithNormalFormDiag(std::vector<std::vector<int64_t>>* S, std::vector<std::
 }
 
 ffi::Map<Var, Range> InferRange(const ffi::Map<Var, PrimExpr>& vars_to_infer,
-                                const ffi::Array<Var>& ori_vars,
+                                const ffi::Array<PrimVar>& ori_vars,
                                 const ffi::Map<Var, Range>& ori_ranges) {
   // The resulting ranges
   ffi::Map<Var, Range> new_ranges;
 
   std::unordered_set<const VarNode*> ori_vset;
-  for (const Var& v : ori_vars) {
+  for (const PrimVar& v : ori_vars) {
     ori_vset.insert(v.get());
   }
 
@@ -283,7 +284,7 @@ IntConstraintsTransform SolveLinearEquations(const IntConstraints& system_to_sol
   std::vector<PrimExpr> rest;
 
   Analyzer analyzer_problem;
-  analyzer_problem.Bind(system_to_solve->ranges);
+  analyzer_problem->Bind(system_to_solve->ranges);
 
   size_t num_vars = system_to_solve->variables.size();
 
@@ -292,7 +293,7 @@ IntConstraintsTransform SolveLinearEquations(const IntConstraints& system_to_sol
   for (size_t i = 0; i < num_vars; ++i) {
     V.emplace_back(num_vars);
     V.back()[i] = 1;
-    V_inv_x.push_back(system_to_solve->variables[i]);
+    V_inv_x.push_back(system_to_solve->variables[i].as_or_throw<PrimExpr>());
   }
 
   // Transform formulas into rows of the matrix
@@ -302,7 +303,7 @@ IntConstraintsTransform SolveLinearEquations(const IntConstraints& system_to_sol
     if (const tirx::EQNode* eq = equation.as<tirx::EQNode>()) {
       // a-b = sum_{i=0}^{n-1} variables[i] * coeff[i] + coeff[n]
       ffi::Array<PrimExpr> coeffs = arith::DetectLinearEquation(
-          analyzer_problem.Simplify(eq->a - eq->b), system_to_solve->variables);
+          analyzer_problem->Simplify(eq->a - eq->b), system_to_solve->variables);
       if (!coeffs.empty()) {
         std::vector<int64_t> row;
         for (size_t j = 0; j < coeffs.size() - 1; ++j) {
@@ -340,14 +341,14 @@ IntConstraintsTransform SolveLinearEquations(const IntConstraints& system_to_sol
   // Uy is U \times y
   SmithNormalFormDiag(&S, &V, &V_inv_x, &Uy);
 
-  ffi::Array<Var> new_vars;
+  ffi::Array<PrimVar> new_vars;
   ffi::Array<PrimExpr> new_relations;
   ffi::Map<Var, PrimExpr> new_to_old_map;
   ffi::Map<Var, PrimExpr> old_to_new_map;
 
   // Simplify right hand sides
   for (PrimExpr r : Uy) {
-    r = analyzer_problem.Simplify(r);
+    r = analyzer_problem->Simplify(r);
   }
 
   // Create the relations of the existence of a solution
@@ -361,14 +362,14 @@ IntConstraintsTransform SolveLinearEquations(const IntConstraints& system_to_sol
       // is a divisor of the Ub[j]
       new_relation = (floormod(Uy[j], std::abs(S[j][j])) == 0);
     }
-    new_relation = analyzer_problem.Simplify(new_relation);
+    new_relation = analyzer_problem->Simplify(new_relation);
     if (tirx::is_const_int(new_relation, 0)) {
       // unable to solve the system.
       return IntConstraintsTransform(system_to_solve,
                                      IntConstraints(
                                          /*variables=*/{},
                                          /*ranges=*/{},
-                                         /*relations=*/{tirx::make_zero(DataType::Bool())}),
+                                         /*relations=*/{IntImm::Bool(false)}),
                                      {}, {});
     } else if (!tirx::is_const_int(new_relation, 1)) {
       new_relations.push_back(new_relation);
@@ -389,12 +390,12 @@ IntConstraintsTransform SolveLinearEquations(const IntConstraints& system_to_sol
   for (size_t j = 0; j < num_vars; ++j) {
     if (j >= S.size() || S[j][j] == 0) {
       // The j-th variable can take any integer value, create a tvm variable for it
-      PrimExpr to_old = analyzer_problem.Simplify(V_inv_x[j]);
+      PrimExpr to_old = analyzer_problem->Simplify(V_inv_x[j]);
       std::string name_hint = "n" + std::to_string(new_vars.size());
-      if (const VarNode* v_old = to_old.as<VarNode>()) {
-        name_hint += "_" + v_old->name_hint;
+      if (auto old_var = to_old.as<tirx::PrimVar>()) {
+        name_hint += "_" + (*old_var)->name;
       }
-      Var v = Var(name_hint, V_inv_x[j].dtype());
+      PrimVar v(name_hint, V_inv_x[j].ty());
       solution_for_V_inv_x.push_back(v);
       new_vars.push_back(v);
       new_to_old_map.Set(v, to_old);
@@ -402,24 +403,24 @@ IntConstraintsTransform SolveLinearEquations(const IntConstraints& system_to_sol
       // The j-th variable is just a single value, don't create a tvm variable
       // S^{-1}_{nxm} Uy_{mxn}
       if (S[j][j] >= 0) {
-        PrimExpr a = tirx::make_const(Uy[j].dtype(), S[j][j]);
-        solution_for_V_inv_x.push_back(analyzer_problem.Simplify(floordiv(Uy[j], a)));
+        PrimExpr a = IntImm(Uy[j].ty(), S[j][j]);
+        solution_for_V_inv_x.push_back(analyzer_problem->Simplify(floordiv(Uy[j], a)));
       } else {
         // This is required because some simplifiers
         // have problems with dividing by negative numbers
-        PrimExpr a = tirx::make_const(Uy[j].dtype(), -S[j][j]);
-        solution_for_V_inv_x.push_back(analyzer_problem.Simplify(floordiv(-Uy[j], a)));
+        PrimExpr a = IntImm(Uy[j].ty(), -S[j][j]);
+        solution_for_V_inv_x.push_back(analyzer_problem->Simplify(floordiv(-Uy[j], a)));
       }
     }
   }
 
   // V V^{-1} x = x
   for (size_t i = 0; i < num_vars; ++i) {
-    PrimExpr e = tirx::make_zero(system_to_solve->variables[i].dtype());
+    PrimExpr e = IntImm(system_to_solve->variables[i]->ty.as_or_throw<PrimType>(), 0);
     for (size_t j = 0; j < num_vars; ++j) {
-      e = e + tirx::make_const(e.dtype(), V[i][j]) * solution_for_V_inv_x[j];
+      e = e + tirx::MakeConst(e.ty(), V[i][j]) * solution_for_V_inv_x[j];
     }
-    e = analyzer_problem.Simplify(e);
+    e = analyzer_problem->Simplify(e);
     old_to_new_map.Set(system_to_solve->variables[i], e);
   }
 
@@ -427,7 +428,7 @@ IntConstraintsTransform SolveLinearEquations(const IntConstraints& system_to_sol
   ffi::Map<Var, Range> new_ranges =
       InferRange(new_to_old_map, system_to_solve->variables, system_to_solve->ranges);
   Analyzer analyzer_solution;
-  analyzer_solution.Bind(new_ranges);
+  analyzer_solution->Bind(new_ranges);
 
   // We have to transform ranges of the old variables into relations over new variables because
   // new ranges are not enough usually.
@@ -435,9 +436,9 @@ IntConstraintsTransform SolveLinearEquations(const IntConstraints& system_to_sol
     if (system_to_solve->ranges.find(old_var) != system_to_solve->ranges.end()) {
       const Range& old_range = system_to_solve->ranges.at(old_var);
       PrimExpr express_by_new_vars = old_to_new_map.at(old_var);
-      PrimExpr lower_cond = analyzer_solution.Simplify(old_range->min <= express_by_new_vars);
+      PrimExpr lower_cond = analyzer_solution->Simplify(old_range->min <= express_by_new_vars);
       PrimExpr upper_cond =
-          analyzer_solution.Simplify(express_by_new_vars < old_range->min + old_range->extent);
+          analyzer_solution->Simplify(express_by_new_vars < old_range->min + old_range->extent);
       if (!tirx::is_const_int(lower_cond, 1)) {
         new_relations.push_back(lower_cond);
       }
@@ -449,7 +450,7 @@ IntConstraintsTransform SolveLinearEquations(const IntConstraints& system_to_sol
 
   // Add the rest conditions
   for (const PrimExpr& cond : rest) {
-    new_relations.push_back(Substitute(cond, old_to_new_map));
+    new_relations.push_back(tirx::Substitute(cond, old_to_new_map));
   }
 
   IntConstraints solution(new_vars, new_ranges, new_relations);
@@ -465,7 +466,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
         if (args.size() == 1) {
           *ret = SolveLinearEquations(args[0].cast<IntConstraints>());
         } else if (args.size() == 3) {
-          auto opt_vars = args[0].cast<ffi::Optional<ffi::Array<Var>>>();
+          auto opt_vars = args[0].cast<ffi::Optional<ffi::Array<PrimVar>>>();
           auto opt_map = args[1].cast<ffi::Optional<ffi::Map<Var, Range>>>();
           auto opt_relations = args[2].cast<ffi::Optional<ffi::Array<PrimExpr>>>();
           IntConstraints problem(opt_vars.value_or({}), opt_map.value_or({}),

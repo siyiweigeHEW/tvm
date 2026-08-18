@@ -32,7 +32,6 @@
 # - LLVM_LIBS
 # - LLVM_DEFINITIONS
 # - TVM_LLVM_VERSION
-# - TVM_INFO_LLVM_VERSION
 #
 macro(find_llvm use_llvm)
   if(${use_llvm} MATCHES ${IS_FALSE_PATTERN})
@@ -72,7 +71,6 @@ macro(find_llvm use_llvm)
       message(STATUS "Link with static LLVM libraries")
     endif()
     set(TVM_LLVM_VERSION ${LLVM_VERSION_MAJOR}${LLVM_VERSION_MINOR})
-    set(TVM_INFO_LLVM_VERSION "${LLVM_VERSION_MAJOR}.${LLVM_VERSION_MINOR}.${LLVM_VERSION_PATCH}")
     set(TVM_LLVM_HAS_AARCH64_TARGET 0)
     if(DEFINED LLVM_TARGETS_TO_BUILD AND "AArch64" IN_LIST LLVM_TARGETS_TO_BUILD)
       set(TVM_LLVM_HAS_AARCH64_TARGET 1)
@@ -145,7 +143,6 @@ macro(find_llvm use_llvm)
     string(REPLACE ${__llvm_prefix} "$" __llvm_cxxflags ${__llvm_cxxflags_space})
     string(REPLACE ${__llvm_prefix} "$" __llvm_libfiles ${__llvm_libfiles_space})
     # llvm version
-    set(TVM_INFO_LLVM_VERSION ${__llvm_version})
     string(REGEX REPLACE "^([^.]+)\.([^.])+\.[^.]+.*$" "\\1\\2" TVM_LLVM_VERSION ${__llvm_version})
     string(STRIP ${TVM_LLVM_VERSION} TVM_LLVM_VERSION)
     # definitions
@@ -213,8 +210,13 @@ macro(find_llvm use_llvm)
         message(STATUS "LLVM links against xml2")
         list(APPEND LLVM_LIBS "-lxml2")
       elseif("${__flag}" STREQUAL "zstd.dll.lib")
-        message(STATUS "LLVM linker flag under LLVM libdir: ${__llvm_libdir}/zstd.lib")
-        list(APPEND LLVM_LIBS "${__llvm_libdir}/zstd.lib")
+        if (EXISTS "${__llvm_libdir}/zstd_static.lib")
+          message(STATUS "LLVM links against static zstd")
+          list(APPEND LLVM_LIBS "${__llvm_libdir}/zstd_static.lib")
+        else()
+          message(STATUS "LLVM linker flag under LLVM libdir: ${__llvm_libdir}/zstd.lib")
+          list(APPEND LLVM_LIBS "${__llvm_libdir}/zstd.lib")
+        endif()
       elseif((__flag MATCHES ".lib$") AND (EXISTS "${__llvm_libdir}/${__flag}"))
         # If the library file ends in .lib try to also search the llvm_libdir
         message(STATUS "LLVM linker flag under LLVM libdir: ${__llvm_libdir}/${__flag}")
@@ -252,9 +254,9 @@ macro(find_llvm use_llvm)
     # compiler-appropriate form so the probe works under MSVC as well.
     if(NOT CMAKE_CXX_STANDARD)
       if(MSVC)
-        set(CMAKE_REQUIRED_FLAGS "/std:c++17")
+        set(CMAKE_REQUIRED_FLAGS "/std:c++20")
       else()
-        set(CMAKE_REQUIRED_FLAGS "-std=c++17")
+        set(CMAKE_REQUIRED_FLAGS "-std=c++20")
       endif()
     endif()
     check_cxx_source_compiles("

@@ -17,6 +17,7 @@
  * under the License.
  */
 #include <tvm/arith/int_set.h>
+#include <tvm/ffi/cast.h>
 
 #include "../../../tirx/transform/replace_selected_expr.h"
 #include "../utils.h"
@@ -35,7 +36,7 @@ struct IndexInfo {
   /*! \brief Record the common subexpr extract threshold */
   size_t cse_thresh;
   /*! \brief The cache buffer to store the precomputed index */
-  std::vector<Buffer> cache_buffer;
+  std::vector<BufferVar> cache_buffer;
   /*! \brief The expr to be precomputed */
   std::vector<PrimExpr> index_exprs;
   /*! \brief The range of the loop vars relating to index computation */
@@ -57,14 +58,14 @@ struct IndexInfo {
  * \param range The range of the integer.
  * \returns A data type that covers the input range.
  */
-DataType DetermineDatatype(const arith::IntSet& range) {
+PrimType DeterminePrimType(const arith::IntSet& range) {
   arith::Analyzer ana;
-  if (ana.CanProve(range.min() >= INT32_MIN && range.max() <= INT32_MAX)) {
-    return DataType::Int(32);
+  if (ana->CanProve(range.min() >= INT32_MIN && range.max() <= INT32_MAX)) {
+    return PrimType::Int(32);
   } else {
-    TVM_FFI_ICHECK(ana.CanProve(range.min() >= make_const(DataType::Int(64), INT64_MIN) &&
-                                range.max() <= make_const(DataType::Int(64), INT64_MAX)));
-    return DataType::Int(64);
+    TVM_FFI_ICHECK(ana->CanProve(range.min() >= IntImm::Int64(INT64_MIN) &&
+                                 range.max() <= IntImm::Int64(INT64_MAX)));
+    return PrimType::Int(64);
   }
 }
 
@@ -170,9 +171,9 @@ class IndexInfoCollector : public StmtExprVisitor {
 
       // Record the final sub expr with repeat time greater than cse_thresh_
       // In order to make the result stable, sort it by post order and then by complexity
-      PostOrderVisit(store->value, [&semantic_comp_done_by_stmt, this](const ObjectRef& node) {
-        if (node->IsInstance<PrimExprNode>()) {
-          PrimExpr this_expr = Downcast<PrimExpr>(node);
+      PostOrderVisit(store->value, [&semantic_comp_done_by_stmt, this](const ffi::ObjectRef& node) {
+        if (auto prim = node.as<PrimExpr>()) {
+          PrimExpr this_expr = prim.value();
           for (auto& it : semantic_comp_done_by_stmt) {
             if (it.second >= this->cse_thresh_ && EquivalentTerms(this_expr, it.first, true)) {
               auto find_result =
@@ -233,9 +234,9 @@ ffi::Array<SBlock> MakeIndexCacheStage(IndexInfo* info, const ffi::String& stora
 
     // Collect the block vars in original index computation
     info->origin_block_vars.push_back({});
-    PostOrderVisit(index_expr, [&info, &expr_index](const ObjectRef& node) {
-      if (node->IsInstance<VarNode>()) {
-        Var iter_var = Downcast<Var>(node);
+    PostOrderVisit(index_expr, [&info, &expr_index](const ffi::ObjectRef& node) {
+      if (auto var = node.as<PrimVar>()) {
+        Var iter_var = var.value();
         const ffi::Array<Var>& origin_block_var = info->origin_block_vars[expr_index];
         auto find_result = std::find_if(origin_block_var.begin(), origin_block_var.end(),
                                         [&](Var it) { return it.get() == iter_var.get(); });
@@ -249,9 +250,9 @@ ffi::Array<SBlock> MakeIndexCacheStage(IndexInfo* info, const ffi::String& stora
     // which will be used to create new loop vars
     std::vector<Var> iter_vars;
     for (const Var& it : info->origin_block_vars[expr_index]) {
-      PostOrderVisit(info->var_binding.at(it), [/*&info,*/ &iter_vars](const ObjectRef& node) {
-        if (node->IsInstance<VarNode>()) {
-          Var iter_var = Downcast<Var>(node);
+      PostOrderVisit(info->var_binding.at(it), [/*&info,*/ &iter_vars](const ffi::ObjectRef& node) {
+        if (auto var = node.as<PrimVar>()) {
+          Var iter_var = var.value();
           if (std::find_if(iter_vars.begin(), iter_vars.end(),
                            [&](Var it) { return it.get() == iter_var.get(); }) == iter_vars.end()) {
             iter_vars.push_back(iter_var);
@@ -260,23 +261,22 @@ ffi::Array<SBlock> MakeIndexCacheStage(IndexInfo* info, const ffi::String& stora
       });
     }
 
-    DataType data_type = index_expr.dtype();
-    Var index_buffer_var("index_var_" + std::to_string(expr_index),
-                         PointerType(PrimType(data_type), storage_scope));
+    PrimType data_ty = index_expr.ty();
+    ffi::String index_buffer_name = "index_var_" + std::to_string(expr_index);
     ffi::Array<PrimExpr> buffer_shape;
     for (const Var& it : info->origin_block_vars[expr_index]) {
       buffer_shape.push_back(
           arith::EvalSet(info->var_binding.at(it), arith::AsIntSet(info->range_map)).max() + 1);
     }
-    info->cache_buffer.push_back(Buffer(index_buffer_var, data_type, buffer_shape, {1}, {0},
-                                        index_buffer_var->name_hint, 0, 0, kDefault));
+    info->cache_buffer.push_back(BufferVar(
+        index_buffer_name, BufferType(storage_scope, data_ty, buffer_shape, {1}, {0}, 0, 0)));
 
     // Create loop vars and block vars' binding_value
-    std::vector<Var> loop_vars;
+    std::vector<PrimVar> loop_vars;
     ffi::Map<Var, Var> replace_table;
     for (const Var& it : iter_vars) {
-      DataType data_type = DetermineDatatype(arith::IntSet::FromRange(info->range_map.at(it)));
-      Var loop_var("ax" + std::to_string(replace_table.size()), data_type);
+      PrimType data_ty = DeterminePrimType(arith::IntSet::FromRange(info->range_map.at(it)));
+      PrimVar loop_var("ax" + std::to_string(replace_table.size()), data_ty);
       loop_vars.push_back(loop_var);
       replace_table.Set(it, loop_var);
     }
@@ -295,15 +295,16 @@ ffi::Array<SBlock> MakeIndexCacheStage(IndexInfo* info, const ffi::String& stora
     // Create block vars, block's accessed region and accessing indices
     for (size_t i = 0; i < info->origin_block_vars[expr_index].size(); i++) {
       const Var& block_var = info->origin_block_vars[expr_index][i];
-      Var var("v" + std::to_string(access_indices.size()), block_var.dtype());
-      Range range = Range::FromMinExtent(make_zero(block_var.dtype()),
-                                         info->range_map.at(iter_vars[i])->extent);
+      PrimType block_var_ty = block_var->ty.as_or_throw<PrimType>();
+      PrimVar var("v" + std::to_string(access_indices.size()), block_var_ty);
+      Range range =
+          Range::FromMinExtent(IntImm(block_var_ty, 0), info->range_map.at(iter_vars[i])->extent);
       block_vars.push_back(IterVar(/*dom=*/range,
                                    /*var=*/var,
                                    /*IterVarType=*/kDataPar));
 
       access_indices.push_back(var);
-      access_region.push_back(Range::FromMinExtent(var, make_const(var.dtype(), 1)));
+      access_region.push_back(Range::FromMinExtent(var, IntImm(var.ty(), 1)));
       block_var_map.Set(block_var, var);
     }
 
@@ -323,7 +324,7 @@ ffi::Array<SBlock> MakeIndexCacheStage(IndexInfo* info, const ffi::String& stora
     blocks.push_back(block);
     // Create the block realize node
     Stmt body = SBlockRealize(/*values=*/iter_values,
-                              /*predicate=*/const_true(),
+                              /*predicate=*/IntImm::Bool(true),
                               /*block=*/block);
     // Create surrounding loops
     for (size_t i = loop_vars.size(); i >= 1; --i) {
@@ -349,7 +350,7 @@ ffi::Array<SBlock> MakeIndexCacheStage(IndexInfo* info, const ffi::String& stora
  */
 Stmt InsertIndexStage(const Stmt& stmt, int pos, const Stmt& stage) {
   if (const auto* seq_stmt = stmt.as<SeqStmtNode>()) {
-    ObjectPtr<SeqStmtNode> result = ffi::make_object<SeqStmtNode>(*seq_stmt);
+    ffi::ObjectPtr<SeqStmtNode> result = ffi::make_object<SeqStmtNode>(*seq_stmt);
     result->seq.insert(result->seq.begin() + pos, stage);
     return SeqStmt(result);
   }
@@ -381,7 +382,7 @@ class CacheIndexRewriter : public StmtExprMutator {
     for (const ffi::Array<Var>& group_it : info_->origin_block_vars) {
       cache_indices_.push_back({});
       for (const Var& it : group_it) {
-        cache_indices_.back().push_back(it);
+        cache_indices_.back().push_back(it.as_or_throw<PrimExpr>());
       }
     }
   }
@@ -390,15 +391,15 @@ class CacheIndexRewriter : public StmtExprMutator {
     SBlock old_stmt = ffi::GetRef<SBlock>(block);
     // Mutate the body
     visiting_target_sblock = static_cast<bool>(block == info_->target_sblock->stmt);
-    SBlock stmt = Downcast<SBlock>(StmtMutator::VisitStmt_(block));
+    SBlock stmt = StmtMutator::VisitStmt_(block).as_or_throw<SBlock>();
     visiting_target_sblock = false;
 
     // Check if it is the block corresponding to the parent scope
     if (block == scope_sref_->stmt) {
       // If so, put buffer allocation and insert cache stages on the parent scope
-      ObjectPtr<SBlockNode> n = ffi::make_object<SBlockNode>(*stmt.as<SBlockNode>());
+      ffi::ObjectPtr<SBlockNode> n = ffi::make_object<SBlockNode>(*stmt.as<SBlockNode>());
       n->body = InsertIndexStage(n->body, info_->loc_pos, info_->cache_stage);
-      for (const Buffer& it : info_->cache_buffer) {
+      for (const BufferVar& it : info_->cache_buffer) {
         n->alloc_buffers.push_back(it);
       }
       stmt = SBlock(n);
@@ -482,7 +483,7 @@ ffi::Array<StmtSRef> CacheIndex(ScheduleState self, const StmtSRef& block_sref,
       StmtSRef parent_sref = ffi::GetRef<StmtSRef>(result_block_sref->parent);
       affine_binding = IsAffineBinding(/*realize=*/GetSBlockRealize(self, result_block_sref),
                                        /*loop_var_ranges=*/LoopDomainOfSRefTreePath(parent_sref),
-                                       /*analyzer=*/&analyzer);
+                                       /*analyzer=*/analyzer.get());
     }
 
     block_info.affine_binding = affine_binding;
@@ -506,12 +507,12 @@ struct CacheIndexTraits : public UnpackedInstTraits<CacheIndexTraits> {
 
   static ffi::Array<SBlockRV> UnpackedApplyToSchedule(Schedule sch, SBlockRV block,
                                                       ffi::String storage_scope,
-                                                      Integer cse_thresh) {
+                                                      IntImm cse_thresh) {
     return sch->CacheIndex(block, storage_scope, cse_thresh->value);
   }
 
   static ffi::String UnpackedAsPython(ffi::Array<ffi::String> outputs, ffi::String block,
-                                      ffi::String storage_scope, Integer cse_thresh) {
+                                      ffi::String storage_scope, IntImm cse_thresh) {
     PythonAPICall py("cache_index");
     py.Input("block", block);
     py.Input("storage_scope", storage_scope);

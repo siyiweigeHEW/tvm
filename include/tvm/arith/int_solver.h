@@ -38,6 +38,7 @@ namespace tvm {
 namespace arith {
 
 using tirx::IterVar;
+using tirx::PrimVar;
 using tirx::Var;
 using tirx::VarNode;
 
@@ -55,7 +56,7 @@ constexpr int kSimplifyRewriteCanonicalRewrite = 3;
  *        coef * var <= upper
  * \sa IntGroupBounds
  */
-class IntGroupBoundsNode : public Object {
+class IntGroupBoundsNode : public ffi::Object {
  public:
   PrimExpr coef;
   ffi::Array<PrimExpr> lower;
@@ -72,14 +73,14 @@ class IntGroupBoundsNode : public Object {
   }
 
   static constexpr TVMFFISEqHashKind _type_s_eq_hash_kind = kTVMFFISEqHashKindTreeNode;
-  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("arith.IntGroupBounds", IntGroupBoundsNode, Object);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("arith.IntGroupBounds", IntGroupBoundsNode, ffi::Object);
 };
 
 /*!
  * \brief Managed reference to IntGroupBoundsNode.
  * \sa IntGroupBoundsNode
  */
-class IntGroupBounds : public ObjectRef {
+class IntGroupBounds : public ffi::ObjectRef {
  public:
   /*!
    * \brief Constructor by fields
@@ -121,7 +122,7 @@ class IntGroupBounds : public ObjectRef {
    */
   IntGroupBounds operator+(const Range& r);
 
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(IntGroupBounds, ObjectRef, IntGroupBoundsNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(IntGroupBounds, ffi::ObjectRef, IntGroupBoundsNode);
 };
 
 /*!
@@ -129,10 +130,10 @@ class IntGroupBounds : public ObjectRef {
  *        the relations between them (either equations or inequalities).
  * \sa LinearSystem
  */
-class IntConstraintsNode : public Object {
+class IntConstraintsNode : public ffi::Object {
  public:
   // e.g., \alpha, \beta, must be integers
-  ffi::Array<Var> variables;
+  ffi::Array<PrimVar> variables;
   // e.g., 1 <= \alpha <= N, etc.
   // it is absolutely ok to include ranges for parameters
   // (variables that are not in this->variables) in this map
@@ -150,14 +151,14 @@ class IntConstraintsNode : public Object {
   }
 
   static constexpr TVMFFISEqHashKind _type_s_eq_hash_kind = kTVMFFISEqHashKindTreeNode;
-  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("arith.IntConstraints", IntConstraintsNode, Object);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("arith.IntConstraints", IntConstraintsNode, ffi::Object);
 };
 
 /*!
  * \brief Managed reference to IntConstraintsNode.
  * \sa IntConstraintsNode
  */
-class IntConstraints : public ObjectRef {
+class IntConstraints : public ffi::ObjectRef {
  public:
   /*!
    * \brief Constructor by fields
@@ -166,10 +167,10 @@ class IntConstraints : public ObjectRef {
    * \param relations The linear relations between the variables
    *                  (either equations or inequalities)
    */
-  TVM_DLL IntConstraints(ffi::Array<Var> variables, ffi::Map<Var, Range> ranges,
+  TVM_DLL IntConstraints(ffi::Array<PrimVar> variables, ffi::Map<Var, Range> ranges,
                          ffi::Array<PrimExpr> relations);
 
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(IntConstraints, ObjectRef, IntConstraintsNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(IntConstraints, ffi::ObjectRef, IntConstraintsNode);
 };
 
 /*!
@@ -186,7 +187,7 @@ class IntConstraints : public ObjectRef {
  *        dst_to_src : {m -> a, n -> -b}
  * \sa IntConstraintsTransform
  */
-class IntConstraintsTransformNode : public Object {
+class IntConstraintsTransformNode : public ffi::Object {
  public:
   IntConstraints src;
   IntConstraints dst;
@@ -204,14 +205,14 @@ class IntConstraintsTransformNode : public Object {
 
   static constexpr TVMFFISEqHashKind _type_s_eq_hash_kind = kTVMFFISEqHashKindTreeNode;
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("arith.IntConstraintsTransform", IntConstraintsTransformNode,
-                                    Object);
+                                    ffi::Object);
 };
 
 /*!
  * \brief Managed reference to IntConstraintsTransformNode.
  * \sa IntConstraintsTransformNode
  */
-class IntConstraintsTransform : public ObjectRef {
+class IntConstraintsTransform : public ffi::ObjectRef {
  public:
   /*!
    * \brief Constructor by fields
@@ -236,7 +237,7 @@ class IntConstraintsTransform : public ObjectRef {
    */
   IntConstraintsTransform operator+(const IntConstraintsTransform& other) const;
 
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(IntConstraintsTransform, ObjectRef,
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(IntConstraintsTransform, ffi::ObjectRef,
                                              IntConstraintsTransformNode);
 };
 
@@ -299,7 +300,7 @@ PartialSolvedInequalities SolveLinearInequalities(const IntConstraints& system_t
  * \param bounds grouped boundary of the variables.
  * \param relations other relations.
  */
-ffi::Array<PrimExpr> AsConditions(const ffi::Array<Var>& variables,
+ffi::Array<PrimExpr> AsConditions(const ffi::Array<PrimVar>& variables,
                                   const ffi::Map<Var, IntGroupBounds>& bounds,
                                   const ffi::Array<PrimExpr>& relations);
 

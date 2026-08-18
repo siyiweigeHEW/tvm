@@ -16,6 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
 
 #include "./utils.h"
@@ -36,7 +37,7 @@ bool InstructionKindNode::IsPostproc() const {
 
 Instruction::Instruction(InstructionKind kind, ffi::Array<Any> inputs, ffi::Array<Any> attrs,
                          ffi::Array<Any> outputs) {
-  ObjectPtr<InstructionNode> n = ffi::make_object<InstructionNode>();
+  ffi::ObjectPtr<InstructionNode> n = ffi::make_object<InstructionNode>();
   n->kind = std::move(kind);
   n->inputs = std::move(inputs);
   n->attrs = std::move(attrs);
@@ -78,13 +79,10 @@ ffi::String InstructionAsPythonRepr(const InstructionNode* self) {
       inputs.push_back(obj);
     } else if (obj.as<IntImmNode>() || obj.as<FloatImmNode>()) {
       inputs.push_back(obj);
-    } else if (const auto* expr = obj.as<PrimExprNode>()) {
-      PrimExpr new_expr = Substitute(
-          ffi::GetRef<PrimExpr>(expr), [](const Var& var) -> ffi::Optional<PrimExpr> {
-            ObjectPtr<VarNode> new_var = ffi::make_object<VarNode>(*var.get());
-            new_var->name_hint = "_";
-            return Var(new_var);
-          });
+    } else if (auto expr = obj.as<PrimExpr>()) {
+      PrimExpr new_expr = Substitute(expr.value(), [](const Var& var) -> ffi::Optional<Expr> {
+        return Var("_", var->ty, var->span).as_or_throw<PrimExpr>();
+      });
       std::ostringstream os;
       os << new_expr;
       inputs.push_back(ffi::String(os.str()));
@@ -103,10 +101,7 @@ ffi::String InstructionAsPythonRepr(const InstructionNode* self) {
 }
 }  // namespace
 
-TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
-    .set_dispatch<InstructionNode>([](const ObjectRef& obj, ReprPrinter* p) {
-      p->stream << InstructionAsPythonRepr(obj.as<InstructionNode>());
-    });
+// AC: kRepr already registered below in TVM_FFI_STATIC_INIT_BLOCK.
 
 /**************** FFI ****************/
 
@@ -119,10 +114,10 @@ TVM_FFI_STATIC_INIT_BLOCK() {
               ffi::Array<Any> outputs) -> Instruction {
              return Instruction(kind, inputs, attrs, outputs);
            });
-  refl::TypeAttrDef<InstructionNode>().def(
-      refl::type_attr::kRepr, [](Instruction inst, ffi::Function) -> ffi::String {
-        return InstructionAsPythonRepr(inst.get());
-      });
+  refl::TypeAttrDef<InstructionNode>().def(refl::type_attr::kRepr,
+                                           [](Instruction inst, ffi::Function) -> ffi::String {
+                                             return InstructionAsPythonRepr(inst.get());
+                                           });
 }
 
 }  // namespace s_tir

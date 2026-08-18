@@ -21,6 +21,7 @@ from decimal import Decimal
 from typing import Optional, Union
 
 import numpy as np  # type: ignore
+import tvm_ffi
 
 import tvm
 
@@ -28,7 +29,7 @@ from ..block_builder import BlockBuilder
 from ..expr import Function, TupleGetItem, Var, const
 from ..expr import Tuple as RxTuple
 from ..op import add, divide, multiply, sqrt, subtract
-from ..struct_info import TensorStructInfo, TupleStructInfo
+from ..type import TensorType, TupleType
 
 
 # TODO(chaofan, yixin): Migrate key logics to C++
@@ -53,7 +54,7 @@ class Optimizer:
     param_list : List[Var]
         The list of variables to optimize. Will be set in `init()`.
 
-    state : tvm.ir.Array
+    state : tvm_ffi.Array
         `state` is an runtime Array representing the state of the optimizer. Will be set in
         `init()`.
 
@@ -71,6 +72,7 @@ class Optimizer:
     For detailed examples, please see the tutorial.
 
     .. code-block:: python
+
         # Construct the optimizer
         opt = relax.optimizer.SGD(0.1)
 
@@ -102,7 +104,7 @@ class Optimizer:
     dtype: str
     name: str
     param_list: list[Var]
-    state: tvm.ir.Array
+    state: tvm_ffi.Array
 
     def __init__(self, name: str) -> None:
         self.name = name
@@ -142,28 +144,28 @@ class Optimizer:
         for x in params:
             if not isinstance(x, Var):
                 raise ValueError(f"Parameter {x} is not a Var")
-            if not isinstance(x.struct_info, TensorStructInfo):
+            if not isinstance(x.ty, TensorType):
                 raise ValueError(
-                    f"Optimizers only support Tensor parameters, but parameter {x.name_hint} has "
-                    f"struct info {x.struct_info}"
+                    f"Optimizers only support Tensor parameters, but parameter {x.name} has "
+                    f"type {x.ty}"
                 )
-            data_type = tvm.DataType(x.struct_info.dtype)
+            data_type = tvm.DataType(x.ty.dtype.dtype)
             if data_type.type_code not in (tvm.DataTypeCode.BFLOAT, tvm.DataTypeCode.FLOAT):
                 raise ValueError(
                     f"Optimizers only support Tensor parameters of floating point dtype, but dtype "
-                    f"of {x.name_hint} is {x.struct_info.dtype}"
+                    f"of {x.name} is {x.ty.dtype}"
                 )
             if dtype is None:
-                dtype = x.struct_info.dtype
+                dtype = x.ty.dtype
             else:
-                if dtype != x.struct_info.dtype:
+                if dtype != x.ty.dtype:
                     raise ValueError(
-                        f"All parameters should have the same dtype, but parameter {x.name_hint} "
-                        f"has dtype {x.struct_info.dtype}, which differs from the previous dtype "
+                        f"All parameters should have the same dtype, but parameter {x.name} "
+                        f"has dtype {x.ty.dtype}, which differs from the previous dtype "
                         f"{dtype}"
                     )
             if x in params_set:
-                raise ValueError(f"Parameter {x.name_hint} appears more than once")
+                raise ValueError(f"Parameter {x.name} appears more than once")
             params_set.add(x)
         self.param_list = params
         self.dtype = dtype
@@ -194,6 +196,7 @@ class Optimizer:
         gradient descent method with lr = 0.1.
 
         .. code-block:: python
+
             @R.function
             def SGD(
                 params: R.Tuple(R.Tensor((3, 3), "float32"), R.Tensor((3,), "float32")),
@@ -228,7 +231,7 @@ class Optimizer:
 
 # TODO(chaofan, yixin): Support symbolic shapes
 def _get_shape_as_int_list(var: Var) -> list[int]:
-    return [int(val) for val in var.struct_info.shape]
+    return [int(val) for val in var.ty.shape]
 
 
 # We need to subtract on hyperparameters, but do not want to introduce floating point error.
@@ -244,6 +247,7 @@ class SGD(Optimizer):
     The returned function of `get_function()` is equivalent to the following numpy code:
 
     .. code-block:: python
+
         def SGD(param_tuple, grad_tuple, state_tuple):
             num_steps = state_tuple[0]
             param_tuple_new, state_tuple_new = [], []
@@ -313,9 +317,9 @@ class SGD(Optimizer):
         dtype = self.dtype
 
         # input variables
-        param_var = Var("params", TupleStructInfo([p.struct_info for p in plist]))
-        grad_var = Var("gradients", TupleStructInfo([p.struct_info for p in plist]))
-        state_var = Var("optim_states", TupleStructInfo([TensorStructInfo((), "int64")]))
+        param_var = Var("params", TupleType([p.ty for p in plist]))
+        grad_var = Var("gradients", TupleType([p.ty for p in plist]))
+        state_var = Var("optim_states", TupleType([TensorType((), "int64")]))
 
         # constants
         lr = const(self.lr, dtype)
@@ -334,7 +338,7 @@ class SGD(Optimizer):
 
                 # computation logics
                 for i in range(len_param):
-                    name = self.param_list[i].name_hint
+                    name = self.param_list[i].name
                     p = builder.emit(TupleGetItem(param_var, i), name)
                     g = builder.emit(TupleGetItem(grad_var, i), name + "_grad")
                     if self.weight_decay:
@@ -356,6 +360,7 @@ class MomentumSGD(Optimizer):
     The returned function of `get_function()` is equivalent to the following numpy code:
 
     .. code-block:: python
+
         def MomentumSGD(param_tuple, grad_tuple, state_tuple):
             num_steps = state_tuple[0]
             param_tuple_new, state_tuple_new = [], []
@@ -438,7 +443,7 @@ class MomentumSGD(Optimizer):
             tvm.runtime.tensor(np.zeros((), "int64")),
             # v_{param} is initialized to all zeros
             *(
-                tvm.runtime.tensor(np.zeros(_get_shape_as_int_list(p), p.struct_info.dtype))
+                tvm.runtime.tensor(np.zeros(_get_shape_as_int_list(p), p.ty.dtype.dtype))
                 for p in self.param_list
             ),
         )
@@ -459,11 +464,11 @@ class MomentumSGD(Optimizer):
         dtype = self.dtype
 
         # input variables
-        param_var = Var("params", TupleStructInfo([p.struct_info for p in plist]))
-        grad_var = Var("gradients", TupleStructInfo([p.struct_info for p in plist]))
+        param_var = Var("params", TupleType([p.ty for p in plist]))
+        grad_var = Var("gradients", TupleType([p.ty for p in plist]))
         state_var = Var(
             "optim_states",
-            TupleStructInfo([TensorStructInfo((), "int64"), *(p.struct_info for p in plist)]),
+            TupleType([TensorType((), "int64"), *(p.ty for p in plist)]),
         )
 
         # constants
@@ -485,7 +490,7 @@ class MomentumSGD(Optimizer):
 
                 # computation logics
                 for i in range(len_param):
-                    name = self.param_list[i].name_hint
+                    name = self.param_list[i].name
                     p = builder.emit(TupleGetItem(param_var, i), name)
                     g = builder.emit(TupleGetItem(grad_var, i), name + "_grad")
                     v = builder.emit(TupleGetItem(state_var, i + 1), name + "_v")
@@ -515,6 +520,7 @@ class Adam(Optimizer):
     The returned function of `get_function()` is equivalent to the following numpy code:
 
     .. code-block:: python
+
         def Adam(param_tuple, grad_tuple, state_tuple):
             num_steps = state_tuple[0]
             num_steps_new = num_steps + 1
@@ -579,6 +585,7 @@ class Adam(Optimizer):
         The state of Adam is
 
         .. code-block:: python
+
             (
                 num_steps,
                 beta_0_prod, # beta0 ** num_steps
@@ -611,12 +618,12 @@ class Adam(Optimizer):
             tvm.runtime.tensor(np.ones((), self.dtype)),
             # first_momentum
             *(
-                tvm.runtime.tensor(np.zeros(_get_shape_as_int_list(p), p.struct_info.dtype))
+                tvm.runtime.tensor(np.zeros(_get_shape_as_int_list(p), p.ty.dtype.dtype))
                 for p in self.param_list
             ),
             # second_momentum
             *(
-                tvm.runtime.tensor(np.zeros(_get_shape_as_int_list(p), p.struct_info.dtype))
+                tvm.runtime.tensor(np.zeros(_get_shape_as_int_list(p), p.ty.dtype.dtype))
                 for p in self.param_list
             ),
         )
@@ -637,17 +644,17 @@ class Adam(Optimizer):
         dtype = self.dtype
 
         # input variables
-        param_var = Var("params", TupleStructInfo([p.struct_info for p in plist]))
-        grad_var = Var("gradients", TupleStructInfo([p.struct_info for p in plist]))
+        param_var = Var("params", TupleType([p.ty for p in plist]))
+        grad_var = Var("gradients", TupleType([p.ty for p in plist]))
         state_var = Var(
             "optim_states",
-            TupleStructInfo(
+            TupleType(
                 [
-                    TensorStructInfo((), "int64"),
-                    TensorStructInfo((), dtype),
-                    TensorStructInfo((), dtype),
-                    *(p.struct_info for p in plist),
-                    *(p.struct_info for p in plist),
+                    TensorType((), "int64"),
+                    TensorType((), dtype),
+                    TensorType((), dtype),
+                    *(p.ty for p in plist),
+                    *(p.ty for p in plist),
                 ]
             ),
         )
@@ -680,7 +687,7 @@ class Adam(Optimizer):
 
                 # computation logics
                 for i in range(len_param):
-                    name = self.param_list[i].name_hint
+                    name = self.param_list[i].name
                     p = builder.emit(TupleGetItem(param_var, i), name)
                     g = builder.emit(TupleGetItem(grad_var, i), name + "_grad")
                     m = builder.emit(TupleGetItem(state_var, i + 3), name + "_m")

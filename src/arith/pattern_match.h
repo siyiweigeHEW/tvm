@@ -65,6 +65,7 @@
 #ifndef TVM_ARITH_PATTERN_MATCH_H_
 #define TVM_ARITH_PATTERN_MATCH_H_
 
+#include <tvm/ffi/cast.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
@@ -210,11 +211,13 @@ class PVar : public Pattern<PVar<T>> {
     }
   }
 
-  template <typename NodeRefType,
-            typename = typename std::enable_if<std::is_base_of<NodeRefType, T>::value>::type>
+  template <typename NodeRefType, typename = typename std::enable_if<
+                                      !std::is_same<NodeRefType, T>::value &&
+                                      std::is_base_of<ffi::ObjectRef, NodeRefType>::value &&
+                                      std::is_base_of<ffi::ObjectRef, T>::value>::type>
   bool Match_(const NodeRefType& value) const {
-    if (const auto* ptr = value.template as<typename T::ContainerType>()) {
-      return Match_(ffi::GetRef<T>(ptr));
+    if (auto typed_value = value.template as<T>()) {
+      return Match_(*typed_value);
     } else {
       return false;
     }
@@ -256,8 +259,8 @@ class PVarWithCheck : public arith::Pattern<PVarWithCheck<Derived, T>> {
   template <typename NodeRefType,
             typename = typename std::enable_if<std::is_base_of<NodeRefType, T>::value>::type>
   bool Match_(const NodeRefType& value) const {
-    if (const auto* ptr = value.template as<typename T::ContainerType>()) {
-      return Match_(ffi::GetRef<T>(ptr));
+    if (auto typed_value = value.template as<T>()) {
+      return Match_(*typed_value);
     } else {
       return false;
     }
@@ -281,7 +284,7 @@ class PVarWithDataType : public PVarWithCheck<PVarWithDataType<T, DType>, T> {
  public:
   explicit PVarWithDataType(const DType& dtype) : dtype_(dtype) {}
 
-  bool Match_(const T& value) const { return dtype_.Match_(value->dtype); }
+  bool Match_(const T& value) const { return dtype_.Match_(value.ty()->dtype); }
 
  protected:
   typename DType::Nested dtype_;
@@ -290,15 +293,15 @@ class PVarWithDataType : public PVarWithCheck<PVarWithDataType<T, DType>, T> {
 /*!
  * \brief Pattern variable container for data type with lanes.
  */
-class PVecDataType : public PVarWithCheck<PVecDataType, DataType> {
+class PVecDataType : public PVarWithCheck<PVecDataType, DLDataType> {
  public:
   /*! \brief construct vector dtype placeholder with element type check */
-  explicit PVecDataType(const DataType& elem_dtype) : elem_dtype_(elem_dtype) {}
+  explicit PVecDataType(DLDataType elem_dtype) : elem_dtype_(elem_dtype) {}
 
-  bool Match_(const DataType& dtype) const { return dtype.code() == elem_dtype_.code(); }
+  bool Match_(DLDataType dtype) const { return dtype.code == elem_dtype_.code; }
 
  protected:
-  DataType elem_dtype_;
+  DLDataType elem_dtype_;
 };
 
 /*!
@@ -338,7 +341,7 @@ class PBinaryExpr : public Pattern<PBinaryExpr<OpType, TA, TB>> {
     b_.InitMatch_();
   }
 
-  bool Match_(const ObjectRef& node) const {
+  bool Match_(const ffi::ObjectRef& node) const {
     using NodeType = typename OpType::ContainerType;
     if (const NodeType* ptr = node.as<NodeType>()) {
       if (!a_.Match_(ptr->a)) return false;
@@ -368,7 +371,7 @@ class PConstWithTypeLike : public Pattern<PConstWithTypeLike<TA>> {
 
   void InitMatch_() const {}
 
-  bool Match_(const ObjectRef& node) const {
+  bool Match_(const ffi::ObjectRef& node) const {
     if (const tirx::IntImmNode* ptr = node.as<tirx::IntImmNode>()) {
       return ptr->value == value_;
     } else {
@@ -376,7 +379,7 @@ class PConstWithTypeLike : public Pattern<PConstWithTypeLike<TA>> {
     }
   }
 
-  PrimExpr Eval() const { return tirx::make_const(ref_.Eval().dtype(), value_); }
+  PrimExpr Eval() const { return tirx::MakeConst(ref_.Eval().ty(), value_); }
 
  private:
   typename TA::Nested ref_;
@@ -441,7 +444,7 @@ class PNotExpr : public Pattern<PNotExpr<TA>> {
 
   void InitMatch_() const { value_.InitMatch_(); }
 
-  bool Match_(const ObjectRef& node) const {
+  bool Match_(const ffi::ObjectRef& node) const {
     if (const tirx::NotNode* ptr = node.as<tirx::NotNode>()) {
       if (!value_.Match_(ptr->a)) return false;
       return true;
@@ -480,7 +483,7 @@ class PSelectExpr : public Pattern<PSelectExpr<TCond, TA, TB>> {
     false_value_.InitMatch_();
   }
 
-  bool Match_(const ObjectRef& node) const {
+  bool Match_(const ffi::ObjectRef& node) const {
     if (const tirx::SelectNode* ptr = node.as<tirx::SelectNode>()) {
       if (!condition_.Match_(ptr->condition)) return false;
       if (!true_value_.Match_(ptr->true_value)) return false;
@@ -537,9 +540,9 @@ class PCastExpr : public Pattern<PCastExpr<DType, TA>> {
     value_.InitMatch_();
   }
 
-  bool Match_(const ObjectRef& node) const {
+  bool Match_(const ffi::ObjectRef& node) const {
     if (const tirx::CastNode* ptr = node.as<tirx::CastNode>()) {
-      if (!dtype_.Match_(ptr->dtype)) return false;
+      if (!dtype_.Match_(ptr->ty.as_or_throw<PrimType>()->dtype)) return false;
       if (!value_.Match_(ptr->value)) return false;
       return true;
     } else {
@@ -547,7 +550,7 @@ class PCastExpr : public Pattern<PCastExpr<DType, TA>> {
     }
   }
 
-  PrimExpr Eval() const { return tirx::Cast(dtype_.Eval(), value_.Eval()); }
+  PrimExpr Eval() const { return tirx::Cast(PrimType(dtype_.Eval()), value_.Eval()); }
 
  private:
   typename DType::Nested dtype_;
@@ -557,7 +560,7 @@ class PCastExpr : public Pattern<PCastExpr<DType, TA>> {
 /*!
  * \brief Construct a cast pattern.
  *
- * \param dtype The target data type, can be PVar<DataType> or PConst<DataType>.
+ * \param dtype The target data type, can be PVar<DLDataType> or PConst<DLDataType>.
  * \param value The input type.
  *
  * \return The result pattern.
@@ -588,7 +591,7 @@ class PRampExpr : public Pattern<PRampExpr<TBase, TStride, TLanes>> {
     lanes_.InitMatch_();
   }
 
-  bool Match_(const ObjectRef& node) const {
+  bool Match_(const ffi::ObjectRef& node) const {
     if (const tirx::RampNode* ptr = node.as<tirx::RampNode>()) {
       if (!base_.Match_(ptr->base)) return false;
       if (!stride_.Match_(ptr->stride)) return false;
@@ -650,7 +653,7 @@ class PBroadcastExpr : public Pattern<PBroadcastExpr<TA, TLanes>> {
     lanes_.InitMatch_();
   }
 
-  bool Match_(const ObjectRef& node) const {
+  bool Match_(const ffi::ObjectRef& node) const {
     if (const tirx::BroadcastNode* ptr = node.as<tirx::BroadcastNode>()) {
       if (!value_.Match_(ptr->value)) return false;
       if (!lanes_.Match_(ptr->lanes)) return false;
@@ -715,10 +718,10 @@ struct PCallExprInitMatchFunctor {
 };
 
 struct PCallExprMatchFunctor {
-  const tirx::CallNode* call_;
+  const CallNode* call_;
   bool matched_{true};
 
-  explicit PCallExprMatchFunctor(const tirx::CallNode* call) : call_(call) {}
+  explicit PCallExprMatchFunctor(const CallNode* call) : call_(call) {}
 
   template <typename T>
   void operator()(size_t i, const T& pattern) {
@@ -753,8 +756,8 @@ class PCallExpr : public Pattern<PCallExpr<Op, TArgs...>> {
     detail::tuple_for_each(finit, args_);
   }
 
-  bool Match_(const ObjectRef& node) const {
-    if (const tirx::CallNode* ptr = node.as<tirx::CallNode>()) {
+  bool Match_(const ffi::ObjectRef& node) const {
+    if (const CallNode* ptr = node.as<CallNode>()) {
       if (ptr->args.size() != sizeof...(TArgs)) return false;
       if (!ptr->op.same_as(Op::GetOp())) return false;
       detail::PCallExprMatchFunctor fmatch(ptr);
@@ -779,7 +782,7 @@ class PCallExpr : public Pattern<PCallExpr<Op, TArgs...>> {
 #define TVM_PATTERN_BINARY_INTRIN(FuncName, OpName, IntrinOpName)                         \
   struct OpName {                                                                         \
     static PrimExpr Eval(ffi::Array<PrimExpr> args) {                                     \
-      return tirx::Call(args[0].dtype(), GetOp(), args);                                  \
+      return Call(args[0].ty(), GetOp(), args).as_or_throw<PrimExpr>();                   \
     }                                                                                     \
     static const Op& GetOp() { return tirx::builtin::IntrinOpName(); }                    \
   };                                                                                      \
@@ -795,16 +798,16 @@ TVM_PATTERN_BINARY_INTRIN(operator|, PBitwiseOrOp, bitwise_or);
 TVM_PATTERN_BINARY_INTRIN(operator^, PBitwiseXorOp, bitwise_xor);
 
 // unary intrinsics
-#define TVM_PATTERN_UNARY_INTRIN(FuncName, OpName, IntrinOpName)       \
-  struct OpName {                                                      \
-    static PrimExpr Eval(ffi::Array<PrimExpr> args) {                  \
-      return tirx::Call(args[0].dtype(), GetOp(), args);               \
-    }                                                                  \
-    static const Op& GetOp() { return tirx::builtin::IntrinOpName(); } \
-  };                                                                   \
-  template <typename TA>                                               \
-  inline PCallExpr<OpName, TA> FuncName(const Pattern<TA>& a) {        \
-    return PCallExpr<OpName, TA>(a.derived());                         \
+#define TVM_PATTERN_UNARY_INTRIN(FuncName, OpName, IntrinOpName)        \
+  struct OpName {                                                       \
+    static PrimExpr Eval(ffi::Array<PrimExpr> args) {                   \
+      return Call(args[0].ty(), GetOp(), args).as_or_throw<PrimExpr>(); \
+    }                                                                   \
+    static const Op& GetOp() { return tirx::builtin::IntrinOpName(); }  \
+  };                                                                    \
+  template <typename TA>                                                \
+  inline PCallExpr<OpName, TA> FuncName(const Pattern<TA>& a) {         \
+    return PCallExpr<OpName, TA>(a.derived());                          \
   }
 
 TVM_PATTERN_UNARY_INTRIN(operator~, PBitwiseNotOp, bitwise_not);
@@ -812,7 +815,7 @@ TVM_PATTERN_UNARY_INTRIN(operator~, PBitwiseNotOp, bitwise_not);
 // if_then_else
 struct PIfThenElseOp {
   static PrimExpr Eval(ffi::Array<PrimExpr> args) {
-    return tirx::Call(args[1].dtype(), GetOp(), args);
+    return Call(args[1].ty(), GetOp(), args).as_or_throw<PrimExpr>();
   }
   static const Op& GetOp() { return tirx::builtin::if_then_else(); }
 };
@@ -840,7 +843,7 @@ inline PCallExpr<PIfThenElseOp, TCond, TA, TB> if_then_else(const Pattern<TCond>
 
 // vscale
 struct PVscaleOp {
-  static PrimExpr Eval() { return tirx::Call(DataType::Int(32), GetOp(), {}); }
+  static PrimExpr Eval() { return Call(PrimType::Int(32), GetOp(), {}).as_or_throw<PrimExpr>(); }
   static const Op& GetOp() { return tirx::builtin::vscale(); }
 };
 

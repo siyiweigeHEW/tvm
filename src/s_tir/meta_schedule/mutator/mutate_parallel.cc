@@ -16,6 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/s_tir/stmt.h>
 
@@ -40,7 +41,7 @@ bool IsAnnotateWithParallel(const Instruction& inst) {
     return false;
   }
   TVM_FFI_ICHECK_EQ(inst->attrs.size(), 1);
-  ffi::String ann_key = Downcast<ffi::String>(inst->attrs[0]);
+  ffi::String ann_key = inst->attrs[0].as_or_throw<ffi::String>();
   return ann_key == s_tir::attr::meta_schedule_parallel;
 }
 
@@ -52,8 +53,8 @@ bool IsAnnotateWithParallel(const Instruction& inst) {
  */
 Instruction ReplaceAnnValue(Instruction inst, int64_t ann_val) {
   TVM_FFI_ICHECK_EQ(inst->inputs.size(), 2);
-  return Instruction(/*kind=*/inst->kind,                             //
-                     /*inputs=*/{inst->inputs[0], Integer(ann_val)},  //
+  return Instruction(/*kind=*/inst->kind,                                   //
+                     /*inputs=*/{inst->inputs[0], IntImm::Int32(ann_val)},  //
                      /*attrs=*/inst->attrs,
                      /*outputs=*/inst->outputs);
 }
@@ -197,7 +198,7 @@ class MutateParallelNode : public MutatorNode {
   ffi::Optional<Trace> Apply(const Trace& trace, TRandState* rand_state) final;
   // Inherit from `MutatorNode`
   Mutator Clone() const final {
-    ObjectPtr<MutateParallelNode> n = ffi::make_object<MutateParallelNode>(*this);
+    ffi::ObjectPtr<MutateParallelNode> n = ffi::make_object<MutateParallelNode>(*this);
     return Mutator(n);
   }
 };
@@ -244,12 +245,12 @@ bool FindParallelDecision(const Trace& trace, TRandState* rand_state,
   const InstructionNode* ann_inst = ann_insts[s_tir::SampleInt(rand_state, 0, n_ann_insts)];
   TVM_FFI_ICHECK_EQ(ann_inst->inputs.size(), 2);
   const InstructionNode* get_sblock_inst =
-      get_sblock_insts.at(Downcast<s_tir::SBlockRV>(ann_inst->inputs[0]).get());
+      get_sblock_insts.at(ann_inst->inputs[0].as_or_throw<s_tir::SBlockRV>().get());
   TVM_FFI_ICHECK_EQ(get_sblock_inst->attrs.size(), 2);
   candidate->inst = ffi::GetRef<Instruction>(ann_inst);
-  candidate->parallel_extent = Downcast<IntImm>(ann_inst->inputs[1])->value;
-  candidate->block_name = Downcast<ffi::String>(get_sblock_inst->attrs[0]);
-  candidate->func_name = Downcast<ffi::String>(get_sblock_inst->attrs[1]);
+  candidate->parallel_extent = ann_inst->inputs[1].cast<IntImm>()->value;
+  candidate->block_name = get_sblock_inst->attrs[0].as_or_throw<ffi::String>();
+  candidate->func_name = get_sblock_inst->attrs[1].as_or_throw<ffi::String>();
   return true;
 }
 
@@ -313,7 +314,7 @@ ffi::Optional<Trace> MutateParallelNode::Apply(const Trace& trace, TRandState* r
 }
 
 Mutator Mutator::MutateParallel(int64_t max_jobs_per_core) {
-  ObjectPtr<MutateParallelNode> n = ffi::make_object<MutateParallelNode>();
+  ffi::ObjectPtr<MutateParallelNode> n = ffi::make_object<MutateParallelNode>();
   n->max_jobs_per_core = max_jobs_per_core;
   return Mutator(n);
 }

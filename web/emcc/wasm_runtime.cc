@@ -23,7 +23,6 @@
  */
 
 // configurations for tvm logging
-#define TVM_LOG_STACK_TRACE 0
 #define TVM_LOG_DEBUG 0
 #define TVM_LOG_CUSTOMIZE 1
 #define TVM_FFI_USE_LIBBACKTRACE 0
@@ -33,12 +32,11 @@
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
 
-#include "src/runtime/contrib/sort/sort.cc"
 #include "src/runtime/cpu_device_api.cc"
 #include "src/runtime/device_api.cc"
+#include "src/runtime/extra/contrib/sort/sort.cc"
 #include "src/runtime/file_utils.cc"
 #include "src/runtime/logging.cc"
-#include "src/runtime/profiling.cc"
 #include "src/runtime/rpc/rpc_channel.cc"
 #include "src/runtime/rpc/rpc_endpoint.cc"
 #include "src/runtime/rpc/rpc_event_impl.cc"
@@ -46,10 +44,12 @@
 #include "src/runtime/rpc/rpc_module.cc"
 #include "src/runtime/rpc/rpc_session.cc"
 #include "src/runtime/tensor.cc"
+#include "src/runtime/timer.cc"
 #include "src/runtime/workspace_pool.cc"
 // relax setup
 #include "3rdparty/tvm-ffi/src/ffi/backtrace.cc"
 #include "3rdparty/tvm-ffi/src/ffi/container.cc"
+#include "3rdparty/tvm-ffi/src/ffi/custom_allocator.cc"
 #include "3rdparty/tvm-ffi/src/ffi/dtype.cc"
 #include "3rdparty/tvm-ffi/src/ffi/error.cc"
 #include "3rdparty/tvm-ffi/src/ffi/extra/env_c_api.cc"
@@ -60,11 +60,11 @@
 #include "3rdparty/tvm-ffi/src/ffi/extra/library_module_system_lib.cc"
 #include "3rdparty/tvm-ffi/src/ffi/extra/module.cc"
 #include "3rdparty/tvm-ffi/src/ffi/function.cc"
+#include "3rdparty/tvm-ffi/src/ffi/init_once.cc"
 #include "3rdparty/tvm-ffi/src/ffi/object.cc"
 #include "3rdparty/tvm-ffi/src/ffi/tensor.cc"
 #include "3rdparty/tvm-ffi/src/ffi/testing/testing.cc"
 #include "src/runtime/memory/memory_manager.cc"
-#include "src/runtime/nvtx.cc"
 #include "src/runtime/vm/attn_backend.cc"
 #include "src/runtime/vm/builtin.cc"
 #include "src/runtime/vm/bytecode.cc"

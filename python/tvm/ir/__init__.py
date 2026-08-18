@@ -18,7 +18,7 @@
 # pylint: disable=unused-import
 """Common data structures across all IR variants."""
 
-from . import diagnostics, instrument, transform
+from . import instrument, transform
 from .attrs import Attrs, DictAttrs, make_node
 from .base import (
     EnvFunc,
@@ -29,21 +29,15 @@ from .base import (
     assert_structural_equal,
     load_json,
     save_json,
-    structural_equal,
-    structural_hash,
 )
-from .container import Array, Map
-from .expr import BaseExpr, GlobalVar, PrimExpr, Range, RelaxExpr
+
+# Register Type before Expr.  Expr's reflected ``ty`` field otherwise creates
+# an auto-generated Type wrapper before the concrete Python class is available.
+from .type import FuncType, PointerType, PrimType, TupleType, Type
+from .expr import Call, Expr, GlobalVar, Range, Var, is_prim_expr, is_prim_var
 from .function import BaseFunc, CallingConv
 from .global_info import GlobalInfo, DummyGlobalInfo, VDevice
 from .module import IRModule
 from .op import Op, register_intrin_lowering, register_op_attr
-from .type import (
-    FuncType,
-    PointerType,
-    PrimType,
-    TupleType,
-    Type,
-)
 
-from . import analysis
+from tvm_ffi import Array, Map

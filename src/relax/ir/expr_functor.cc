@@ -24,17 +24,18 @@
  * ExprMutator uses memoization and self return in order to amortize
  * the cost of using functional updates.
  */
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/ir/type_functor.h>
 #include <tvm/relax/analysis.h>
 #include <tvm/relax/expr_functor.h>
 #include <tvm/relax/type.h>
+#include <tvm/tirx/op.h>
 
 // functions to be overriden.
-#define RELAX_VISIT_BINDING_DISPATCH(OP)                                   \
-  vtable.template set_dispatch<OP>(                                        \
-      [](const ObjectRef& n, TSelf* self, const VarBindingNode* binding) { \
-        self->VisitBinding_(binding, static_cast<const OP*>(n.get()));     \
+#define RELAX_VISIT_BINDING_DISPATCH(OP)                                        \
+  vtable.template set_dispatch<OP>(                                             \
+      [](const ffi::ObjectRef& n, TSelf* self, const VarBindingNode* binding) { \
+        self->VisitBinding_(binding, static_cast<const OP*>(n.get()));          \
       });
 
 #define RELAX_VAR_BINDING_DISPATCH_IMPL(Type)                                           \
@@ -53,7 +54,6 @@
     RELAX_VISIT_BINDING_DISPATCH(IfNode);                                               \
     RELAX_VISIT_BINDING_DISPATCH(OpNode);                                               \
     RELAX_VISIT_BINDING_DISPATCH(TupleGetItemNode);                                     \
-    RELAX_VISIT_BINDING_DISPATCH(PrimValueNode);                                        \
     RELAX_VISIT_BINDING_DISPATCH(StringImmNode);                                        \
     RELAX_VISIT_BINDING_DISPATCH(DataTypeImmNode);                                      \
     return vtable;                                                                      \
@@ -62,9 +62,11 @@
     static VisitBindingVTable vtable = InitVisitBindingVTable();                        \
     const Expr& value = binding->value;                                                 \
     TVM_FFI_ICHECK(value.defined()) << "Found null pointer node while traversing AST."; \
-    TVM_FFI_ICHECK(vtable.can_dispatch(value))                                          \
-        << "VisitVarBinding do not allow binding value type" << value->GetTypeKey();    \
-    vtable(value, this, binding);                                                       \
+    if (vtable.can_dispatch(value)) {                                                   \
+      vtable(value, this, binding);                                                     \
+    } else {                                                                            \
+      VisitBinding_(binding, value.get());                                              \
+    }                                                                                   \
   }
 
 // functions to be overriden.
@@ -87,38 +89,46 @@ namespace relax {
 // ==================
 // ExprVisitor
 
-void ExprVisitor::VisitExprDepStructInfoField(const StructInfo& struct_info) {
-  // recurse into struct info in case they depend on value
+void ExprVisitor::VisitExprDepTypeField(const Type& ty) {
+  // recurse into type in case they depend on value
   // under the current scope.
-  default_struct_info_field_visitor_.VisitStructInfo(struct_info);
+  default_tyfield_visitor_.VisitType(ty);
 }
 
-ExprVisitor::DefaultStructInfoFieldVisitor::DefaultStructInfoFieldVisitor(ExprVisitor* parent)
+ExprVisitor::DefaultTypeFieldVisitor::DefaultTypeFieldVisitor(ExprVisitor* parent)
     : parent_(parent) {}
 
-void ExprVisitor::DefaultStructInfoFieldVisitor::VisitStructInfoExprField(const Expr& expr) {
+void ExprVisitor::DefaultTypeFieldVisitor::VisitTypeExprField(const Expr& expr) {
   parent_->VisitExpr(expr);
 }
 
-void ExprVisitor::DefaultStructInfoFieldVisitor::VisitStructInfoExprField(const PrimExpr& expr) {
-  parent_->VisitPrimExpr(expr);
+void ExprVisitor::DefaultTypeFieldVisitor::VisitTypeExprField(const PrimExpr& expr) {
+  parent_->VisitTypePrimExprField(expr);
 }
 
-void ExprVisitor::DefaultStructInfoFieldVisitor::VisitStructInfo_(const FuncStructInfoNode* op) {
-  // Do not recurse into function struct info
+void ExprVisitor::DefaultTypeFieldVisitor::VisitType_(const FuncTypeNode* op) {
+  // Do not recurse into function type
   // as they won't contain ref to values in current scope.
+}
+
+void VisitExprDepTypeFieldIfNeeded(ExprVisitor* visitor, const Type& ty) {
+  if (!ty.IsMissing()) {
+    auto* ty_node = ty.as<TypeNode>();
+    TVM_FFI_DCHECK(ty_node != nullptr);
+    visitor->VisitExprDepTypeField(ffi::GetRef<Type>(ty_node));
+  }
 }
 
 void ExprVisitor::VisitExpr(const Expr& expr) { ExprFunctor::VisitExpr(expr); }
 
 void ExprVisitor::VisitExpr_(const ConstantNode* op) {
   this->VisitSpan(op->span);
-  // Constant's StructInfo does not depend on Expr.
+  // Constant's Type does not depend on Expr.
 }
 
 void ExprVisitor::VisitExpr_(const GlobalVarNode* op) {
   this->VisitSpan(op->span);
-  // FuncStructInfo is not value-dep
+  // FuncType is not value-dep
 }
 
 void ExprVisitor::VisitExpr_(const TupleNode* op) {
@@ -126,17 +136,13 @@ void ExprVisitor::VisitExpr_(const TupleNode* op) {
   for (Expr field : op->fields) {
     this->VisitExpr(field);
   }
-  if (auto* sinfo = op->struct_info_.as<StructInfoNode>()) {
-    this->VisitExprDepStructInfoField(ffi::GetRef<StructInfo>(sinfo));
-  }
+  VisitExprDepTypeFieldIfNeeded(this, op->ty);
 }
 
 // Visit the use-site of a defined Var
 void ExprVisitor::VisitExpr_(const VarNode* op) {
   this->VisitSpan(op->span);
-  if (auto* sinfo = op->struct_info_.as<StructInfoNode>()) {
-    this->VisitExprDepStructInfoField(ffi::GetRef<StructInfo>(sinfo));
-  }
+  VisitExprDepTypeFieldIfNeeded(this, op->ty);
 }
 
 // Visit the use-site of a defined DataflowVar
@@ -151,25 +157,114 @@ void ExprVisitor::VisitExpr_(const FunctionNode* op) {
   }
 
   this->VisitExpr(op->body);
-  // FuncStructInfo does not depend on Expr.
+  // FuncType does not depend on Expr.
 }
 
 void ExprVisitor::VisitExpr_(const CallNode* op) {
   this->VisitSpan(op->span);
   this->VisitExpr(op->op);
 
-  for (StructInfo sinfo_arg : op->sinfo_args) {
-    this->VisitExprDepStructInfoField(sinfo_arg);
+  for (Type ty_arg : op->ty_args) {
+    this->VisitExprDepTypeField(ty_arg);
   }
 
   for (Expr arg : op->args) {
     this->VisitExpr(arg);
   }
 
-  if (auto* sinfo = op->struct_info_.as<StructInfoNode>()) {
-    this->VisitExprDepStructInfoField(ffi::GetRef<StructInfo>(sinfo));
-  }
+  VisitExprDepTypeFieldIfNeeded(this, op->ty);
 }
+
+void ExprVisitor::VisitExpr_(const tirx::BufferLoadNode* op) {
+  this->VisitSpan(op->span);
+  for (const PrimExpr& index : op->indices) {
+    this->VisitExpr(index);
+  }
+  if (op->predicate.has_value()) {
+    this->VisitExpr(op->predicate.value());
+  }
+  VisitExprDepTypeFieldIfNeeded(this, op->ty);
+}
+
+#define RELAX_VISIT_TIRX_BINOP(OP)                   \
+  void ExprVisitor::VisitExpr_(const tirx::OP* op) { \
+    this->VisitSpan(op->span);                       \
+    this->VisitExpr(op->a);                          \
+    this->VisitExpr(op->b);                          \
+    VisitExprDepTypeFieldIfNeeded(this, op->ty);     \
+  }
+
+RELAX_VISIT_TIRX_BINOP(AddNode);
+RELAX_VISIT_TIRX_BINOP(SubNode);
+RELAX_VISIT_TIRX_BINOP(MulNode);
+RELAX_VISIT_TIRX_BINOP(DivNode);
+RELAX_VISIT_TIRX_BINOP(ModNode);
+RELAX_VISIT_TIRX_BINOP(FloorDivNode);
+RELAX_VISIT_TIRX_BINOP(FloorModNode);
+RELAX_VISIT_TIRX_BINOP(MinNode);
+RELAX_VISIT_TIRX_BINOP(MaxNode);
+RELAX_VISIT_TIRX_BINOP(EQNode);
+RELAX_VISIT_TIRX_BINOP(NENode);
+RELAX_VISIT_TIRX_BINOP(LTNode);
+RELAX_VISIT_TIRX_BINOP(LENode);
+RELAX_VISIT_TIRX_BINOP(GTNode);
+RELAX_VISIT_TIRX_BINOP(GENode);
+RELAX_VISIT_TIRX_BINOP(AndNode);
+RELAX_VISIT_TIRX_BINOP(OrNode);
+
+#undef RELAX_VISIT_TIRX_BINOP
+
+void ExprVisitor::VisitExpr_(const tirx::CastNode* op) {
+  this->VisitSpan(op->span);
+  this->VisitExpr(op->value);
+  VisitExprDepTypeFieldIfNeeded(this, op->ty);
+}
+
+void ExprVisitor::VisitExpr_(const tirx::NotNode* op) {
+  this->VisitSpan(op->span);
+  this->VisitExpr(op->a);
+  VisitExprDepTypeFieldIfNeeded(this, op->ty);
+}
+
+void ExprVisitor::VisitExpr_(const tirx::SelectNode* op) {
+  this->VisitSpan(op->span);
+  this->VisitExpr(op->condition);
+  this->VisitExpr(op->true_value);
+  this->VisitExpr(op->false_value);
+  VisitExprDepTypeFieldIfNeeded(this, op->ty);
+}
+
+void ExprVisitor::VisitExpr_(const tirx::RampNode* op) {
+  this->VisitSpan(op->span);
+  this->VisitExpr(op->base);
+  this->VisitExpr(op->stride);
+  this->VisitExpr(op->lanes);
+  VisitExprDepTypeFieldIfNeeded(this, op->ty);
+}
+
+void ExprVisitor::VisitExpr_(const tirx::BroadcastNode* op) {
+  this->VisitSpan(op->span);
+  this->VisitExpr(op->value);
+  this->VisitExpr(op->lanes);
+  VisitExprDepTypeFieldIfNeeded(this, op->ty);
+}
+
+void ExprVisitor::VisitExpr_(const tirx::ShuffleNode* op) {
+  this->VisitSpan(op->span);
+  for (const PrimExpr& vector : op->vectors) {
+    this->VisitExpr(vector);
+  }
+  for (const PrimExpr& index : op->indices) {
+    this->VisitExpr(index);
+  }
+  VisitExprDepTypeFieldIfNeeded(this, op->ty);
+}
+
+void ExprVisitor::VisitExpr_(const tvm::IntImmNode* op) { this->VisitSpan(op->span); }
+
+void ExprVisitor::VisitExpr_(const tvm::FloatImmNode* op) { this->VisitSpan(op->span); }
+
+void ExprVisitor::VisitExpr_(const tirx::StringImmNode* op) { this->VisitSpan(op->span); }
 
 void ExprVisitor::VisitExpr_(const IfNode* op) {
   this->VisitSpan(op->span);
@@ -177,9 +272,7 @@ void ExprVisitor::VisitExpr_(const IfNode* op) {
   this->VisitExpr(op->true_branch);
   this->VisitExpr(op->false_branch);
 
-  if (auto* sinfo = op->struct_info_.as<StructInfoNode>()) {
-    this->VisitExprDepStructInfoField(ffi::GetRef<StructInfo>(sinfo));
-  }
+  VisitExprDepTypeFieldIfNeeded(this, op->ty);
 }
 
 void ExprVisitor::VisitExpr_(const OpNode* op) { this->VisitSpan(op->span); }
@@ -188,25 +281,19 @@ void ExprVisitor::VisitExpr_(const TupleGetItemNode* op) {
   this->VisitSpan(op->span);
   this->VisitExpr(op->tuple);
 
-  if (auto* sinfo = op->struct_info_.as<StructInfoNode>()) {
-    this->VisitExprDepStructInfoField(ffi::GetRef<StructInfo>(sinfo));
-  }
+  VisitExprDepTypeFieldIfNeeded(this, op->ty);
 }
 
 void ExprVisitor::VisitExpr_(const ShapeExprNode* op) {
   for (PrimExpr val : op->values) {
-    this->VisitPrimExpr(val);
+    this->VisitExpr(val);
   }
   this->VisitSpan(op->span);
-
-  if (auto* sinfo = op->struct_info_.as<StructInfoNode>()) {
-    this->VisitExprDepStructInfoField(ffi::GetRef<StructInfo>(sinfo));
-  }
 }
 
 void ExprVisitor::VisitExpr_(const ExternFuncNode* op) {
   this->VisitSpan(op->span);
-  // FuncStructInfo does not depend on Expr.
+  // FuncType does not depend on Expr.
 }
 
 void ExprVisitor::VisitExpr_(const SeqExprNode* op) {
@@ -216,18 +303,10 @@ void ExprVisitor::VisitExpr_(const SeqExprNode* op) {
   }
   this->VisitExpr(op->body);
 
-  if (auto* sinfo = op->struct_info_.as<StructInfoNode>()) {
-    this->VisitExprDepStructInfoField(ffi::GetRef<StructInfo>(sinfo));
-  }
+  VisitExprDepTypeFieldIfNeeded(this, op->ty);
 }
 
-void ExprVisitor::VisitExpr_(const PrimValueNode* op) {
-  this->VisitPrimExpr(op->value);
-  if (auto* sinfo = op->struct_info_.as<StructInfoNode>()) {
-    this->VisitExprDepStructInfoField(ffi::GetRef<StructInfo>(sinfo));
-  }
-  this->VisitSpan(op->span);
-}
+void ExprVisitor::VisitExprFallback_(const ExprNode* op) { this->VisitExprDefault_(op); }
 
 void ExprVisitor::VisitExpr_(const StringImmNode* op) { this->VisitSpan(op->span); }
 
@@ -235,7 +314,7 @@ void ExprVisitor::VisitExpr_(const DataTypeImmNode* op) { this->VisitSpan(op->sp
 
 void ExprVisitor::VisitSpan(const Span& span) {}
 
-void ExprVisitor::VisitPrimExpr(const PrimExpr& expr) {}
+void ExprVisitor::VisitTypePrimExprField(const PrimExpr& expr) { this->VisitExpr(expr); }
 
 // implementations of binding visitor dispatch
 RELAX_VAR_BINDING_DISPATCH_IMPL(ExprVisitor);
@@ -252,13 +331,13 @@ RELAX_EXPR_VISITOR_VISIT_BINDING_IMPL(SeqExprNode);
 RELAX_EXPR_VISITOR_VISIT_BINDING_IMPL(IfNode);
 RELAX_EXPR_VISITOR_VISIT_BINDING_IMPL(OpNode);
 RELAX_EXPR_VISITOR_VISIT_BINDING_IMPL(TupleGetItemNode);
-RELAX_EXPR_VISITOR_VISIT_BINDING_IMPL(PrimValueNode);
+RELAX_EXPR_VISITOR_VISIT_BINDING_IMPL(ExprNode);
 RELAX_EXPR_VISITOR_VISIT_BINDING_IMPL(StringImmNode);
 RELAX_EXPR_VISITOR_VISIT_BINDING_IMPL(DataTypeImmNode);
 
 void ExprVisitor::VisitBinding_(const MatchCastNode* binding) {
   this->VisitExpr(binding->value);
-  this->VisitExprDepStructInfoField(binding->struct_info);
+  this->VisitExprDepTypeField(binding->ty);
   this->VisitVarDef(binding->var);
 }
 
@@ -337,41 +416,38 @@ TVM_FFI_STATIC_INIT_BLOCK() {
 // ==================
 // ExprMutatorBase
 
-StructInfo ExprMutatorBase::VisitExprDepStructInfoField(const StructInfo& struct_info) {
-  // recurse into struct info in case they depend on value
+Type ExprMutatorBase::VisitExprDepTypeField(const Type& ty) {
+  // recurse into type in case they depend on value
   // under the current scope.
-  return default_struct_info_field_mutator_.VisitStructInfo(struct_info);
+  return default_tyfield_mutator_.VisitType(ty);
 }
 
-ExprMutatorBase::DefaultStructInfoFieldMutator::DefaultStructInfoFieldMutator(
-    ExprMutatorBase* parent)
+ExprMutatorBase::DefaultTypeFieldMutator::DefaultTypeFieldMutator(ExprMutatorBase* parent)
     : parent_(parent) {}
 
-Expr ExprMutatorBase::DefaultStructInfoFieldMutator::VisitStructInfoExprField(const Expr& expr) {
+Expr ExprMutatorBase::DefaultTypeFieldMutator::VisitTypeExprField(const Expr& expr) {
   return parent_->VisitExpr(expr);
 }
 
-PrimExpr ExprMutatorBase::DefaultStructInfoFieldMutator::VisitStructInfoExprField(
-    const PrimExpr& expr) {
-  return parent_->VisitPrimExpr(expr);
+PrimExpr ExprMutatorBase::DefaultTypeFieldMutator::VisitTypeExprField(const PrimExpr& expr) {
+  return parent_->VisitTypePrimExprField(expr);
 }
 
-StructInfo ExprMutatorBase::DefaultStructInfoFieldMutator::VisitStructInfo_(
-    const FuncStructInfoNode* op) {
-  // Do not recurse into function struct info
+Type ExprMutatorBase::DefaultTypeFieldMutator::VisitType_(const FuncTypeNode* op) {
+  // Do not recurse into function type
   // as they won't contain ref to values in current scope.
-  return ffi::GetRef<StructInfo>(op);
+  return ffi::GetRef<Type>(op);
 }
 
 Expr ExprMutatorBase::VisitExpr(const Expr& expr) { return ExprFunctor::VisitExpr(expr); }
 
 Expr ExprMutatorBase::VisitExpr_(const ConstantNode* op) {
-  // Constant' struct info won't be affected by Expr/PrimExpr change.
+  // Constant' type won't be affected by Expr/PrimExpr change.
   return ffi::GetRef<Expr>(op);
 }
 
 Expr ExprMutatorBase::VisitExpr_(const GlobalVarNode* op) {
-  // FuncStructInfo won't be affected by Expr/PrimExpr change.
+  // FuncType won't be affected by Expr/PrimExpr change.
   return ffi::GetRef<Expr>(op);
 }
 
@@ -385,9 +461,9 @@ Expr ExprMutatorBase::VisitExpr_(const TupleNode* op) {
   }
 
   if (unchanged) {
-    // If tuple's struct info change it means that
-    // one of its fields' struct info will change
-    // so un-changed already implies that struct info won't change
+    // If tuple's type change it means that
+    // one of its fields' type will change
+    // so un-changed already implies that type won't change
     return ffi::GetRef<Expr>(op);
   } else {
     // when there is a change return a new tuple node
@@ -396,11 +472,7 @@ Expr ExprMutatorBase::VisitExpr_(const TupleNode* op) {
 }
 
 // Visit the use-site of a defined Var
-Expr ExprMutatorBase::VisitExpr_(const VarNode* op) {
-  // struct info of var-use should remain stable
-  // or the var itself will get replaced
-  return ffi::GetRef<Expr>(op);
-}
+Expr ExprMutatorBase::VisitExpr_(const VarNode* op) { return ffi::GetRef<Expr>(op); }
 
 // Visit the use-site of a defined DataflowVar
 Expr ExprMutatorBase::VisitExpr_(const DataflowVarNode* op) {
@@ -408,14 +480,14 @@ Expr ExprMutatorBase::VisitExpr_(const DataflowVarNode* op) {
 }
 
 Expr ExprMutatorBase::VisitExpr_(const FunctionNode* op) {
-  // struct info of function is not value dependent
-  // so no need to check struct_info field
+  // type of function is not value dependent
+  // so no need to check ty field
   Expr body = this->VisitExpr(op->body);
 
   if (body.same_as(op->body)) {
     return ffi::GetRef<Expr>(op);
   } else {
-    return Function(op->params, body, op->ret_struct_info, op->is_pure, op->attrs);
+    return Function(op->params, body, op->ret_ty, op->is_pure, op->attrs);
   }
 }
 
@@ -423,11 +495,11 @@ Expr ExprMutatorBase::VisitExpr_(const CallNode* call_node) {
   Expr new_op = this->VisitExpr(call_node->op);
   bool unchanged = call_node->op.same_as(new_op);
 
-  ffi::Array<StructInfo> sinfo_args;
-  for (StructInfo sinfo_arg : call_node->sinfo_args) {
-    StructInfo new_sinfo_arg = this->VisitExprDepStructInfoField(sinfo_arg);
-    sinfo_args.push_back(new_sinfo_arg);
-    unchanged &= new_sinfo_arg.same_as(sinfo_arg);
+  ffi::Array<Type> ty_args;
+  for (Type ty_arg : call_node->ty_args) {
+    Type new_ty_arg = this->VisitExprDepTypeField(ty_arg);
+    ty_args.push_back(new_ty_arg);
+    unchanged &= new_ty_arg.same_as(ty_arg);
   }
 
   tvm::ffi::Array<Expr> call_args;
@@ -437,20 +509,135 @@ Expr ExprMutatorBase::VisitExpr_(const CallNode* call_node) {
     unchanged &= new_arg.same_as(arg);
   }
 
-  if (unchanged && VisitAndCheckStructInfoFieldUnchanged(call_node->struct_info_)) {
+  Type ret_ty = call_node->ty;
+  if (!ret_ty.IsMissing()) {
+    ret_ty = this->VisitExprDepTypeField(ret_ty);
+  }
+  bool ret_ty_unchanged = ret_ty.same_as(call_node->ty);
+
+  if (unchanged && ret_ty_unchanged) {
     return ffi::GetRef<Expr>(call_node);
   } else {
-    return Call(new_op, call_args, call_node->attrs, sinfo_args, call_node->span);
+    // A result-type rewrite is authoritative only while the semantic inputs
+    // are unchanged.  Once the callee, arguments, or type arguments change,
+    // the old result may contain both rewritten dependent dimensions and
+    // stale derived metadata (for example an unknown dtype).  Invalidate the
+    // complete result so BlockBuilder can infer it from the rebuilt call.
+    Type rebuilt_ret_ty = unchanged ? ret_ty : Type::Missing();
+    return Call(rebuilt_ret_ty, new_op, call_args, call_node->attrs, ty_args, call_node->span);
   }
 }
+
+Expr ExprMutatorBase::VisitExpr_(const tirx::BufferLoadNode* op) {
+  ffi::Array<PrimExpr> indices = op->indices.Map(
+      [this](const PrimExpr& e) { return this->VisitExpr(e).as_or_throw<PrimExpr>(); });
+  ffi::Optional<PrimExpr> predicate = op->predicate;
+  if (predicate.has_value()) {
+    predicate = this->VisitExpr(predicate.value()).as_or_throw<PrimExpr>();
+  }
+  bool predicate_unchanged =
+      !op->predicate.has_value() || predicate.value().same_as(op->predicate.value());
+  if (indices.same_as(op->indices) && predicate_unchanged) {
+    return ffi::GetRef<Expr>(op);
+  }
+  return tirx::BufferLoad(op->buffer, indices, predicate, op->span);
+}
+
+#define RELAX_MUTATE_TIRX_BINOP(OP)                              \
+  Expr ExprMutatorBase::VisitExpr_(const tirx::OP##Node* op) {   \
+    PrimExpr a = this->VisitExpr(op->a).as_or_throw<PrimExpr>(); \
+    PrimExpr b = this->VisitExpr(op->b).as_or_throw<PrimExpr>(); \
+    if (a.same_as(op->a) && b.same_as(op->b)) {                  \
+      return ffi::GetRef<Expr>(op);                              \
+    }                                                            \
+    return tirx::OP(a, b, op->span);                             \
+  }
+
+RELAX_MUTATE_TIRX_BINOP(Add);
+RELAX_MUTATE_TIRX_BINOP(Sub);
+RELAX_MUTATE_TIRX_BINOP(Mul);
+RELAX_MUTATE_TIRX_BINOP(Div);
+RELAX_MUTATE_TIRX_BINOP(Mod);
+RELAX_MUTATE_TIRX_BINOP(FloorDiv);
+RELAX_MUTATE_TIRX_BINOP(FloorMod);
+RELAX_MUTATE_TIRX_BINOP(Min);
+RELAX_MUTATE_TIRX_BINOP(Max);
+RELAX_MUTATE_TIRX_BINOP(EQ);
+RELAX_MUTATE_TIRX_BINOP(NE);
+RELAX_MUTATE_TIRX_BINOP(LT);
+RELAX_MUTATE_TIRX_BINOP(LE);
+RELAX_MUTATE_TIRX_BINOP(GT);
+RELAX_MUTATE_TIRX_BINOP(GE);
+RELAX_MUTATE_TIRX_BINOP(And);
+RELAX_MUTATE_TIRX_BINOP(Or);
+
+#undef RELAX_MUTATE_TIRX_BINOP
+
+Expr ExprMutatorBase::VisitExpr_(const tirx::CastNode* op) {
+  PrimExpr value = this->VisitExpr(op->value).as_or_throw<PrimExpr>();
+  return value.same_as(op->value)
+             ? ffi::GetRef<Expr>(op)
+             : Expr(tirx::Cast(op->ty.as_or_throw<PrimType>(), value, op->span));
+}
+
+Expr ExprMutatorBase::VisitExpr_(const tirx::NotNode* op) {
+  PrimExpr a = this->VisitExpr(op->a).as_or_throw<PrimExpr>();
+  return a.same_as(op->a) ? ffi::GetRef<Expr>(op) : Expr(tirx::Not(a, op->span));
+}
+
+Expr ExprMutatorBase::VisitExpr_(const tirx::SelectNode* op) {
+  PrimExpr condition = this->VisitExpr(op->condition).as_or_throw<PrimExpr>();
+  PrimExpr true_value = this->VisitExpr(op->true_value).as_or_throw<PrimExpr>();
+  PrimExpr false_value = this->VisitExpr(op->false_value).as_or_throw<PrimExpr>();
+  if (condition.same_as(op->condition) && true_value.same_as(op->true_value) &&
+      false_value.same_as(op->false_value)) {
+    return ffi::GetRef<Expr>(op);
+  }
+  return tirx::Select(condition, true_value, false_value, op->span);
+}
+
+Expr ExprMutatorBase::VisitExpr_(const tirx::RampNode* op) {
+  PrimExpr base = this->VisitExpr(op->base).as_or_throw<PrimExpr>();
+  PrimExpr stride = this->VisitExpr(op->stride).as_or_throw<PrimExpr>();
+  PrimExpr lanes = this->VisitExpr(op->lanes).as_or_throw<PrimExpr>();
+  if (base.same_as(op->base) && stride.same_as(op->stride) && lanes.same_as(op->lanes)) {
+    return ffi::GetRef<Expr>(op);
+  }
+  return tirx::Ramp(base, stride, lanes, op->span);
+}
+
+Expr ExprMutatorBase::VisitExpr_(const tirx::BroadcastNode* op) {
+  PrimExpr value = this->VisitExpr(op->value).as_or_throw<PrimExpr>();
+  PrimExpr lanes = this->VisitExpr(op->lanes).as_or_throw<PrimExpr>();
+  if (value.same_as(op->value) && lanes.same_as(op->lanes)) {
+    return ffi::GetRef<Expr>(op);
+  }
+  return tirx::Broadcast(value, lanes, op->span);
+}
+
+Expr ExprMutatorBase::VisitExpr_(const tirx::ShuffleNode* op) {
+  ffi::Array<PrimExpr> vectors = op->vectors.Map(
+      [this](const PrimExpr& e) { return this->VisitExpr(e).as_or_throw<PrimExpr>(); });
+  ffi::Array<PrimExpr> indices = op->indices.Map(
+      [this](const PrimExpr& e) { return this->VisitExpr(e).as_or_throw<PrimExpr>(); });
+  if (vectors.same_as(op->vectors) && indices.same_as(op->indices)) {
+    return ffi::GetRef<Expr>(op);
+  }
+  return tirx::Shuffle(vectors, indices, op->span);
+}
+
+Expr ExprMutatorBase::VisitExpr_(const tvm::IntImmNode* op) { return ffi::GetRef<Expr>(op); }
+
+Expr ExprMutatorBase::VisitExpr_(const tvm::FloatImmNode* op) { return ffi::GetRef<Expr>(op); }
+
+Expr ExprMutatorBase::VisitExpr_(const tirx::StringImmNode* op) { return ffi::GetRef<Expr>(op); }
 
 Expr ExprMutatorBase::VisitExpr_(const IfNode* op) {
   Expr guard = this->VisitExpr(op->cond);
   Expr true_b = this->VisitExpr(op->true_branch);
   Expr false_b = this->VisitExpr(op->false_branch);
   if (op->cond.same_as(guard) && op->true_branch.same_as(true_b) &&
-      op->false_branch.same_as(false_b) &&
-      VisitAndCheckStructInfoFieldUnchanged(op->struct_info_)) {
+      op->false_branch.same_as(false_b) && VisitAndCheckTypeFieldUnchanged(op->ty)) {
     return ffi::GetRef<Expr>(op);
   } else {
     return If(guard, true_b, false_b, op->span);
@@ -462,33 +649,26 @@ Expr ExprMutatorBase::VisitExpr_(const OpNode* op) { return ffi::GetRef<Expr>(op
 Expr ExprMutatorBase::VisitExpr_(const TupleGetItemNode* op) {
   auto t = this->VisitExpr(op->tuple);
   if (op->tuple.same_as(t)) {
-    // struct info can be deterministically derived by tuple and index
-    // if t does not change, then struct info won't change.
+    // type can be deterministically derived by tuple and index
+    // if t does not change, then type won't change.
     return ffi::GetRef<Expr>(op);
   } else {
     return TupleGetItem(t, op->index, op->span);
   }
 }
 
-Expr ExprMutatorBase::VisitExpr_(const PrimValueNode* op) {
-  auto value = this->VisitPrimExpr(op->value);
-  if (op->value.same_as(value)) {
-    // struct info can be deterministically derived by value
-    // if value does not change, then struct info won't change.
-    return ffi::GetRef<Expr>(op);
-  }
-  return PrimValue(value, op->span);
-}
+Expr ExprMutatorBase::VisitExprFallback_(const ExprNode* op) { return this->VisitExprDefault_(op); }
 
 Expr ExprMutatorBase::VisitExpr_(const StringImmNode* op) { return ffi::GetRef<Expr>(op); }
 
 Expr ExprMutatorBase::VisitExpr_(const DataTypeImmNode* op) { return ffi::GetRef<Expr>(op); }
 
 Expr ExprMutatorBase::VisitExpr_(const ShapeExprNode* op) {
-  auto values = op->values.Map([this](const PrimExpr& e) { return this->VisitPrimExpr(e); });
+  auto values = op->values.Map(
+      [this](const PrimExpr& e) { return this->VisitExpr(e).as_or_throw<PrimExpr>(); });
 
   if (values.same_as(op->values)) {
-    // If values does not change, struct info won't change.
+    // If values does not change, type won't change.
     return ffi::GetRef<Expr>(op);
   } else {
     return ShapeExpr(values, op->span);
@@ -496,7 +676,7 @@ Expr ExprMutatorBase::VisitExpr_(const ShapeExprNode* op) {
 }
 
 Expr ExprMutatorBase::VisitExpr_(const ExternFuncNode* op) {
-  // StructInfo of function remains value independent.
+  // Type of function remains value independent.
   return ffi::GetRef<Expr>(op);
 }
 
@@ -513,8 +693,7 @@ Expr ExprMutatorBase::VisitExpr_(const SeqExprNode* op) {
 
   Expr body = this->VisitExpr(op->body);
 
-  if (all_blocks_unchanged && body.same_as(op->body) &&
-      VisitAndCheckStructInfoFieldUnchanged(op->struct_info_)) {
+  if (all_blocks_unchanged && body.same_as(op->body) && VisitAndCheckTypeFieldUnchanged(op->ty)) {
     return ffi::GetRef<Expr>(op);
   }
   return SeqExpr(blocks, body);
@@ -529,7 +708,7 @@ BindingBlock ExprMutatorBase::VisitBindingBlock(const BindingBlock& block) {
         bindings.push_back(VarBinding(var_binding->var, new_value));
       } else if (auto match_cast = binding.as<MatchCastNode>()) {
         Expr new_value = this->VisitExpr(match_cast->value);
-        bindings.push_back(MatchCast(match_cast->var, new_value, match_cast->struct_info));
+        bindings.push_back(MatchCast(match_cast->var, new_value, match_cast->ty));
       } else {
         TVM_FFI_THROW(TypeError) << "Invalid type: " << binding->GetTypeKey();
       }
@@ -545,7 +724,9 @@ BindingBlock ExprMutatorBase::VisitBindingBlock(const BindingBlock& block) {
   }
 }
 
-PrimExpr ExprMutatorBase::VisitPrimExpr(const PrimExpr& expr) { return expr; }
+PrimExpr ExprMutatorBase::VisitTypePrimExprField(const PrimExpr& expr) {
+  return this->VisitExpr(expr).as_or_throw<PrimExpr>();
+}
 
 // ==================
 // ExprMutator
@@ -556,13 +737,14 @@ Expr ExprMutator::VisitExpr(const Expr& expr) {
 
 // Visit the use-site of a defined Var
 Expr ExprMutator::VisitExpr_(const VarNode* op) {
-  auto it = var_remap_.find(op->vid);
+  Var var = ffi::GetRef<Var>(op);
+  auto it = var_remap_.find(var);
   if (it != var_remap_.end()) {
     return it->second;
   }
 
   // default case return self.
-  return ffi::GetRef<Expr>(op);
+  return var;
 }
 
 // Visit the use-site of a defined DataflowVar
@@ -577,33 +759,35 @@ Expr ExprMutator::VisitExpr_(const FunctionNode* op) {
     Var new_param = this->VisitVarDef(param);
     params.push_back(new_param);
     if (!param.same_as(new_param)) {
-      var_remap_[param->vid] = new_param;
+      var_remap_[param] = new_param;
       all_params_unchanged = false;
     }
   }
+
+  Type ret_ty = all_params_unchanged ? op->ret_ty : this->VisitExprDepTypeField(op->ret_ty);
 
   Expr body = this->VisitWithNewScope(op->body, params);
 
   if (all_params_unchanged && body.same_as(op->body)) {
     // No changes to the function, return the original object
     return ffi::GetRef<Expr>(op);
-  } else if (IsBaseOf(GetStructInfo(body), op->ret_struct_info)) {
+  } else if (IsBaseOf(GetType(body), ret_ty)) {
     // If the function was mutated into a form that can no longer
     // propagate shape information all the way to the return value, we
-    // may keep the return struct info.  This is only allowed when the
+    // may keep the return type.  This is only allowed when the
     // body produces a return value that is the same as, or more
-    // specific than, the pre-mutation struct info.  For example, if
-    // the previous return value was `TensorStructInfo(shape=[16,16])`
-    // but the body only produced `TensorStructInfo(ndim=2)`, we can
+    // specific than, the pre-mutation type.  For example, if
+    // the previous return value was `TensorType(shape=[16,16])`
+    // but the body only produced `TensorType(ndim=2)`, we can
     // keep the more specific information.
-    return Function(params, body, op->ret_struct_info, op->is_pure, op->attrs);
+    return Function(params, body, ret_ty, op->is_pure, op->attrs);
   } else {
     // If the function was mutated such that the body produces an
     // output that is incompatible with the original return struct
-    // info, the original return struct info should not be used.  For
+    // info, the original return type should not be used.  For
     // example, if the previous return value was
-    // `TensorStructInfo(shape=[16,16])`, but the new return value is
-    // `TensorStructInfo(shape=[8,8])`.
+    // `TensorType(shape=[16,16])`, but the new return value is
+    // `TensorType(shape=[8,8])`.
     return Function(params, body, std::nullopt, op->is_pure, op->attrs);
   }
 }
@@ -613,8 +797,7 @@ Expr ExprMutator::VisitExpr_(const IfNode* op) {
   Expr true_b = this->VisitWithInnerScope(op->true_branch);
   Expr false_b = this->VisitWithInnerScope(op->false_branch);
   if (op->cond.same_as(guard) && op->true_branch.same_as(true_b) &&
-      op->false_branch.same_as(false_b) &&
-      VisitAndCheckStructInfoFieldUnchanged(op->struct_info_)) {
+      op->false_branch.same_as(false_b) && VisitAndCheckTypeFieldUnchanged(op->ty)) {
     return ffi::GetRef<Expr>(op);
   } else {
     return If(guard, true_b, false_b, op->span);
@@ -640,8 +823,7 @@ Expr ExprMutator::VisitExpr_(const SeqExprNode* op) {
     all_blocks_unchanged = false;
   }
 
-  if (all_blocks_unchanged && body.same_as(op->body) &&
-      VisitAndCheckStructInfoFieldUnchanged(op->struct_info_)) {
+  if (all_blocks_unchanged && body.same_as(op->body) && VisitAndCheckTypeFieldUnchanged(op->ty)) {
     return ffi::GetRef<Expr>(op);
   } else {
     return SeqExpr(blocks, body);
@@ -662,12 +844,13 @@ RELAX_EXPR_MUTATOR_VISIT_BINDING_IMPL(SeqExprNode);
 RELAX_EXPR_MUTATOR_VISIT_BINDING_IMPL(IfNode);
 RELAX_EXPR_MUTATOR_VISIT_BINDING_IMPL(OpNode);
 RELAX_EXPR_MUTATOR_VISIT_BINDING_IMPL(TupleGetItemNode);
-RELAX_EXPR_MUTATOR_VISIT_BINDING_IMPL(PrimValueNode);
+RELAX_EXPR_MUTATOR_VISIT_BINDING_IMPL(ExprNode);
 RELAX_EXPR_MUTATOR_VISIT_BINDING_IMPL(StringImmNode);
 RELAX_EXPR_MUTATOR_VISIT_BINDING_IMPL(DataTypeImmNode);
 
 void ExprMutator::ReEmitBinding(const VarBindingNode* binding, Expr new_value) {
   Var new_var = this->VisitVarDef(binding->var);
+  Var visited_var = new_var;
 
   // fast path: re-emit binding if nothing changes
   if (new_var.same_as(binding->var) && new_value.same_as(binding->value)) {
@@ -675,43 +858,46 @@ void ExprMutator::ReEmitBinding(const VarBindingNode* binding, Expr new_value) {
     return;
   }
 
-  auto new_sinfo = new_value->struct_info_.as<StructInfo>();
+  auto new_ty = new_value->ty.as<Type>();
 
-  TVM_FFI_CHECK(new_sinfo, InternalError)
+  TVM_FFI_CHECK(new_ty, InternalError)
       << "In binding of variable " << binding->var << ", the value " << new_value
-      << " does not have StructInfo.  "
+      << " does not have Type.  "
       << "This typically occurs when ReEmitBinding is called without first calling Normalize.";
 
-  Var temp = WithStructInfo(new_var, new_sinfo.value());
+  Var temp = WithType(new_var, new_ty.value());
   if (!temp.same_as(new_var)) {
     new_var = temp;
   }
 
-  this->var_remap_[binding->var->vid] = new_var;
-  this->var_remap_[new_var->vid] = new_var;
+  this->var_remap_[binding->var] = new_var;
+  this->var_remap_[visited_var] = new_var;
+  this->var_remap_[new_var] = new_var;
 
   builder_->EmitNormalized(VarBinding(new_var, new_value));
 }
 
 void ExprMutator::VisitBinding_(const MatchCastNode* binding) {
   Expr new_value = this->VisitExpr(binding->value);
-  StructInfo new_struct_info = this->VisitExprDepStructInfoField(binding->struct_info);
+  Type new_ty = this->VisitExprDepTypeField(binding->ty);
 
   Var new_var = this->VisitVarDef(binding->var);
+  Var visited_var = new_var;
 
   MatchCast new_binding = [&]() -> MatchCast {
     if (new_var.same_as(binding->var) && new_value.same_as(binding->value) &&
-        new_struct_info.same_as(binding->struct_info)) {
+        new_ty.same_as(binding->ty)) {
       // re-emit old binding if nothing changes
       return ffi::GetRef<MatchCast>(binding);
     } else {
       new_value = builder_->NormalizeArgument(new_value);
-      new_var = WithStructInfo(new_var, new_struct_info);
+      new_var = WithType(new_var, new_ty);
 
-      var_remap_[binding->var->vid] = new_var;
-      var_remap_[new_var->vid] = new_var;
+      var_remap_[binding->var] = new_var;
+      var_remap_[visited_var] = new_var;
+      var_remap_[new_var] = new_var;
 
-      return MatchCast(new_var, new_value, new_struct_info, binding->span);
+      return MatchCast(new_var, new_value, new_ty, binding->span);
     }
   }();
 
@@ -741,18 +927,20 @@ Var ExprMutator::VisitVarDef_(const DataflowVarNode* var) {
   // provide default behavior in subclasses, we may produce a Var
   // where we should produce a DataflowVar.
   if (!output->IsInstance<DataflowVarNode>()) {
-    output = DataflowVar(output->vid, GetStructInfo(output), output->span);
+    Var delegated_output = output;
+    output = DataflowVar(output->name, GetType(output), output->span);
+    var_remap_[delegated_output] = output;
   }
   return output;
 }
 
 Var ExprMutator::VisitVarDef_(const VarNode* var) {
-  if (auto* sinfo = var->struct_info_.as<StructInfoNode>()) {
-    StructInfo struct_info = this->VisitExprDepStructInfoField(ffi::GetRef<StructInfo>(sinfo));
-    if (struct_info.same_as(var->struct_info_)) {
+  if (auto* ty_node = var->ty.as<TypeNode>()) {
+    Type ty = this->VisitExprDepTypeField(ffi::GetRef<Type>(ty_node));
+    if (ty.same_as(var->ty)) {
       return ffi::GetRef<Var>(var);
     } else {
-      return Var(var->vid, struct_info, var->span);
+      return Var(var->name, ty, var->span);
     }
   } else {
     return ffi::GetRef<Var>(var);
@@ -797,10 +985,10 @@ Expr ExprMutator::VisitWithNewScope(const Expr& expr, ffi::Optional<ffi::Array<V
   TVM_FFI_ICHECK(expr->IsInstance<SeqExprNode>())
       << "Normal form requires all new scope is stored as SeqExpr";
 
-  PrimExpr constraint = Bool(true);
-  if (params.defined()) {
+  PrimExpr constraint = IntImm::Bool(true);
+  if (params.has_value()) {
     auto non_negative_expressions =
-        CollectNonNegativeExpressions(TupleStructInfo(params.value().Map(GetStructInfo)));
+        CollectNonNegativeExpressions(TupleType(params.value().Map(GetType)));
     for (const auto& expr : non_negative_expressions) {
       constraint = constraint && (expr >= 0);
     }
@@ -817,11 +1005,11 @@ Expr ExprMutator::VisitWithNewScope(const Expr& expr, ffi::Optional<ffi::Array<V
 
   builder_->EndScope();
 
-  // Normalization (and the resulting StructInfo inference) of the
+  // Normalization (and the resulting Type inference) of the
   // expr occurs outside of the body's parameters, but inside the
   // function signature's scope.  This keeps variables that are
   // inferable based on the function signature, to allow callers to
-  // propagate StructInfo across the function.
+  // propagate Type across the function.
   ret = builder_->Normalize(ret);
   builder_->EndScope();
   return ret;
@@ -838,25 +1026,27 @@ Expr ExprMutator::VisitWithInnerScope(const Expr& expr) {
 }
 
 ffi::Optional<Expr> ExprMutator::LookupBinding(const Var& var) {
+  if (auto it = var_remap_.find(var); it != var_remap_.end()) {
+    return builder_->LookupBinding(it->second);
+  }
   return builder_->LookupBinding(var);
 }
 
-Var ExprMutator::WithStructInfo(Var var, StructInfo struct_info) {
-  TVM_FFI_ICHECK(struct_info.defined());
+Var ExprMutator::WithType(Var var, Type ty) {
+  TVM_FFI_ICHECK(!ty.IsMissing());
 
-  // TODO(relax-team) add StructInfoEqual check
-  if (var->struct_info_.defined()) {
+  // TODO(relax-team) add TypeEqual check
+  if (!var->ty.IsMissing()) {
     // use same-as as a quick path
-    if (var->struct_info_.same_as(struct_info) ||
-        ffi::StructuralEqual()(var->struct_info_, struct_info)) {
+    if (var->ty.same_as(ty) || ffi::StructuralEqual()(var->ty, ty)) {
       return var;
     } else {
-      Var new_var = var.as<DataflowVarNode>() ? DataflowVar(var->vid, struct_info, var->span)
-                                              : Var(var->vid, struct_info, var->span);
+      Var new_var = var.as<DataflowVarNode>() ? DataflowVar(var->name, ty, var->span)
+                                              : Var(var->name, ty, var->span);
       return new_var;
     }
   } else {
-    UpdateStructInfo(var, struct_info);
+    UpdateType(var, ty);
     return var;
   }
 }

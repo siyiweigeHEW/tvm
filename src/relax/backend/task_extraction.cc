@@ -17,6 +17,7 @@
  * under the License.
  */
 
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/relax/expr.h>
 #include <tvm/relax/expr_functor.h>
@@ -104,14 +105,14 @@ class TaskExtractor : public ExprVisitor {
       return;
     }
 
-    const GlobalVar& global_var = Downcast<GlobalVar>(call->args[0]);
-    const tirx::PrimFunc& func = Downcast<tirx::PrimFunc>(mod_->Lookup(global_var));
+    const GlobalVar& global_var = call->args[0].as_or_throw<GlobalVar>();
+    const tirx::PrimFunc& func = mod_->Lookup(global_var).as_or_throw<tirx::PrimFunc>();
     IRModule mod = (*normalize_mod_func_)(func).cast<IRModule>();
     size_t weight = 1;
     auto it = func2task_.find(mod);
     if (it != func2task_.end()) {
       it->second->weight += 1;
-      const tirx::PrimFunc& alt_func = Downcast<tirx::PrimFunc>(it->first->Lookup("main"));
+      const tirx::PrimFunc& alt_func = it->first->Lookup("main").as_or_throw<tirx::PrimFunc>();
       // When anchor-block based equality is used, tuning tasks "nn_conv2d_add_nn_relu" and
       // "nn_conv2d_add_add_nn_relu", for example, can be identified as equal. Thus, one of them
       // will be selected to tune by the code below.

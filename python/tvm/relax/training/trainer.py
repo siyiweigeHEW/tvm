@@ -20,7 +20,7 @@
 import numpy as np  # type: ignore
 
 import tvm
-from tvm import TVMError, relax
+from tvm import relax
 from tvm.ir.module import IRModule
 from tvm.runtime._tensor import Tensor
 
@@ -51,10 +51,11 @@ class Trainer:
     Examples
     --------
     .. code-block:: python
+
         setup_trainer = SetupTrainer(
             MSELoss(reduction="sum"),
             SGD(0.001),
-            [pred_sinfo, target_sinfo],
+            [pred_ty, target_ty],
         )
         train_mod = setup_trainer(Backbone)
         ex = tvm.compile(train_mod, target)
@@ -65,7 +66,6 @@ class Trainer:
         trainer.xaiver_uniform_init_params()
         trainer.predict(input_instances)
         trainer.update([input_instances], [labels])
-        trainer.profile_adjoint([input_instances], [labels])
     """
 
     BACKBONE_FUNC: str = "backbone"
@@ -102,12 +102,12 @@ class Trainer:
 
         self._params: list[Tensor | None] = [None] * self._param_num
         self._param_name_to_pos: dict[str, int] = {
-            p.name_hint: i for i, p in enumerate(self._param_vars)
+            p.name: i for i, p in enumerate(self._param_vars)
         }
 
         self._states: list[Tensor | None] = [None] * self._state_num
         self._state_name_to_pos: dict[str, int] = {
-            s.name_hint: i for i, s in enumerate(self._state_vars)
+            s.name: i for i, s in enumerate(self._state_vars)
         }
 
         if zero_init_param_state:
@@ -116,7 +116,7 @@ class Trainer:
 
     @staticmethod
     def _get_shape_list(expr):
-        return [int(dim) for dim in expr.struct_info.shape]
+        return [int(dim) for dim in expr.ty.shape]
 
     def xaiver_uniform_init_params(self):
         """Xaiver uniformly initialize parameters using the method described in `Understanding the
@@ -127,7 +127,7 @@ class Trainer:
         """
         self._params = []
         for p in self._param_vars:
-            shape, dtype = self._get_shape_list(p), p.struct_info.dtype
+            shape, dtype = self._get_shape_list(p), p.ty.dtype
             self._params.append(
                 tvm.runtime.tensor(
                     (np.sqrt(6.0 / np.sum(shape)) * np.random.uniform(-1.0, 1.0, shape)).astype(
@@ -140,14 +140,14 @@ class Trainer:
     def zero_init_params(self):
         """Zero initialize all parameters. Requires all parameters have static shapes."""
         self._params = [
-            tvm.runtime.tensor(np.zeros(self._get_shape_list(p), p.struct_info.dtype), self.device)
+            tvm.runtime.tensor(np.zeros(self._get_shape_list(p), p.ty.dtype.dtype), self.device)
             for p in self._param_vars
         ]
 
     def zero_init_states(self):
         """Zero initialize all states. Requires all states have static shapes."""
         self._states = [
-            tvm.runtime.tensor(np.zeros(self._get_shape_list(s), s.struct_info.dtype), self.device)
+            tvm.runtime.tensor(np.zeros(self._get_shape_list(s), s.ty.dtype.dtype), self.device)
             for s in self._state_vars
         ]
 
@@ -243,14 +243,14 @@ class Trainer:
         """Check that all parameters and model states are initialized."""
         idx_not_inited_param = next((i for i, p in enumerate(self._params) if p is None), -1)
         if idx_not_inited_param != -1:
-            raise TVMError(
+            raise RuntimeError(
                 f"The {idx_not_inited_param}-th parameter is not initialized before training or "
                 "inference."
             )
 
         idx_not_inited_state = next((i for i, s in enumerate(self._states) if s is None), -1)
         if idx_not_inited_state != -1:
-            raise TVMError(
+            raise RuntimeError(
                 f"The {idx_not_inited_state}-th model state is not initialized before training or "
                 "inference."
             )
@@ -347,49 +347,3 @@ class Trainer:
         self._params = list(new_params)
 
         return ret
-
-    def profile_adjoint(
-        self,
-        input_instances: list[np.ndarray | Tensor],
-        targets: list[np.ndarray | Tensor],
-    ) -> tvm.runtime.profiling.Report:
-        """Profile the adjoint function. It requires the VM to be constructed with `profile=True`,
-        and runs `tvm.relax.VirtualMachine.profile()` internally.
-
-        Parameters
-        ----------
-        input_instances : Union[np.ndarray, Tensor, List[Union[np.ndarray, Tensor]]]
-            The values corresponding to the input_instances part of the backbone function.
-            Parameters and model states are not needed to provide.
-
-            If there are more than one input instances, you can provide a list.
-
-        targets : Union[np.ndarray, Tensor, List[Union[np.ndarray, Tensor]]]
-            The values corresponding to the targets part of the backbone function.
-
-            If there are more than one targets, you can provide a list.
-
-        Returns
-        -------
-        report : tvm.runtime.profiling.Report
-            The formatted profiling result.
-        """
-        self._check_inited()
-
-        if not isinstance(input_instances, list):
-            input_instances = [input_instances]
-
-        if not isinstance(targets, list):
-            targets = [targets]
-
-        if len(input_instances) != self._input_num:
-            raise ValueError("The length of the input does not match the backbone")
-
-        all_inputs: list[Tensor] = (
-            [tvm.runtime.tensor(i) for i in input_instances]
-            + self._params
-            + self._states
-            + [tvm.runtime.tensor(i) for i in targets]
-        )
-        all_inputs = [i.copyto(self.device) for i in all_inputs]
-        return self.vm.profile(self.ADJOINT_FUNC, *all_inputs)

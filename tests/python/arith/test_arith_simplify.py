@@ -73,12 +73,15 @@ def test_simplify_symbolic_comparison():
 
     i0 = tirx.Var("i0", "int64")
     i1 = tirx.Var("i1", "int64")
-    n, m = tvm.tirx.SizeVar("n", "int64"), tvm.tirx.SizeVar("m", "int64")
+    n, m = tvm.tirx.Var("n", "int64"), tvm.tirx.Var("m", "int64")
     outer = (n + 31) // 32
-    ana.bind(i0, tvm.ir.Range(0, outer))
-    ana.bind(i1, tvm.ir.Range(0, 32))
     PS = tvm.arith.ProofStrength
 
+    non_negative = tvm.arith.ConstIntBound(0, tvm.arith.ConstIntBound.POS_INF)
+    ana.update(n, non_negative)
+    ana.update(m, non_negative)
+    ana.bind(i0, tvm.ir.Range(0, outer))
+    ana.bind(i1, tvm.ir.Range(0, 32))
     assert not ana.can_prove(i0 * 32 + i1 < (n + 31) // 32 * 32, PS.DEFAULT)
     assert ana.can_prove(i0 * 32 + i1 < (n + 31) // 32 * 32, PS.SYMBOLIC_BOUND)
     assert ana.can_prove(i0 * 32 + i1 < (n + 31) // 32 * 32 + m, PS.SYMBOLIC_BOUND)
@@ -87,6 +90,11 @@ def test_simplify_symbolic_comparison():
     assert ana.can_prove((n + 31) // 32 * 32 >= i0 * 32 + i1, PS.SYMBOLIC_BOUND)
 
 
+# These tests exercised arith::CanProve's substitution-based proof loop for
+# vscale-bearing expressions (iterating over known vscale values for a VLA target).
+# That loop has been removed -- arith no longer attempts target-dependent proofs
+# about scalable-vector lengths. The LOG(WARNING) for non-VLA targets is also gone.
+@pytest.mark.xfail(reason="arith no longer proves vscale-bearing inequalities via substitution")
 @pytest.mark.parametrize(
     "expression",
     [
@@ -103,6 +111,9 @@ def test_simplify_vscale_comparison_with_sve_target(expression):
         assert ana.can_prove(expression)
 
 
+@pytest.mark.xfail(
+    reason="arith no longer emits a LOG(WARNING) for vscale proofs on non-VLA targets"
+)
 def test_simplify_vscale_comparison_without_sve_target(capfd):
     ana = tvm.arith.Analyzer()
     vs = tvm.tirx.vscale()
@@ -134,6 +145,21 @@ def test_regression_simplify_inf_recursion():
     ana.rewrite_simplify(res)
 
 
+def test_bind_allow_override():
+    ana = tvm.arith.Analyzer()
+    x = tirx.Var("x", "int64")
+
+    ana.bind(x, tvm.ir.Range(0, 10))
+    ana.bind(x, tvm.ir.Range(0, 5), allow_override=True)
+    assert ana.can_prove(x < 5)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"Trying to update var 'x' with a different const bound",
+    ):
+        ana.bind(x, tvm.ir.Range(0, 3))
+
+
 def test_simplify_floor_mod_with_linear_offset():
     """
     Test that the floor_mod is simplified correctly when the offset is linear.
@@ -145,6 +171,16 @@ def test_simplify_floor_mod_with_linear_offset():
     assert ana.can_prove_equal(tvm.tirx.floormod(expr1, divisor1), 0)
     divisor2 = 32 * (past_decoder_sequence_length + 1)
     assert ana.can_prove_equal(tvm.tirx.floormod(expr1, divisor2), 0)
+
+
+def test_simplify_uint_floormod_const_scale_divisible():
+    """uint32 floormod(x * c1, c2) -> 0 when c1 % c2 == 0 (overflow-free)."""
+    ana = tvm.arith.Analyzer()
+    q = tirx.Var("q_stage_idx", "uint32")
+    expr = q * tirx.Cast("uint32", 128)
+    mod = expr % tirx.const(4, "uint32")
+    assert ana.can_prove_equal(mod, tirx.const(0, "uint32"))
+    tvm.ir.assert_structural_equal(ana.rewrite_simplify(mod), tirx.const(0, "uint32"))
 
 
 def test_simplify_float_division():

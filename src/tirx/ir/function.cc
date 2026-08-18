@@ -23,7 +23,8 @@
  */
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/relax/struct_info.h>
+#include <tvm/relax/expr.h>
+#include <tvm/relax/type.h>
 #include <tvm/s_tir/analysis.h>
 #include <tvm/tirx/function.h>
 #include <tvm/tirx/op.h>
@@ -37,51 +38,50 @@ TVM_FFI_STATIC_INIT_BLOCK() {
 }
 
 namespace {
-relax::StructInfo InferStructInfo(const PrimFunc& prim_func) {
-  ffi::Array<relax::StructInfo> params;
+tvm::Type InferType(const PrimFunc& prim_func) {
+  ffi::Array<tvm::Type> params;
   for (const auto& param : prim_func->params) {
-    relax::StructInfo param_sinfo = [&]() -> relax::StructInfo {
-      if (auto opt_buf = prim_func->buffer_map.Get(param)) {
-        auto buf = opt_buf.value();
+    tvm::Type param_ty = [&]() -> tvm::Type {
+      if (param->ty.as<BufferTypeNode>()) {
+        BufferVar buf(param);
         relax::ShapeExpr shape(
-            buf->shape.Map([](PrimExpr dim) { return cast(DataType::Int(64), dim); }));
-        return relax::TensorStructInfo(shape, buf->dtype);
+            buf->shape.Map([](PrimExpr dim) { return cast(PrimType::Int(64), dim); }));
+        return relax::TensorType(shape, buf->dtype);
       }
 
-      if (auto prim_type = param->type_annotation.as<PrimTypeNode>();
-          prim_type && prim_type->dtype.is_handle()) {
-        return relax::ObjectStructInfo();
+      // A pointer parameter without a buffer annotation is an opaque runtime
+      // object from Relax's perspective (for example, a DLTensor*).  Keep the
+      // same Relax-facing wildcard semantics that opaque handle parameters had
+      // before pointers became exact IR types.
+      if (param->ty.as<PointerTypeNode>()) {
+        return relax::AnyType();
       }
 
-      return relax::PrimStructInfo(param->dtype);
+      return param->ty;
     }();
-    params.push_back(param_sinfo);
+    params.push_back(param_ty);
   }
 
-  relax::StructInfo ret = [&]() -> relax::StructInfo {
+  tvm::Type ret = [&]() -> tvm::Type {
     if (const auto* prim = prim_func->ret_type.as<PrimTypeNode>()) {
-      return relax::PrimStructInfo(prim->dtype);
+      return tvm::PrimType(prim->dtype);
     } else if (IsVoidType(prim_func->ret_type)) {
-      return relax::TupleStructInfo(ffi::Array<relax::StructInfo>{});
+      return relax::TupleType(ffi::Array<tvm::Type>{});
     } else {
-      return relax::ObjectStructInfo();
+      return relax::AnyType();
     }
   }();
 
   bool purity = prim_func->body.defined() ? s_tir::IsPureFunction(prim_func) : false;
 
-  return relax::FuncStructInfo(params, ret, purity);
+  return relax::FuncType(params, ret, purity);
 }
 }  // namespace
 
 // Get the function type of a PrimFunc
-PrimFunc::PrimFunc(ffi::Array<tirx::Var> params, Stmt body, Type ret_type,
-                   ffi::Map<tirx::Var, Buffer> buffer_map, DictAttrs attrs, Span span) {
-  if (!attrs.defined()) {
-    attrs = DictAttrs();
-  }
-
-  if (!ret_type.defined()) {
+PrimFunc::PrimFunc(ffi::Array<tirx::Var> params, Stmt body, Type ret_type, DictAttrs attrs,
+                   Span span) {
+  if (ret_type.IsMissing()) {
     ret_type = VoidType();
   }
 
@@ -89,19 +89,18 @@ PrimFunc::PrimFunc(ffi::Array<tirx::Var> params, Stmt body, Type ret_type,
   n->params = std::move(params);
   n->body = std::move(body);
   n->ret_type = std::move(ret_type);
-  n->buffer_map = std::move(buffer_map);
   n->attrs = std::move(attrs);
-  n->struct_info_ = relax::FuncStructInfo::OpaqueFunc();
+  n->ty = relax::FuncType::OpaqueFunc();
   n->span = std::move(span);
   data_ = std::move(n);
 
-  (*this)->struct_info_ = InferStructInfo(*this);
+  (*this)->ty = InferType(*this);
 }
 
 FuncType PrimFuncNode::func_type_annotation() const {
   ffi::Array<Type> param_types;
   for (auto param : this->params) {
-    param_types.push_back(GetType(param));
+    param_types.push_back(param->ty);
   }
   return FuncType(param_types, ret_type);
 }
@@ -121,17 +120,18 @@ TensorIntrin::TensorIntrin(PrimFunc desc, PrimFunc impl) {
   TVM_FFI_CHECK_EQ(desc->params.size(), impl->params.size(), ValueError)
       << "The number of parameters of the description and the implementation of the "
          "tensor intrinsic doesn't match.";
+  auto is_handle = [](const Var& param) {
+    return param->ty.as<PointerTypeNode>() != nullptr || param->ty.as<BufferTypeNode>() != nullptr;
+  };
   for (size_t i = 0; i < desc->params.size(); i++) {
-    TVM_FFI_CHECK(desc->params[i]->dtype.is_handle(), ValueError)
+    TVM_FFI_CHECK(is_handle(desc->params[i]), ValueError)
         << "Parameters of the description of the "
            "tensor intrinsic should be handle only.";
-    TVM_FFI_CHECK(impl->params[i]->dtype.is_handle(), ValueError)
+    TVM_FFI_CHECK(is_handle(impl->params[i]), ValueError)
         << "Parameters of the implementation of "
            "the tensor intrinsic should be handle only.";
   }
-  TVM_FFI_ICHECK_EQ(desc->buffer_map.size(), impl->buffer_map.size());
-
-  ObjectPtr<TensorIntrinNode> n = ffi::make_object<TensorIntrinNode>();
+  ffi::ObjectPtr<TensorIntrinNode> n = ffi::make_object<TensorIntrinNode>();
   n->desc = std::move(desc);
   n->impl = std::move(impl);
   data_ = std::move(n);
@@ -163,9 +163,9 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()
       .def("tirx.PrimFunc",
-           [](ffi::Array<tirx::Var> params, Stmt body, Type ret_type,
-              ffi::Map<tirx::Var, Buffer> buffer_map, DictAttrs attrs,
-              Span span) { return PrimFunc(params, body, ret_type, buffer_map, attrs, span); })
+           [](ffi::Array<tirx::Var> params, Stmt body, Type ret_type, DictAttrs attrs, Span span) {
+             return PrimFunc(params, body, ret_type, attrs, span);
+           })
       .def("tirx.TensorIntrin",
            [](PrimFunc desc_func, PrimFunc intrin_func) {
              return TensorIntrin(desc_func, intrin_func);

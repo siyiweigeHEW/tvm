@@ -24,9 +24,10 @@
 #ifndef TVM_RELAX_BACKEND_CONTRIB_CODEGEN_JSON_CODEGEN_JSON_H_
 #define TVM_RELAX_BACKEND_CONTRIB_CODEGEN_JSON_CODEGEN_JSON_H_
 
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/accessor.h>
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/relax/struct_info.h>
+#include <tvm/relax/type.h>
 #include <tvm/tirx/op.h>
 
 #include <cstdint>
@@ -34,8 +35,8 @@
 #include <string>
 #include <vector>
 
-#include "../../../../runtime/contrib/json/json_node.h"
-#include "../../../../runtime/contrib/json/json_runtime.h"
+#include "../../../../runtime/extra/contrib/json/json_node.h"
+#include "../../../../runtime/extra/contrib/json/json_runtime.h"
 #include "../../../transform/utils.h"
 #include "../utils.h"
 
@@ -88,9 +89,9 @@ class OpAttrExtractor {
     }
   }
 
-  void Visit(const char* key, DataType* value) {
-    if (!value->is_void()) {
-      SetNodeAttr(key, ffi::String(runtime::DLDataTypeToString(*value)));
+  void Visit(const char* key, DLDataType* value) {
+    if (!(value->code == kDLOpaqueHandle && value->bits == 0 && value->lanes == 0)) {
+      SetNodeAttr(key, ffi::String(ffi::DLDataTypeToString(*value)));
     } else {
       SetNodeAttr(key, ffi::String(""));
     }
@@ -169,14 +170,14 @@ class OpAttrExtractor {
     }
   }
 
-  void Extract(Object* node) {
+  void Extract(ffi::Object* node) {
     if (node) {
       this->VisitObjectFields(node);
     }
   }
 
  private:
-  void VisitObjectFields(Object* obj) {
+  void VisitObjectFields(ffi::Object* obj) {
     const TVMFFITypeInfo* tinfo = TVMFFIGetTypeInfo(obj->type_index());
     TVM_FFI_ICHECK(tinfo->metadata != nullptr)
         << "Object `" << obj->GetTypeKey()
@@ -200,7 +201,7 @@ class OpAttrExtractor {
           break;
         }
         case ffi::TypeIndex::kTVMFFIDataType: {
-          DataType value(field_value.cast<DLDataType>());
+          DLDataType value = field_value.cast<DLDataType>();
           this->Visit(field_info->name.data, &value);
           break;
         }
@@ -237,7 +238,7 @@ class JSONSerializer : public relax::MemoizedExprTranslator<NodeEntries> {
   void serialize(Function func) {
     // First we convert all the parameters into input nodes.
     for (const auto& param : func->params) {
-      auto node_ptr = std::make_shared<JSONGraphNode>(param->name_hint(), "input" /* op_type_ */);
+      auto node_ptr = std::make_shared<JSONGraphNode>(param->name, "input" /* op_type_ */);
       memo_[param] = AddNode(node_ptr, param);
     }
     heads_ = VisitExpr(func->body);
@@ -248,7 +249,7 @@ class JSONSerializer : public relax::MemoizedExprTranslator<NodeEntries> {
 
   /*!\brief Return the generated json. */
   std::string GetJSON() {
-    namespace json = ::tvm::ffi::json;
+    namespace json = ffi::json;
     return std::string(json::Stringify(SaveToJSON()));
   }
 
@@ -264,7 +265,7 @@ class JSONSerializer : public relax::MemoizedExprTranslator<NodeEntries> {
    *         will flatten it.
    */
   NodeEntries AddNode(JSONGraphObjectPtr node, const Expr& expr) {
-    auto struct_info = GetStructInfo(expr);
+    auto ty = GetType(expr);
     auto node_id = nodes_.size();
     nodes_.push_back(node);
     NodeEntries ret;
@@ -272,27 +273,26 @@ class JSONSerializer : public relax::MemoizedExprTranslator<NodeEntries> {
     TypeVector dtype;
 
     // Flatten tuple node.
-    if (const auto* tuple_sinfo = struct_info.as<TupleStructInfoNode>()) {
-      for (size_t i = 0; i < tuple_sinfo->fields.size(); ++i) {
-        const auto* tensor_sinfo = tuple_sinfo->fields[i].as<TensorStructInfoNode>();
-        TVM_FFI_ICHECK(tensor_sinfo)
-            << "Expect TensorStructInfo, but received: ." << tuple_sinfo->fields[i]->GetTypeKey();
-        TVM_FFI_ICHECK(tensor_sinfo->shape.defined()) << "Expect shape to be defined.";
-        ShapeExpr output_shape = Downcast<ShapeExpr>(tensor_sinfo->shape.value());
+    if (const auto* tuple_ty = ty.as<TupleTypeNode>()) {
+      for (size_t i = 0; i < tuple_ty->fields.size(); ++i) {
+        const auto* tensor_ty = tuple_ty->fields[i].as<TensorTypeNode>();
+        TVM_FFI_ICHECK(tensor_ty) << "Expect TensorType, but received: ."
+                                  << tuple_ty->fields[i]->GetTypeKey();
+        TVM_FFI_ICHECK(tensor_ty->shape.has_value()) << "Expect shape to be defined.";
+        ShapeExpr output_shape = tensor_ty->shape.value().as_or_throw<ShapeExpr>();
         ret.push_back(JSONGraphNodeEntry(node_id, i));
         shape.emplace_back(GetIntShape(output_shape->values));
-        dtype.emplace_back(DType2String(tensor_sinfo->dtype));
+        dtype.emplace_back(DType2String(tensor_ty->dtype.value()->dtype));
       }
-      node->SetNumOutput(tuple_sinfo->fields.size());
+      node->SetNumOutput(tuple_ty->fields.size());
     } else {
-      const auto* tensor_sinfo = struct_info.as<TensorStructInfoNode>();
-      TVM_FFI_ICHECK(tensor_sinfo)
-          << "Expect TensorStructInfo, but received: " << struct_info->GetTypeKey();
-      TVM_FFI_ICHECK(tensor_sinfo->shape.defined()) << "Expect shape to be defined.";
-      ShapeExpr output_shape = Downcast<ShapeExpr>(tensor_sinfo->shape.value());
+      const auto* tensor_ty = ty.as<TensorTypeNode>();
+      TVM_FFI_ICHECK(tensor_ty) << "Expect TensorType, but received: " << ty->GetTypeKey();
+      TVM_FFI_ICHECK(tensor_ty->shape.has_value()) << "Expect shape to be defined.";
+      ShapeExpr output_shape = tensor_ty->shape.value().as_or_throw<ShapeExpr>();
 
       shape.emplace_back(GetIntShape(output_shape->values));
-      dtype.emplace_back(DType2String(tensor_sinfo->dtype));
+      dtype.emplace_back(DType2String(tensor_ty->dtype.value()->dtype));
       ret.push_back(JSONGraphNodeEntry(node_id, 0));
     }
     node->SetShape(shape);
@@ -309,8 +309,8 @@ class JSONSerializer : public relax::MemoizedExprTranslator<NodeEntries> {
   void SetCallNodeAttribute(JSONGraphObjectPtr node, const CallNode* cn) {
     if (cn->op.as<OpNode>()) {
       OpAttrExtractor extractor(node);
-      const Object* call_attr = cn->attrs.get();
-      extractor.Extract(const_cast<Object*>(call_attr));
+      const ffi::Object* call_attr = cn->attrs.get();
+      extractor.Extract(const_cast<ffi::Object*>(call_attr));
     } else if (const auto* fn = cn->op.as<FunctionNode>()) {
       TVM_FFI_ICHECK(false);
       auto pattern = fn->GetAttr<ffi::String>(attr::kPartitionedFromPattern);
@@ -380,7 +380,7 @@ class JSONSerializer : public relax::MemoizedExprTranslator<NodeEntries> {
     return nodes;
   }
 
-  NodeEntries VisitExprDefault_(const Object* op) {
+  NodeEntries VisitExprDefault_(const ffi::Object* op) {
     TVM_FFI_THROW(InternalError) << "JSON runtime currently doesn't support " << op->GetTypeKey();
     return {};
   }
@@ -447,7 +447,7 @@ class JSONSerializer : public relax::MemoizedExprTranslator<NodeEntries> {
   }
 
   ffi::json::Value SaveToJSON() {
-    namespace json = ::tvm::ffi::json;
+    namespace json = ffi::json;
     std::vector<size_t> arg_nodes;
     for (size_t i = 0; i < nodes_.size(); ++i) {
       auto node = nodes_[i];

@@ -16,6 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
 
 #include "../utils.h"
@@ -42,7 +43,7 @@ class DecomposeReductionBlockReplacer : public StmtMutator {
                                            Stmt decomposed_body, SBlock old_reduction_block) {
     DecomposeReductionBlockReplacer replacer(std::move(target_loop), std::move(decomposed_body),
                                              std::move(old_reduction_block));
-    return std::make_pair(Downcast<SBlock>(replacer(std::move(old_scope_root))),
+    return std::make_pair(replacer(std::move(old_scope_root)).as_or_throw<SBlock>(),
                           replacer.new_reduction_block_);
   }
 
@@ -64,12 +65,12 @@ class DecomposeReductionBlockReplacer : public StmtMutator {
 
   Stmt VisitStmt_(const SBlockNode* block) final {
     if (block == old_reduction_block_.get()) {
-      ObjectPtr<SBlockNode> p_new_block = CopyOnWrite(block);
+      ffi::ObjectPtr<SBlockNode> p_new_block = CopyOnWrite(block);
       p_new_block->name_hint = p_new_block->name_hint + "_update";
       p_new_block->init = std::nullopt;
       // Add write regions back to read regions in update block.
       ffi::Array<BufferRegion> new_reads;
-      std::unordered_set<const BufferNode*> read_bufs;
+      std::unordered_set<const VarNode*> read_bufs;
       for (const BufferRegion& read_access : block->reads) {
         read_bufs.insert(read_access->buffer.get());
       }
@@ -149,7 +150,7 @@ class LoopHeightError : public ScheduleError {
   }
 
   IRModule mod() const final { return mod_; }
-  ffi::Array<ObjectRef> LocationsOfInterest() const final { return {loop_, block_}; }
+  ffi::Array<ffi::ObjectRef> LocationsOfInterest() const final { return {loop_, block_}; }
 
   IRModule mod_;
   For loop_;
@@ -157,8 +158,8 @@ class LoopHeightError : public ScheduleError {
 };
 
 PrimExpr RemakePredicate(PrimExpr pred, const std::unordered_set<const VarNode*>& discarded_loops) {
-  if (is_one(pred)) return Bool(true);
-  PrimExpr new_pred = Bool(true);
+  if (is_one(pred)) return IntImm::Bool(true);
+  PrimExpr new_pred = IntImm::Bool(true);
   auto f = [&](const VarNode* var) { return discarded_loops.count(var); };
   arith::PVar<PrimExpr> lhs, rhs, rest;
   for (;;) {
@@ -205,8 +206,8 @@ StmtSRef DecomposeReduction(ScheduleState self, const StmtSRef& block_sref,
     LoopHeightError::CheckLoopHigherThanReduceLoops(self->mod, block, realize, loops, loop_sref);
   }
   // IR Manipulation
-  ObjectPtr<SBlockNode> init_block = ffi::make_object<SBlockNode>();
-  ObjectPtr<SBlockRealizeNode> init_realize = ffi::make_object<SBlockRealizeNode>();
+  ffi::ObjectPtr<SBlockNode> init_block = ffi::make_object<SBlockNode>();
+  ffi::ObjectPtr<SBlockRealizeNode> init_realize = ffi::make_object<SBlockRealizeNode>();
   init_block->name_hint = block->name_hint + "_init";
   init_block->annotations = block->annotations;
   init_realize->iter_values = {};
@@ -224,7 +225,7 @@ StmtSRef DecomposeReduction(ScheduleState self, const StmtSRef& block_sref,
     }
     // Create a new block var
     IterVar new_iter_var(/*dom=*/iter_var->dom,
-                         /*var=*/iter_var->var.copy_with_suffix(""),
+                         /*var=*/iter_var->var.CopyWithSuffix(""),
                          /*iter_type=*/iter_var->iter_type,
                          /*thread_tag=*/iter_var->thread_tag);
     // Add a block var and its binding
@@ -272,12 +273,12 @@ StmtSRef DecomposeReduction(ScheduleState self, const StmtSRef& block_sref,
     For old_loop = ffi::GetRef<For>(TVM_SREF_TO_FOR(loops[i]));
     // Create a new equivalent to the chosen loop
     Var old_loop_var = old_loop->loop_var;
-    Var new_loop_var = old_loop_var.copy_with_suffix("_init");
+    PrimVar new_loop_var = old_loop->loop_var.CopyWithSuffix("_init");
     loop_var_map[old_loop_var] = new_loop_var;
     ffi::Optional<IterVar> opt_thread_binding = old_loop->thread_binding;
     if (opt_thread_binding) {
       auto thread_binding = opt_thread_binding.value();
-      auto new_var = thread_binding->var.copy_with_suffix("");
+      auto new_var = thread_binding->var.CopyWithSuffix("");
       thread_binding.CopyOnWrite()->var = new_var;
       opt_thread_binding = thread_binding;
     }
@@ -314,90 +315,113 @@ struct ReducerRegistry {
             CreateReducerGetter(
                 /*n_buffers=*/1,
                 [](const ffi::Array<Var>& x, const ffi::Array<Var>& y) {
-                  return ffi::Array<PrimExpr>{x[0] + y[0]};
+                  return ffi::Array<PrimExpr>{x[0].as_or_throw<PrimExpr>() +
+                                              y[0].as_or_throw<PrimExpr>()};
                 },
                 [](const ffi::Array<PrimExpr>& values) {
-                  return ffi::Array<PrimExpr>{make_const(values[0]->dtype, 0)};
+                  return ffi::Array<PrimExpr>{MakeConst(values[0].ty(), 0)};
                 }),
             CreateReducerGetter(
                 /*n_buffers=*/1,
                 [](const ffi::Array<Var>& x, const ffi::Array<Var>& y) {
-                  return ffi::Array<PrimExpr>{x[0] * y[0]};
+                  return ffi::Array<PrimExpr>{x[0].as_or_throw<PrimExpr>() *
+                                              y[0].as_or_throw<PrimExpr>()};
                 },
                 [](const ffi::Array<PrimExpr>& values) {
-                  return ffi::Array<PrimExpr>{make_const(values[0]->dtype, 1)};
+                  return ffi::Array<PrimExpr>{MakeConst(values[0].ty(), 1)};
                 }),
             CreateReducerGetter(
                 /*n_buffers=*/1,
                 [](const ffi::Array<Var>& x, const ffi::Array<Var>& y) {
-                  return ffi::Array<PrimExpr>{min(x[0], y[0])};
+                  return ffi::Array<PrimExpr>{
+                      min(x[0].as_or_throw<PrimExpr>(), y[0].as_or_throw<PrimExpr>())};
                 },
                 [](const ffi::Array<PrimExpr>& values) {
-                  return ffi::Array<PrimExpr>{max_value(values[0]->dtype)};
+                  return ffi::Array<PrimExpr>{max_value(values[0].ty())};
                 }),
             CreateReducerGetter(
                 /*n_buffers=*/1,
                 [](const ffi::Array<Var>& x, const ffi::Array<Var>& y) {
-                  return ffi::Array<PrimExpr>{max(x[0], y[0])};
+                  return ffi::Array<PrimExpr>{
+                      max(x[0].as_or_throw<PrimExpr>(), y[0].as_or_throw<PrimExpr>())};
                 },
                 [](const ffi::Array<PrimExpr>& values) {
-                  return ffi::Array<PrimExpr>{min_value(values[0]->dtype)};
+                  return ffi::Array<PrimExpr>{min_value(values[0].ty())};
                 }),
             CreateReducerGetter(
                 /*n_buffers=*/2,
                 [](const ffi::Array<Var>& x, const ffi::Array<Var>& y) {
-                  return ffi::Array<PrimExpr>{x[0] + y[0], x[1] + y[1]};
+                  return ffi::Array<PrimExpr>{
+                      x[0].as_or_throw<PrimExpr>() + y[0].as_or_throw<PrimExpr>(),
+                      x[1].as_or_throw<PrimExpr>() + y[1].as_or_throw<PrimExpr>()};
                 },
                 [](const ffi::Array<PrimExpr>& values) {
-                  return ffi::Array<PrimExpr>{make_const(values[0]->dtype, 0),
-                                              make_const(values[1]->dtype, 0)};
-                }),
-            CreateReducerGetter(
-                /*n_buffers=*/2,
-                [](const ffi::Array<Var>& x, const ffi::Array<Var>& y) {
-                  PrimExpr idx = Select(x[1] >= y[1], x[0], y[0]);
-                  PrimExpr val = Select(x[1] >= y[1], x[1], y[1]);
-                  return ffi::Array<PrimExpr>{idx, val};
-                },
-                [](const ffi::Array<PrimExpr>& values) {
-                  return ffi::Array<PrimExpr>{make_const(values[0]->dtype, -1),
-                                              min_value(values[1]->dtype)};
+                  return ffi::Array<PrimExpr>{MakeConst(values[0].ty(), 0),
+                                              MakeConst(values[1].ty(), 0)};
                 }),
             CreateReducerGetter(
                 /*n_buffers=*/2,
                 [](const ffi::Array<Var>& x, const ffi::Array<Var>& y) {
                   PrimExpr idx =
-                      Select(Or(greater(x[1], y[1]), And(equal(x[1], y[1]), less(x[0], y[0]))),
-                             x[0], y[0]);
-                  PrimExpr val = Select(greater(x[1], y[1]), x[1], y[1]);
+                      Select(x[1].as_or_throw<PrimExpr>() >= y[1].as_or_throw<PrimExpr>(),
+                             x[0].as_or_throw<PrimExpr>(), y[0].as_or_throw<PrimExpr>());
+                  PrimExpr val =
+                      Select(x[1].as_or_throw<PrimExpr>() >= y[1].as_or_throw<PrimExpr>(),
+                             x[1].as_or_throw<PrimExpr>(), y[1].as_or_throw<PrimExpr>());
                   return ffi::Array<PrimExpr>{idx, val};
                 },
                 [](const ffi::Array<PrimExpr>& values) {
-                  return ffi::Array<PrimExpr>{make_const(values[0]->dtype, -1),
-                                              min_value(values[1]->dtype)};
-                }),
-            CreateReducerGetter(
-                /*n_buffers=*/2,
-                [](const ffi::Array<Var>& x, const ffi::Array<Var>& y) {
-                  PrimExpr idx = Select(x[1] <= y[1], x[0], y[0]);
-                  PrimExpr val = Select(x[1] <= y[1], x[1], y[1]);
-                  return ffi::Array<PrimExpr>{idx, val};
-                },
-                [](const ffi::Array<PrimExpr>& values) {
-                  return ffi::Array<PrimExpr>{make_const(values[0]->dtype, -1),
-                                              max_value(values[1]->dtype)};
+                  return ffi::Array<PrimExpr>{MakeConst(values[0].ty(), -1),
+                                              min_value(values[1].ty())};
                 }),
             CreateReducerGetter(
                 /*n_buffers=*/2,
                 [](const ffi::Array<Var>& x, const ffi::Array<Var>& y) {
                   PrimExpr idx = Select(
-                      Or(less(x[1], y[1]), And(equal(x[1], y[1]), less(x[0], y[0]))), x[0], y[0]);
-                  PrimExpr val = Select(less(x[1], y[1]), x[1], y[1]);
+                      Or(greater(x[1].as_or_throw<PrimExpr>(), y[1].as_or_throw<PrimExpr>()),
+                         And(equal(x[1].as_or_throw<PrimExpr>(), y[1].as_or_throw<PrimExpr>()),
+                             less(x[0].as_or_throw<PrimExpr>(), y[0].as_or_throw<PrimExpr>()))),
+                      x[0].as_or_throw<PrimExpr>(), y[0].as_or_throw<PrimExpr>());
+                  PrimExpr val =
+                      Select(greater(x[1].as_or_throw<PrimExpr>(), y[1].as_or_throw<PrimExpr>()),
+                             x[1].as_or_throw<PrimExpr>(), y[1].as_or_throw<PrimExpr>());
                   return ffi::Array<PrimExpr>{idx, val};
                 },
                 [](const ffi::Array<PrimExpr>& values) {
-                  return ffi::Array<PrimExpr>{make_const(values[0]->dtype, -1),
-                                              max_value(values[1]->dtype)};
+                  return ffi::Array<PrimExpr>{MakeConst(values[0].ty(), -1),
+                                              min_value(values[1].ty())};
+                }),
+            CreateReducerGetter(
+                /*n_buffers=*/2,
+                [](const ffi::Array<Var>& x, const ffi::Array<Var>& y) {
+                  PrimExpr idx =
+                      Select(x[1].as_or_throw<PrimExpr>() <= y[1].as_or_throw<PrimExpr>(),
+                             x[0].as_or_throw<PrimExpr>(), y[0].as_or_throw<PrimExpr>());
+                  PrimExpr val =
+                      Select(x[1].as_or_throw<PrimExpr>() <= y[1].as_or_throw<PrimExpr>(),
+                             x[1].as_or_throw<PrimExpr>(), y[1].as_or_throw<PrimExpr>());
+                  return ffi::Array<PrimExpr>{idx, val};
+                },
+                [](const ffi::Array<PrimExpr>& values) {
+                  return ffi::Array<PrimExpr>{MakeConst(values[0].ty(), -1),
+                                              max_value(values[1].ty())};
+                }),
+            CreateReducerGetter(
+                /*n_buffers=*/2,
+                [](const ffi::Array<Var>& x, const ffi::Array<Var>& y) {
+                  PrimExpr idx = Select(
+                      Or(less(x[1].as_or_throw<PrimExpr>(), y[1].as_or_throw<PrimExpr>()),
+                         And(equal(x[1].as_or_throw<PrimExpr>(), y[1].as_or_throw<PrimExpr>()),
+                             less(x[0].as_or_throw<PrimExpr>(), y[0].as_or_throw<PrimExpr>()))),
+                      x[0].as_or_throw<PrimExpr>(), y[0].as_or_throw<PrimExpr>());
+                  PrimExpr val =
+                      Select(less(x[1].as_or_throw<PrimExpr>(), y[1].as_or_throw<PrimExpr>()),
+                             x[1].as_or_throw<PrimExpr>(), y[1].as_or_throw<PrimExpr>());
+                  return ffi::Array<PrimExpr>{idx, val};
+                },
+                [](const ffi::Array<PrimExpr>& values) {
+                  return ffi::Array<PrimExpr>{MakeConst(values[0].ty(), -1),
+                                              max_value(values[1].ty())};
                 })} {}
 
   static void RegisterReducer(
@@ -419,13 +443,20 @@ struct ReducerRegistry {
       if (static_cast<int>(values.size()) != n_buffers) {
         return std::nullopt;
       }
-      ffi::Array<Var> lhs;
-      ffi::Array<Var> rhs;
+      ffi::Array<PrimVar> lhs;
+      ffi::Array<PrimVar> rhs;
+      ffi::Array<Var> callback_lhs;
+      ffi::Array<Var> callback_rhs;
       for (int i = 0; i < n_buffers; ++i) {
-        lhs.push_back(Var("x" + std::to_string(i), values[i]->dtype));
-        rhs.push_back(Var("y" + std::to_string(i), values[i]->dtype));
+        PrimVar lhs_var("x" + std::to_string(i), values[i].ty());
+        PrimVar rhs_var("y" + std::to_string(i), values[i].ty());
+        lhs.push_back(lhs_var);
+        rhs.push_back(rhs_var);
+        callback_lhs.push_back(lhs_var);
+        callback_rhs.push_back(rhs_var);
       }
-      return CommReducer(lhs, rhs, combiner_getter(lhs, rhs), identity_getter(values));
+      return CommReducer(lhs, rhs, combiner_getter(callback_lhs, callback_rhs),
+                         identity_getter(values));
     };
   }
 
@@ -461,7 +492,7 @@ class NotSerialLoopKindError : public ScheduleError {
   }
 
   IRModule mod() const final { return mod_; }
-  ffi::Array<ObjectRef> LocationsOfInterest() const final { return {loop_}; }
+  ffi::Array<ffi::ObjectRef> LocationsOfInterest() const final { return {loop_}; }
 
   IRModule mod_;
   For loop_;
@@ -469,7 +500,7 @@ class NotSerialLoopKindError : public ScheduleError {
 
 class FactorAxisOutOfRangeError : public ScheduleError {
  public:
-  explicit FactorAxisOutOfRangeError(IRModule mod, Buffer buffer, int factor_axis)
+  explicit FactorAxisOutOfRangeError(IRModule mod, BufferVar buffer, int factor_axis)
       : mod_(std::move(mod)), buffer_(std::move(buffer)), factor_axis_(factor_axis) {}
 
   ffi::String FastErrorString() const final {
@@ -480,7 +511,7 @@ class FactorAxisOutOfRangeError : public ScheduleError {
   ffi::String DetailRenderTemplate() const final {
     std::ostringstream os;
     int ndim = static_cast<int>(buffer_->shape.size());
-    os << "The write buffer " << buffer_->name << " has " << ndim
+    os << "The write buffer " << buffer_.name() << " has " << ndim
        << " dimension(s), so `factor_axis` is required to be in [" << -(ndim + 1) << ", " << ndim
        << "] for rfactor. However, the input `factor_axis` is " << factor_axis_
        << ", which is out of the expected range";
@@ -488,9 +519,9 @@ class FactorAxisOutOfRangeError : public ScheduleError {
   }
 
   IRModule mod() const final { return mod_; }
-  ffi::Array<ObjectRef> LocationsOfInterest() const final { return {}; }
+  ffi::Array<ffi::ObjectRef> LocationsOfInterest() const final { return {}; }
 
-  static int CheckAndUpdate(const IRModule& mod, const Buffer& buffer, int factor_axis) {
+  static int CheckAndUpdate(const IRModule& mod, const BufferVar& buffer, int factor_axis) {
     int ndim = static_cast<int>(buffer->shape.size());
     if (factor_axis < -(ndim + 1) || factor_axis > ndim) {
       throw FactorAxisOutOfRangeError(mod, buffer, factor_axis);
@@ -503,7 +534,7 @@ class FactorAxisOutOfRangeError : public ScheduleError {
   }
 
   IRModule mod_;
-  Buffer buffer_;
+  BufferVar buffer_;
   int factor_axis_;
 };
 
@@ -558,7 +589,7 @@ class LoopPropertyError : public ScheduleError {
   }
 
   IRModule mod() const final { return mod_; }
-  ffi::Array<ObjectRef> LocationsOfInterest() const final { return {loop_}; }
+  ffi::Array<ffi::ObjectRef> LocationsOfInterest() const final { return {loop_}; }
 
   static void CheckLoopProperty(const ScheduleState& self, const ffi::Array<For>& loops,
                                 const ForNode* rf_loop, const SBlock& block,
@@ -623,20 +654,18 @@ std::unordered_map<const VarNode*, For> GetLoopVar2LoopMap(const ffi::Array<For>
  * \param rf_loop The rfactor loop
  * \return The new created intermediate rfactor buffer
  */
-ffi::Array<Buffer> CreateRFactorBuffers(const ffi::Array<BufferStore>& buf_stores, int factor_axis,
-                                        const ForNode* rf_loop) {
-  ffi::Array<Buffer> rf_buffers;
+ffi::Array<BufferVar> CreateRFactorBuffers(const ffi::Array<BufferStore>& buf_stores,
+                                           int factor_axis, const ForNode* rf_loop) {
+  ffi::Array<BufferVar> rf_buffers;
   rf_buffers.reserve(buf_stores.size());
   for (const BufferStore& buf_store : buf_stores) {
-    Buffer buffer = buf_store->buffer;
+    BufferVar buffer = buf_store->buffer;
     ffi::Array<PrimExpr> rf_shape = buffer->shape;
     rf_shape.insert(rf_shape.begin() + factor_axis, rf_loop->extent);
 
-    ObjectPtr<BufferNode> n = ffi::make_object<BufferNode>(*buffer.get());
+    ffi::ObjectPtr<BufferTypeNode> n = CopyBufferType(buffer);
     n->shape = rf_shape;
-    n->name = buffer->name + ".rf";
-    n->data = buffer->data.copy_with_suffix(".rf");
-    rf_buffers.push_back(Buffer(n));
+    rf_buffers.push_back(RebuildBufferVar(buffer, std::move(n), buffer.name() + ".rf"));
   }
   return rf_buffers;
 }
@@ -653,7 +682,7 @@ class BaseBlockCreator {
  public:
   explicit BaseBlockCreator(SBlockRealize old_block_realize, For rf_loop,
                             ffi::Array<BufferStore> old_reduction_updates, CommReducer reducer,
-                            ffi::Array<Buffer> rf_buffers, bool is_rf_block)
+                            ffi::Array<BufferVar> rf_buffers, bool is_rf_block)
       : old_block_realize_(std::move(old_block_realize)),
         rf_loop_(std::move(rf_loop)),
         old_reduction_updates_(std::move(old_reduction_updates)),
@@ -686,13 +715,13 @@ class BaseBlockCreator {
     PreProcess();
     Stmt block_body = Substitute(CreateBlockBody(has_reduce_iter), var_map_);
     ffi::Optional<Stmt> block_init = CreateBlockInit(has_reduce_iter);
-    if (block_init.defined()) {
+    if (block_init.has_value()) {
       block_init = Substitute(block_init.value(), var_map_);
     }
     CreateReadWriteRegions();
 
     ffi::String new_block_name = old_block_realize_->block->name_hint;
-    PrimExpr predicate = const_true();
+    PrimExpr predicate = IntImm::Bool(true);
     if (is_rf_block_) {
       new_block_name = new_block_name + "_rf";
       predicate = old_block_realize_->predicate;
@@ -740,9 +769,10 @@ class BaseBlockCreator {
     ffi::Array<Var> let_vars;
     let_vars.reserve(n_buffers_);
     for (int i = 0; i < n_buffers_; ++i) {
-      Var var("v_" + update_buffers_[i]->name, PrimType(stored_values[i]->dtype));
+      Var var("v_" + update_buffers_[i].name(), stored_values[i].ty());
       let_vars.push_back(var);
-      buf_stores.push_back(BufferStore(update_buffers_[i], var, update_indices_[i]));
+      buf_stores.push_back(
+          BufferStore(update_buffers_[i], var.as_or_throw<PrimExpr>(), update_indices_[i]));
     }
     ffi::Array<Stmt> stmts;
     for (int i = 0; i < n_buffers_; ++i) {
@@ -788,7 +818,7 @@ class BaseBlockCreator {
   /*! \brief The matched commutative reducer */
   CommReducer reducer_;
   /*! \brief The intermediate rfactor buffers */
-  ffi::Array<Buffer> rf_buffers_;
+  ffi::Array<BufferVar> rf_buffers_;
   /*! \brief The number of rfactor buffers. */
   const int n_buffers_;
   /*!
@@ -804,7 +834,7 @@ class BaseBlockCreator {
   /*! \brief The new block iter bindings of the new created block-realize */
   std::vector<PrimExpr> iter_values_;
   /*! \brief The buffers updated in this block */
-  ffi::Array<Buffer> update_buffers_;
+  ffi::Array<BufferVar> update_buffers_;
   /*! \brief The indices of the buffers updated in this block, respectively */
   ffi::Array<ffi::Array<PrimExpr>> update_indices_;
   /*! \brief The LHS values of the reduction in this block */
@@ -843,7 +873,7 @@ class RFactorBlockCreator : public BaseBlockCreator {
  public:
   explicit RFactorBlockCreator(SBlockRealize old_block_realize, For rf_loop,
                                ffi::Array<BufferStore> old_reduction_updates, CommReducer reducer,
-                               ffi::Array<Buffer> rf_buffers,
+                               ffi::Array<BufferVar> rf_buffers,
                                std::unordered_map<const VarNode*, For> loop_vars2loop,
                                int factor_axis, ffi::Array<PrimExpr> combiner_rhs)
       : BaseBlockCreator(std::move(old_block_realize), std::move(rf_loop),
@@ -857,7 +887,7 @@ class RFactorBlockCreator : public BaseBlockCreator {
   void CreateAdditionalIter() final {
     // Create a new data parallel block iter for the rfactor loop.
     additional_iter_ =
-        IterVarFromLoop(rf_loop_, "v" + rf_loop_->loop_var->name_hint, IterVarType::kDataPar);
+        IterVarFromLoop(rf_loop_, "v" + rf_loop_->loop_var->name, IterVarType::kDataPar);
     loop_var2block_binding_[rf_loop_->loop_var.get()] = additional_iter_->var;
     iter_vars_.push_back(additional_iter_);
     iter_values_.push_back(rf_loop_->loop_var);
@@ -891,10 +921,10 @@ class RFactorBlockCreator : public BaseBlockCreator {
         // We haven't created the new block iter for `var`. So here we create it, append it
         // and its binding to `rf_block_iter_vars` and `rf_block_iter_values` respectively.
         IterVar new_iter_var =
-            IterVarFromLoop(loop, "v" + loop->loop_var->name_hint, IterVarType::kCommReduce);
+            IterVarFromLoop(loop, "v" + loop->loop_var->name, IterVarType::kCommReduce);
         loop_var2block_binding_[var.get()] = new_iter_var->var;
         iter_vars_.push_back(new_iter_var);
-        iter_values_.push_back(var);
+        iter_values_.push_back(var.as_or_throw<PrimExpr>());
       }
     }
     // Substitute the original binding with new block iters. Store the result expression
@@ -916,7 +946,7 @@ class RFactorBlockCreator : public BaseBlockCreator {
   }
 
   void CreateReadWriteRegions() final {
-    ffi::Map<Buffer, Buffer> buffer_map;
+    ffi::Map<BufferVar, BufferVar> buffer_map;
     for (int i = 0; i < n_buffers_; ++i) {
       buffer_map.Set(old_reduction_updates_[i]->buffer, rf_buffers_[i]);
     }
@@ -929,11 +959,11 @@ class RFactorBlockCreator : public BaseBlockCreator {
     write_regions_.reserve(old_block->writes.size());
     for (const BufferRegion& write_region : old_block->writes) {
       ffi::Array<Range> region = write_region->region;
-      region.insert(region.begin() + factor_axis_,
-                    Range::FromMinExtent(additional_iter_->var,
-                                         make_const(additional_iter_->var.dtype(), 1)));
-      ffi::Optional<Buffer> rf_buffer = buffer_map.Get(write_region->buffer);
-      TVM_FFI_ICHECK(rf_buffer.defined());
+      region.insert(
+          region.begin() + factor_axis_,
+          Range::FromMinExtent(additional_iter_->var, IntImm(additional_iter_->var.ty(), 1)));
+      ffi::Optional<BufferVar> rf_buffer = buffer_map.Get(write_region->buffer);
+      TVM_FFI_ICHECK(rf_buffer.has_value());
       write_regions_.push_back(BufferRegion(rf_buffer.value(), Substitute(region, var_map_)));
     }
   }
@@ -968,7 +998,7 @@ class WriteBackBlockCreator : public BaseBlockCreator {
  public:
   explicit WriteBackBlockCreator(SBlockRealize old_block_realize, For rf_loop,
                                  ffi::Array<BufferStore> old_reduction_updates, CommReducer reducer,
-                                 ffi::Array<Buffer> rf_buffers, IterVar rf_additional_iter,
+                                 ffi::Array<BufferVar> rf_buffers, IterVar rf_additional_iter,
                                  ffi::Array<PrimExpr> combiner_lhs,
                                  ffi::Array<PrimExpr> rf_buf_access_indices)
       : BaseBlockCreator(std::move(old_block_realize), std::move(rf_loop),
@@ -985,7 +1015,7 @@ class WriteBackBlockCreator : public BaseBlockCreator {
   void CreateAdditionalIter() final {
     // Create a new reduction block iter for the rfactor loop.
     IterVar wb_new_block_iter =
-        IterVarFromLoop(rf_loop_, "v" + rf_loop_->loop_var->name_hint, kCommReduce);
+        IterVarFromLoop(rf_loop_, "v" + rf_loop_->loop_var->name, kCommReduce);
     iter_vars_.push_back(wb_new_block_iter);
     iter_values_.push_back(rf_loop_->loop_var);
     var_map_.Set(rf_additional_iter_->var, wb_new_block_iter->var);
@@ -994,7 +1024,7 @@ class WriteBackBlockCreator : public BaseBlockCreator {
   void CreateNormalIters(int idx) final {
     IterVar old_block_iter = old_block_realize_->block->iter_vars[idx];
     if (old_block_iter->iter_type == IterVarType::kDataPar) {
-      iter_vars_.emplace_back(old_block_iter->dom, old_block_iter->var.copy_with_suffix(""),
+      iter_vars_.emplace_back(old_block_iter->dom, old_block_iter->var.CopyWithSuffix(""),
                               kDataPar);
       iter_values_.push_back(old_block_realize_->iter_values[idx]);
       var_map_.Set(old_block_iter->var, iter_vars_.back());
@@ -1024,7 +1054,7 @@ class WriteBackBlockCreator : public BaseBlockCreator {
       ffi::Array<Range> region;
       region.reserve(buf_load->indices.size());
       for (const PrimExpr& index : buf_load->indices) {
-        region.push_back(Range::FromMinExtent(index, make_const(index.dtype(), 1)));
+        region.push_back(Range::FromMinExtent(index, MakeConst(index.ty(), 1)));
       }
       buf_regions.push_back(BufferRegion(buf_load->buffer, std::move(region)));
     }
@@ -1053,7 +1083,7 @@ Stmt CreateLoopOutsideRfactorBlock(SBlockRealize rf_block_realize, const ffi::Ar
   new_loops.reserve(n_loops);
   new_loop_var_map.reserve(n_loops);
   for (const For& old_loop : loops) {
-    Var new_loop_var = old_loop->loop_var.copy_with_suffix("");
+    Var new_loop_var = old_loop->loop_var.CopyWithSuffix("");
     new_loop_var_map[old_loop->loop_var.get()] = new_loop_var;
   }
 
@@ -1072,8 +1102,8 @@ Stmt CreateLoopOutsideRfactorBlock(SBlockRealize rf_block_realize, const ffi::Ar
   // Step 3. Wrap `rf_block_realize` with outer loops.
   Stmt rf_body = rf_block_realize;
   for (int i = n_loops - 1; i >= 0; --i) {
-    ObjectPtr<ForNode> p_loop = ffi::make_object<ForNode>(*loops[i].get());
-    p_loop->loop_var = Downcast<Var>(new_loop_var_map[loops[i]->loop_var.get()]);
+    ffi::ObjectPtr<ForNode> p_loop = ffi::make_object<ForNode>(*loops[i].get());
+    p_loop->loop_var = new_loop_var_map[loops[i]->loop_var.get()].as_or_throw<PrimVar>();
     p_loop->body = rf_body;
     rf_body = For(std::move(p_loop));
   }
@@ -1109,14 +1139,14 @@ class BlockReplacer : public StmtMutator {
                         SBlockRealize wb_block_realize, SBlockRealize old_block_realize,
                         For rf_loop, std::unordered_set<const VarNode*> reduce_loop_vars,
                         std::unordered_map<const VarNode*, For> loop_vars2loop,
-                        const ffi::Array<Buffer>& rf_buffers) {
+                        const ffi::Array<BufferVar>& rf_buffers) {
     BlockReplacer replacer(std::move(rf_body), std::move(outermost_loop),
                            std::move(wb_block_realize), std::move(old_block_realize),
                            std::move(rf_loop), std::move(reduce_loop_vars),
                            std::move(loop_vars2loop));
-    SBlock new_scope_root = Downcast<SBlock>(replacer(std::move(scope_root_block)));
+    SBlock new_scope_root = replacer(std::move(scope_root_block)).as_or_throw<SBlock>();
     SBlockNode* p = new_scope_root.CopyOnWrite();
-    for (const Buffer& rf_buffer : rf_buffers) {
+    for (const BufferVar& rf_buffer : rf_buffers) {
       p->alloc_buffers.push_back(rf_buffer);
     }
     return new_scope_root;
@@ -1149,7 +1179,7 @@ class BlockReplacer : public StmtMutator {
     // Step 3. If this loop is the rfactor loop and isn't touched by any reduction block iter, it
     // should be kept outside the write-back block. Otherwise it shouldn't.
     if (loop == rf_loop_.get() || !reduce_loop_vars_.count(loop->loop_var.get())) {
-      ObjectPtr<ForNode> p_loop = CopyOnWrite(loop);
+      ffi::ObjectPtr<ForNode> p_loop = CopyOnWrite(loop);
       p_loop->body = body;
       body = Stmt(p_loop);
     }
@@ -1253,7 +1283,7 @@ StmtSRef RFactor(ScheduleState self, const StmtSRef& rf_loop_sref, int factor_ax
 
   // Step 1. Create the intermediate buffer (a.k.a. rfactor buffer), which has an additional
   // dimension that specified by `factor_axis` and `rf_loop`.
-  ffi::Array<Buffer> rf_buffers = CreateRFactorBuffers(updates, factor_axis, rf_loop);
+  ffi::Array<BufferVar> rf_buffers = CreateRFactorBuffers(updates, factor_axis, rf_loop);
 
   // Step 2. Create the rfactor block.
   RFactorBlockCreator rf_block_creator(block_realize, ffi::GetRef<For>(rf_loop), updates, reducer,
@@ -1333,12 +1363,12 @@ struct RFactorTraits : public UnpackedInstTraits<RFactorTraits> {
   static constexpr size_t kNumAttrs = 1;
   static constexpr size_t kNumDecisions = 0;
 
-  static SBlockRV UnpackedApplyToSchedule(Schedule sch, LoopRV loop_rv, Integer factor_axis) {
+  static SBlockRV UnpackedApplyToSchedule(Schedule sch, LoopRV loop_rv, IntImm factor_axis) {
     return sch->RFactor(loop_rv, factor_axis->value);
   }
 
   static ffi::String UnpackedAsPython(ffi::Array<ffi::String> outputs, ffi::String loop_rv,
-                                      Integer factor_axis) {
+                                      IntImm factor_axis) {
     PythonAPICall py("rfactor");
     py.Input("loop", loop_rv);
     py.Input("factor_axis", factor_axis->value);

@@ -50,7 +50,7 @@ def test_unique_name_reduction_block():
 def _check_workload(te_workload, tir_workload, index_dtype_override=None, do_simplify=False):
     func = te.create_prim_func(te_workload(), index_dtype_override)
     if do_simplify:
-        simplify = tirx.transform.Simplify()
+        simplify = tirx.transform.StmtSimplify()
         func = simplify(tvm.IRModule.from_expr(func))["main"]
         tir_workload = simplify(tvm.IRModule.from_expr(tir_workload))["main"]
     tvm.ir.assert_structural_equal(func, tir_workload)
@@ -67,7 +67,7 @@ def te_matmul():
     return [A, B, C]
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def tir_matmul(a: T.handle, b: T.handle, c: T.handle) -> None:
     T.func_attr({"global_symbol": "main", "tirx.noalias": True})
     A = T.match_buffer(a, (128, 128))
@@ -82,7 +82,7 @@ def tir_matmul(a: T.handle, b: T.handle, c: T.handle) -> None:
             C[i, j] += A[i, k] * B[j, k]
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def tir_matmul_int64(
     A: T.Buffer((T.int64(128), T.int64(128)), "float32"),
     B: T.Buffer((T.int64(128), T.int64(128)), "float32"),
@@ -112,7 +112,7 @@ def te_element_wise():
     return [A, C]
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def tir_element_wise(a: T.handle, c: T.handle) -> None:
     T.func_attr({"global_symbol": "main", "tirx.noalias": True})
     A = T.match_buffer(a, (128, 128))
@@ -164,7 +164,7 @@ def te_conv2d():
     return [A, W, B]
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def tir_conv2d(a: T.handle, w: T.handle, b: T.handle) -> None:
     T.func_attr({"global_symbol": "main", "tirx.noalias": True})
     A = T.match_buffer(a, [16, 16, 14, 14])
@@ -202,7 +202,7 @@ def te_multi_output():
     return [A0, A1, B0, B1]
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def tir_multi_output(a0: T.handle, a1: T.handle, b0: T.handle, b1: T.handle) -> None:
     T.func_attr({"global_symbol": "main", "tirx.noalias": True})
     m = T.int32()
@@ -239,7 +239,7 @@ def te_extern():
     return [A, B, C]
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def tir_extern(a: T.handle, b: T.handle, c: T.handle) -> None:
     T.func_attr({"global_symbol": "main", "tirx.noalias": True})
     off1 = te.var("elem_offset")
@@ -293,6 +293,43 @@ def test_extern():
     _check_workload(te_extern, tir_extern)
 
 
+def te_extern_epilogue():
+    A = te.placeholder((4, 3), name="A")
+    B = te.placeholder((3, 2), name="B")
+    C = te.extern(
+        (4, 2),
+        [A, B],
+        lambda ins, outs: tvm.tirx.call_packed("testing.echo", ins[0], ins[1], outs[0]),
+        name="C",
+    )
+    D = te.compute(C.shape, lambda i, j: C[i, j] + 1.0, name="D")
+    return [A, B, D]
+
+
+@T.prim_func(s_tir=True)
+def tir_extern_epilogue(var_A: T.handle, var_B: T.handle, D: T.Buffer((4, 2), "float32")):
+    T.func_attr({"global_symbol": "main", "tirx.noalias": True})
+    A = T.match_buffer(var_A, (4, 3), offset_factor=1)
+    B = T.match_buffer(var_B, (3, 2), offset_factor=1)
+    C = T.sblock_alloc_buffer((4, 2), elem_offset=0, offset_factor=1)
+    with T.sblock("C"):
+        T.reads()
+        T.writes()
+        T.call_packed("testing.echo", A, B, C)
+    for i, j in T.grid(4, 2):
+        with T.sblock("D"):
+            vi, vj = T.axis.remap("SS", [i, j])
+            T.reads(C[vi, vj])
+            T.writes(D[vi, vj])
+            D[vi, vj] = C[vi, vj] + T.float32(1)
+
+
+def test_extern_epilogue():
+    _check_workload(te_extern_epilogue, tir_extern_epilogue)
+    func = te.create_prim_func(te_extern_epilogue()).with_attr("global_symbol", "extern_epilogue")
+    tvm.compile(func, target="llvm")
+
+
 def te_reordered_matmul():
     k = te.reduce_axis((0, 128), "k")
     A = te.placeholder((128, 128), name="A")
@@ -301,7 +338,7 @@ def te_reordered_matmul():
     return [C, A, B]
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def tir_reordered_matmul(c: T.handle, a: T.handle, b: T.handle) -> None:
     T.func_attr({"global_symbol": "main", "tirx.noalias": True})
     A = T.match_buffer(a, (128, 128))
@@ -335,7 +372,7 @@ def test_error_reporting():
     try:
         te.create_prim_func(te_scan())
         assert False
-    except TypeError as e:
+    except (TypeError, tvm.error.InternalError) as e:
         error_message = str(e)
         assert error_message.find("Unsupported Operation: te.ScanOp.") != -1
         return
@@ -353,8 +390,8 @@ def test_constant():
 
     func = te.create_prim_func([C, A])
     func = tvm.compile(func)
-    a_np = np.random.uniform(size=(M,)).astype(A.dtype)
-    c = tvm.runtime.tensor(np.zeros(M, dtype=C.dtype))
+    a_np = np.random.uniform(size=(M,)).astype(A.dtype.dtype)
+    c = tvm.runtime.tensor(np.zeros(M, dtype=C.dtype.dtype))
     x = func(c, tvm.runtime.tensor(a_np))
     tvm.testing.assert_allclose(a_np + 2, c.numpy())
 
@@ -393,9 +430,9 @@ def test_data_dependent_access():
     func = te.create_prim_func([C, A, B])
     func = tvm.compile(func)
 
-    a_np = np.random.uniform(size=(10,)).astype(A.dtype)
-    b_np = np.arange(10, dtype=B.dtype)
-    c = tvm.runtime.tensor(np.zeros(10, dtype=C.dtype))
+    a_np = np.random.uniform(size=(10,)).astype(A.dtype.dtype)
+    b_np = np.arange(10, dtype=B.dtype.dtype)
+    c = tvm.runtime.tensor(np.zeros(10, dtype=C.dtype.dtype))
     func(c, tvm.runtime.tensor(a_np), tvm.runtime.tensor(b_np))
     tvm.testing.assert_allclose(a_np[b_np], c.numpy())
 
@@ -426,7 +463,7 @@ def test_tensor_attr():
     tvm.ir.assert_structural_equal(func, rt_func)
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def expected_layout_attr(
     A: T.Buffer((128, 128), "float32"),
     B: T.Buffer((128, 128), "float32"),
@@ -447,7 +484,7 @@ def expected_layout_attr(
             D[x, y] = C[x, y] + T.float32(1)
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def expected_layout_attr_int64(
     A: T.Buffer((T.int64(128), T.int64(128)), "float32"),
     B: T.Buffer((T.int64(128), T.int64(128)), "float32"),
@@ -518,7 +555,7 @@ def te_argmax_idx_val():
     return [idx, val, max_idx, max_val]
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def tir_argmax_idx_val(
     var_idx: T.handle, var_val: T.handle, var_argmax_v0: T.handle, var_argmax_v1: T.handle
 ) -> None:
@@ -537,8 +574,12 @@ def tir_argmax_idx_val(
             with T.init():
                 argmax_v0[i] = T.int32(-1)
                 argmax_v1[i] = T.min_value("float32")
-            v_argmax_v0: T.int32 = T.Select(argmax_v1[i] >= val[i, k], argmax_v0[i], idx[i, k])
-            v_argmax_v1: T.float32 = T.Select(argmax_v1[i] >= val[i, k], argmax_v1[i], val[i, k])
+            v_argmax_v0: T.let[T.int32] = T.Select(
+                argmax_v1[i] >= val[i, k], argmax_v0[i], idx[i, k]
+            )
+            v_argmax_v1: T.let[T.float32] = T.Select(
+                argmax_v1[i] >= val[i, k], argmax_v1[i], val[i, k]
+            )
             argmax_v0[i] = v_argmax_v0
             argmax_v1[i] = v_argmax_v1
 
@@ -565,7 +606,7 @@ def te_argmax_val_idx():
     return [val, idx, max_val, max_idx]
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def tir_argmax_val_idx(
     var_val: T.handle, var_idx: T.handle, var_argmax_v0: T.handle, var_argmax_v1: T.handle
 ) -> None:
@@ -584,8 +625,12 @@ def tir_argmax_val_idx(
             with T.init():
                 argmax_v0[i] = T.min_value("float32")
                 argmax_v1[i] = T.int32(-1)
-            v_argmax_v0: T.float32 = T.Select(argmax_v0[i] >= val[i, k], argmax_v0[i], val[i, k])
-            v_argmax_v1: T.int32 = T.Select(argmax_v0[i] >= val[i, k], argmax_v1[i], idx[i, k])
+            v_argmax_v0: T.let[T.float32] = T.Select(
+                argmax_v0[i] >= val[i, k], argmax_v0[i], val[i, k]
+            )
+            v_argmax_v1: T.let[T.int32] = T.Select(
+                argmax_v0[i] >= val[i, k], argmax_v1[i], idx[i, k]
+            )
             argmax_v0[i] = v_argmax_v0
             argmax_v1[i] = v_argmax_v1
 
@@ -604,9 +649,9 @@ def test_int64_indices():
     B = te.compute(A.shape, lambda *i: A(*i) + 1, name="B")
     prim_func = te.create_prim_func([A, B])
     loop = prim_func.body.block.body
-    assert loop.loop_var.dtype == "int64"
-    assert loop.min.dtype == "int64"
-    assert loop.extent.dtype == "int64"
+    assert loop.loop_var.ty.dtype == "int64"
+    assert loop.min.ty.dtype == "int64"
+    assert loop.extent.ty.dtype == "int64"
 
 
 def test_zero_dim_add():
@@ -616,7 +661,7 @@ def test_zero_dim_add():
         c = te.compute(a.shape, lambda *i: a(*i) + b(*i), name="c")
         return [a, b, c]
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def expected(
         a: T.Buffer((), "int32"),
         b: T.Buffer((), "int32"),
@@ -642,7 +687,7 @@ def te_reshape():
     return [A, B]
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def tir_reshape(
     A: T.Buffer((T.int64(2), T.int64(4)), "float32"),
     T_reshape: T.Buffer((T.int64(4), T.int64(2)), "float32"),
@@ -684,7 +729,7 @@ def te_resize2d_symbolic():
     return [A, B]
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def tir_resize2d_symbolic(
     A: T.Buffer((T.int64(2), T.int64(3), T.int64(128), T.int64(128)), "float32"),
     var_resize: T.handle,
@@ -749,7 +794,7 @@ def test_extern_with_explicit_buffer_access():
         )
         return [A, B, P, C]
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def tir_extern(var_A: T.handle, var_B: T.handle, var_P: T.handle, var_C: T.handle):
         T.func_attr({"global_symbol": "main", "tirx.noalias": True})
         A = T.match_buffer(var_A, [128, 128], dtype="float32", offset_factor=1)
@@ -773,7 +818,7 @@ def te_slice_with_var_input():
     return [tensor, idx, slice0]
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def tir_slice_with_var_input(var_tensor: T.handle, idx: T.int64, var_slice: T.handle):
     T.func_attr({"tirx.noalias": True, "global_symbol": "main"})
     m, n = T.int64(), T.int64()
@@ -796,7 +841,7 @@ def test_with_var_input():
 def test_loop_aware_initial_value():
     """Test initial value aware of spatial iter position"""
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def tir_workload(var_a: T.handle, var_b: T.handle, var_sum_red: T.handle):
         T.func_attr({"tirx.noalias": True, "global_symbol": "main"})
         a = T.match_buffer(var_a, (5, 5))
@@ -831,7 +876,7 @@ def test_loop_aware_initial_value():
 def test_loop_aware_reducer_combiner():
     """Test combiner aware of spatial iter position"""
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def tir_workload(var_a: T.handle, var_b: T.handle, var_sum_red: T.handle):
         T.func_attr({"tirx.noalias": True, "global_symbol": "main"})
         a = T.match_buffer(var_a, (5, 5))
@@ -867,7 +912,7 @@ def test_loop_aware_reducer_combiner():
 
 
 def test_adaptive_pooling_window():
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def tir_workload(
         x: T.Buffer((1, 1024, 16, 40), "float32"),
         adaptive_pool_avg: T.Buffer((1, 1024, 12, 30), "float32"),
@@ -876,11 +921,11 @@ def test_adaptive_pooling_window():
         # fmt: off
         adaptive_pool_sum = T.sblock_alloc_buffer((1, 1024, 12, 30))
         for ax0, ax1, ax2, ax3 in T.grid(1, 1024, 12, 30):
-            with T.sblock("adaptive_pool_sum_1"):
+            with T.sblock("adaptive_pool_sum_l1"):
                 v_ax0, v_ax1, v_ax2, v_ax3 = T.axis.remap("SSSS", [ax0, ax1, ax2, ax3])
                 T.reads(x[v_ax0, v_ax1, v_ax2 * 16 // 12:v_ax2 * 16 // 12 + ((v_ax2 % 3 * 4 + 16) // 12 + 1), v_ax3 * 40 // 30:v_ax3 * 40 // 30 + ((v_ax3 % 3 * 10 + 40) // 30 + 1)])
                 T.writes(adaptive_pool_sum[v_ax0, v_ax1, v_ax2, v_ax3])
-                for rv0, rv1 in T.grid((v_ax2 % 3 * 4 + 16) // 12 + 1, (v_ax3 % 3 * 10 + 40) // 30 + 1):
+                for rv0, rv1 in T.grid(T.Select((v_ax2 * 16 + 4) % 12 == 0, (v_ax2 * 16 + 16) // 12, (v_ax2 * 16 + 16) // 12 + 1) - v_ax2 * 16 // 12, T.Select((v_ax3 * 40 + 10) % 30 == 0, (v_ax3 * 40 + 40) // 30, (v_ax3 * 40 + 40) // 30 + 1) - v_ax3 * 40 // 30):
                     with T.sblock("adaptive_pool_sum"):
                         v_ax0_1 = T.axis.spatial((v_ax0, v_ax0 + 1), v_ax0)
                         v_ax1_1 = T.axis.spatial((v_ax1, v_ax1 + 1), v_ax1)
@@ -898,7 +943,7 @@ def test_adaptive_pooling_window():
                 T.reads(adaptive_pool_sum[v_ax0, v_ax1, v_ax2, v_ax3])
                 T.writes(adaptive_pool_avg[v_ax0, v_ax1, v_ax2, v_ax3])
                 T.sblock_attr({"schedule_rule": "meta_schedule.adaptive_pool_avg"})
-                adaptive_pool_avg[v_ax0, v_ax1, v_ax2, v_ax3] = adaptive_pool_sum[v_ax0, v_ax1, v_ax2, v_ax3] / (T.Cast("float32", (v_ax2 % 3 * 4 + 16) // 12 + 1) * T.Cast("float32", (v_ax3 % 3 * 10 + 40) // 30 + 1))
+                adaptive_pool_avg[v_ax0, v_ax1, v_ax2, v_ax3] = adaptive_pool_sum[v_ax0, v_ax1, v_ax2, v_ax3] / (T.Cast("float32", T.Select((v_ax2 * 16 + 4) % 12 == 0, (v_ax2 * 16 + 16) // 12, (v_ax2 * 16 + 16) // 12 + 1) - v_ax2 * 16 // 12) * T.Cast("float32", T.Select((v_ax3 * 40 + 10) % 30 == 0, (v_ax3 * 40 + 40) // 30, (v_ax3 * 40 + 40) // 30 + 1) - v_ax3 * 40 // 30))
         # fmt: on
 
     def te_workload():
@@ -919,7 +964,7 @@ def test_global_pool():
 
 
 def test_nested_reduce_domain_dependency():
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def tir_workload(
         x: T.Buffer((8, 8, 8, 8, 8), "float32"), compute: T.Buffer((8, 8, 8), "float32")
     ):

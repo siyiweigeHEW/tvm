@@ -21,14 +21,17 @@
  * \file src/runtime/vm/vm.cc
  */
 #include <dlpack/dlpack.h>
+#include <tvm/ffi/cast.h>
+#include <tvm/ffi/container/tensor.h>
 #include <tvm/ffi/function.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/runtime/memory/memory_manager.h>
-#include <tvm/runtime/nvtx.h>
-#include <tvm/runtime/profiling.h>
 #include <tvm/runtime/vm/vm.h>
+#include <tvm/support/cuda/nvtx.h>
 
-#include <optional>
 #include <thread>
+
+#include "./module_utils.h"
 
 namespace tvm {
 namespace runtime {
@@ -117,7 +120,7 @@ ffi::Any ConvertArgToDevice(ffi::AnyView input, Device dev, Allocator* alloc) {
   // The developer can still explicitly allocate Tensor
   // in TVM Native API or Tensor::FromDLPack to regain zero copy behavior.
   ffi::Any ret;
-  if (auto opt_obj = input.as<ObjectRef>()) {
+  if (auto opt_obj = input.as<ffi::ObjectRef>()) {
     ret = ConvertObjectToDevice(opt_obj.value(), dev, alloc);
   } else if (auto opt_dltensor = input.as<DLTensor*>()) {
     DLTensor* tensor = opt_dltensor.value();
@@ -134,7 +137,7 @@ ffi::Any ConvertArgToDevice(ffi::AnyView input, Device dev, Allocator* alloc) {
 ffi::Any ConvertRegToDevice(ffi::Any input, Device dev, Allocator* alloc,
                             ffi::String scope = "global") {
   ffi::Any ret;
-  if (auto opt_obj = input.as<ObjectRef>()) {
+  if (auto opt_obj = input.as<ffi::ObjectRef>()) {
     ret = ConvertObjectToDevice(opt_obj.value(), dev, alloc, scope);
   } else {
     ret = input;
@@ -189,13 +192,13 @@ class VirtualMachineImpl : public VirtualMachine {
   //---------------------------------------------------
   // Public facing functions overloading
   //---------------------------------------------------
-  void LoadExecutable(ObjectPtr<VMExecutable> exec) final;
+  void LoadExecutable(ffi::ObjectPtr<VMExecutable> exec) final;
   void Init(const std::vector<Device>& devices,
             const std::vector<AllocatorType>& alloc_types) final;
   VMClosure GetClosure(const ffi::String& func_name) final {
     return this->GetClosureInternal(func_name, false).value();
   }
-  void InvokeClosurePacked(const ObjectRef& closure_or_packedfunc, ffi::PackedArgs args,
+  void InvokeClosurePacked(const ffi::ObjectRef& closure_or_packedfunc, ffi::PackedArgs args,
                            ffi::Any* rv) final;
   void SetInstrument(ffi::Function instrument) final { this->instrument_ = instrument; }
 
@@ -287,7 +290,7 @@ class VirtualMachineImpl : public VirtualMachine {
    * \param args The arguments to the function.
    * \return The result value.
    */
-  RegType InvokeClosureInternal(const ObjectRef& closure_or_packed,
+  RegType InvokeClosureInternal(const ffi::ObjectRef& closure_or_packed,
                                 const std::vector<RegType>& args);
   /*!
    * \brief Invoke a VM function by interpreting bytecode.
@@ -359,7 +362,7 @@ class VirtualMachineImpl : public VirtualMachine {
    * \param reg The register to write to.
    * \param obj The object to write to.
    */
-  TVM_ALWAYS_INLINE void WriteRegister(VMFrame* frame, RegName reg, const RegType& obj) {
+  TVM_FFI_INLINE void WriteRegister(VMFrame* frame, RegName reg, const RegType& obj) {
     TVM_FFI_ICHECK_LT(reg, frame->register_file.size());
     frame->register_file[reg] = obj;
   }
@@ -369,7 +372,7 @@ class VirtualMachineImpl : public VirtualMachine {
    * \param reg The register to read from.
    * \return The value of the register.
    */
-  TVM_ALWAYS_INLINE RegType ReadRegister(VMFrame* frame, RegName reg) {
+  TVM_FFI_INLINE RegType ReadRegister(VMFrame* frame, RegName reg) {
     if (reg < Instruction::kBeginSpecialReg) {
       return frame->register_file[reg];
     }
@@ -417,7 +420,7 @@ class VirtualMachineImpl : public VirtualMachine {
   // Internal states for execution.
   //--------------------------------------------------------
   /*! \brief The loaded executable. */
-  ObjectPtr<VMExecutable> exec_;
+  ffi::ObjectPtr<VMExecutable> exec_;
   /*! \brief The global constant pool */
   std::vector<ffi::Any> const_pool_;
   /*!
@@ -454,7 +457,7 @@ class VirtualMachineImpl : public VirtualMachine {
   ffi::Function instrument_ = nullptr;
 };
 
-void VirtualMachineImpl::LoadExecutable(ObjectPtr<VMExecutable> exec) {
+void VirtualMachineImpl::LoadExecutable(ffi::ObjectPtr<VMExecutable> exec) {
   this->exec_ = exec;
   this->imports_ = exec->imports();
 }
@@ -527,7 +530,7 @@ void VirtualMachineImpl::SetInput(std::string func_name, bool with_param_module,
 //------------------------------------------
 // Closure handling
 //------------------------------------------
-void VirtualMachineImpl::InvokeClosurePacked(const ObjectRef& closure_or_packedfunc,
+void VirtualMachineImpl::InvokeClosurePacked(const ffi::ObjectRef& closure_or_packedfunc,
                                              ffi::PackedArgs args, ffi::Any* rv) {
   // run packed call if it is a packed func.
   if (auto* packed = closure_or_packedfunc.as<ffi::Function::ContainerType>()) {
@@ -545,13 +548,13 @@ void VirtualMachineImpl::InvokeClosurePacked(const ObjectRef& closure_or_packedf
   packed_args[0] = static_cast<void*>(static_cast<VirtualMachine*>(this));
   std::copy(args.data(), args.data() + args.size(), packed_args.begin() + 1);
   {
-    NVTXScopedRange scope("RelaxVM: " + clo->func_name);
+    support::NVTXScopedRange scope("RelaxVM: " + clo->func_name);
     clo->impl.CallPacked(ffi::PackedArgs(packed_args.data(), packed_args.size()), rv);
   }
 }
 
 // internal variant version of invoke closurepacked
-RegType VirtualMachineImpl::InvokeClosureInternal(const ObjectRef& closure_or_packed,
+RegType VirtualMachineImpl::InvokeClosureInternal(const ffi::ObjectRef& closure_or_packed,
                                                   const std::vector<RegType>& args) {
   RegType ret;
   auto* packed = closure_or_packed.as<ffi::Function::ContainerType>();
@@ -764,7 +767,7 @@ void VirtualMachineImpl::RunInstrCall(VMFrame* curr_frame, Instruction instr) {
   TVM_FFI_ICHECK_LT(static_cast<size_t>(instr.func_idx), this->func_pool_.size());
 
   if (instrument_ == nullptr) {
-    this->InvokeClosurePacked(func_pool_[instr.func_idx].cast<ObjectRef>(), args, &ret);
+    this->InvokeClosurePacked(func_pool_[instr.func_idx].cast<ffi::ObjectRef>(), args, &ret);
   } else {
     // insert light-weight instrument callback
     call_args[0] = func_pool_[instr.func_idx];
@@ -778,7 +781,7 @@ void VirtualMachineImpl::RunInstrCall(VMFrame* curr_frame, Instruction instr) {
     for (int i = 0; i < instr.num_args; ++i) {
       if (call_args[i + args_begin_offset].type_index() == ffi::TypeIndex::kTVMFFIDataType) {
         std::string str_dtype =
-            DLDataTypeToString(call_args[i + args_begin_offset].cast<DLDataType>());
+            ffi::DLDataTypeToString(call_args[i + args_begin_offset].cast<DLDataType>());
         temp_dtype.emplace_back(std::make_unique<std::string>(str_dtype));
         call_args[i + args_begin_offset] = *temp_dtype.back();
       }
@@ -789,7 +792,7 @@ void VirtualMachineImpl::RunInstrCall(VMFrame* curr_frame, Instruction instr) {
       ret_kind = opt_int.value();
     }
     if (ret_kind != static_cast<int>(VMInstrumentReturnKind::kSkipRun)) {
-      this->InvokeClosurePacked(func_pool_[instr.func_idx].cast<ObjectRef>(), args, &ret);
+      this->InvokeClosurePacked(func_pool_[instr.func_idx].cast<ffi::ObjectRef>(), args, &ret);
       call_args[2] = false;
       call_args[3] = ret;
       instrument_.CallPacked(call_args.data(), call_args.size(), &rv);
@@ -851,7 +854,7 @@ void VirtualMachineImpl::RunLoop() {
   }
 }
 
-ObjectPtr<VirtualMachine> VirtualMachine::Create() {
+ffi::ObjectPtr<VirtualMachine> VirtualMachine::Create() {
   return ffi::make_object<VirtualMachineImpl>();
 }
 
@@ -880,7 +883,7 @@ void VirtualMachineImpl::_SaveClosure(ffi::PackedArgs args, ffi::Any* rv) {
 }
 
 void VirtualMachineImpl::_InvokeClosure(ffi::PackedArgs args, ffi::Any* rv) {
-  this->InvokeClosurePacked(args[0].cast<ObjectRef>(), args.Slice(1), rv);
+  this->InvokeClosurePacked(args[0].cast<ffi::ObjectRef>(), args.Slice(1), rv);
 }
 
 void VirtualMachineImpl::_InvokeClosureStateful(std::string func_name) {
@@ -893,8 +896,8 @@ void VirtualMachineImpl::_InvokeClosureStateful(std::string func_name) {
                               << "; use `set_input` first.";
     return;
   }
-  outputs_[func_name] = this->InvokeClosureInternal(func_pool_[m.at(func_name)].cast<ObjectRef>(),
-                                                    inputs_[func_name]);
+  outputs_[func_name] = this->InvokeClosureInternal(
+      func_pool_[m.at(func_name)].cast<ffi::ObjectRef>(), inputs_[func_name]);
 }
 
 void VirtualMachineImpl::_SetInstrument(ffi::PackedArgs args, ffi::Any* rv) {
@@ -969,127 +972,6 @@ ffi::Function VirtualMachineImpl::_LookupFunction(const ffi::String& name) {
   return ffi::Function(nullptr);
 }
 
-//----------------------------------------------------------------
-// Profiler can be optionally disabled via a macro to reduce dep.
-//----------------------------------------------------------------
-#if TVM_VM_ENABLE_PROFILER
-
-/*!
- * \brief An extension of VirtualMachineImpl to support per-op profiling
- * It overrides RunInstrCall to add instrumentations around it.
- */
-class VirtualMachineProfiler : public VirtualMachineImpl {
- public:
-  ffi::Optional<ffi::Function> GetFunction(const ffi::String& name) override {
-    ObjectPtr<Object> sptr_to_self = ffi::GetObjectPtr<Object>(this);
-    if (name == "profile") {
-      return ffi::Function([sptr_to_self, this](ffi::PackedArgs args, ffi::Any* rv) {
-        std::string f_name = args[0].cast<std::string>();
-        VMClosure clo = this->GetClosure(f_name);
-
-        std::vector<Device> devices;
-        for (auto dev : this->devices) {
-          if (dev.device_type > 0) {
-            devices.push_back(dev);
-          }
-        }
-
-        prof_ = profiling::Profiler(devices, {}, {{ffi::String("Executor"), ffi::String("VM")}});
-
-        auto inputs = GetInputsFor(f_name);
-
-        bool clear_inputs = false;
-        if (inputs.size() == 0) {
-          TVM_FFI_ICHECK(args.size() > 1) << "No input is provided";
-          SetInput(f_name, false, args.Slice(1));
-          inputs = GetInputsFor(f_name);
-          clear_inputs = true;
-        } else {
-          TVM_FFI_ICHECK_EQ(args.size(), 1) << "Inputs are already provided by set_input.";
-        }
-
-        // warmup
-        this->InvokeClosureInternal(clo, inputs);
-
-        prof_->Start();
-        this->InvokeClosureInternal(clo, inputs);
-        prof_->Stop();
-
-        // Return the report as json, since profiling::Report object is not supported by RPC
-        std::string report_json = prof_->Report()->AsJSON();
-        *rv = report_json;
-
-        prof_ = std::nullopt;  // releases hardware counters
-        if (clear_inputs) {
-          // SetInput modifies the internal states of VM. Undo the change after profiling.
-          ClearInputsFor(f_name);
-        }
-      });
-    } else {
-      return VirtualMachineImpl::GetFunction(name);
-    }
-  }
-
- protected:
-  void RunInstrCall(VMFrame* curr_frame, Instruction inst) override {
-    bool profiling = false;
-    if (prof_ && prof_->IsRunning()) {
-      auto f_name = GetFuncName(inst.func_idx);
-      std::optional<Device> dev;
-      std::vector<Tensor> arrs;
-
-      auto f_check_tensor_arg = [&dev, &arrs](const RegType& arg) {
-        if (auto opt_nd = arg.as<Tensor>()) {
-          Tensor arr = opt_nd.value();
-          if (arr.defined()) {
-            dev = arr->device;
-            arrs.push_back(arr);
-          }
-        }
-      };
-
-      for (Index i = 0; i < inst.num_args; ++i) {
-        Instruction::Arg arg = inst.args[i];
-        if (arg.kind() == Instruction::ArgKind::kRegister) {
-          auto reg = ReadRegister(curr_frame, arg.value());
-          f_check_tensor_arg(reg);
-        } else if (arg.kind() == Instruction::ArgKind::kConstIdx) {
-          const auto& const_val = this->const_pool_[arg.value()];
-          f_check_tensor_arg(const_val);
-        }
-      }
-
-      std::unordered_map<std::string, ffi::Any> metrics;
-      metrics["Argument Shapes"] = profiling::ShapeString(arrs);
-
-      // If a suitable device is found, enable profiling.
-      if (dev) {
-        profiling = true;
-        prof_->StartCall(f_name, *dev, metrics);
-      }
-    }
-
-    VirtualMachineImpl::RunInstrCall(curr_frame, inst);
-
-    if (profiling) {
-      prof_->StopCall();
-    }
-  }
-
- private:
-  std::optional<profiling::Profiler> prof_;
-};
-
-ObjectPtr<VirtualMachine> VirtualMachine::CreateProfiler() {
-  return ffi::make_object<VirtualMachineProfiler>();
-}
-
-#else
-ObjectPtr<VirtualMachine> VirtualMachine::CreateProfiler() {
-  TVM_FFI_THROW(InternalError) << "Profiler support is disabled";
-  return nullptr;
-}
-#endif  // TVM_VM_ENABLE_PROFILER
 }  // namespace vm
 }  // namespace runtime
 }  // namespace tvm

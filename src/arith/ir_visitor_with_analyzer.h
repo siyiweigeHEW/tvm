@@ -27,7 +27,7 @@
 
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/scope_stack.h>
-#include <tvm/support/with.h>
+#include <tvm/ir/with_context.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/stmt_functor.h>
 
@@ -36,7 +36,7 @@ namespace arith {
 
 class IRVisitorWithAnalyzer : public tirx::StmtExprVisitor {
  public:
-  PrimExpr Simplify(const PrimExpr& expr) { return analyzer_.Simplify(expr); }
+  PrimExpr Simplify(const PrimExpr& expr) { return analyzer_->Simplify(expr); }
 
   using StmtExprVisitor::VisitExpr_;
   using StmtExprVisitor::VisitStmt_;
@@ -48,7 +48,7 @@ class IRVisitorWithAnalyzer : public tirx::StmtExprVisitor {
   void VisitStmt_(const tirx::AttrStmtNode* op);
   void VisitStmt_(const tirx::AssertStmtNode* op);
   void VisitStmt_(const tirx::SeqStmtNode* op);
-  void VisitExpr_(const tirx::CallNode* op);
+  void VisitExpr_(const CallNode* op);
   void VisitExpr_(const tirx::LetNode* op);
   void VisitExpr_(const tirx::ReduceNode* op);
 

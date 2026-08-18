@@ -18,6 +18,7 @@
  */
 
 #include <tvm/arith/analyzer.h>
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/s_tir/transform.h>
 #include <tvm/tirx/analysis.h>
@@ -47,7 +48,7 @@ class MmaBufferLayoutTransformer : public StmtExprMutator {
   Stmt VisitStmt_(const SBlockNode* op) {
     SBlock block = ffi::GetRef<SBlock>(op);
     auto* n = block.CopyOnWrite();
-    auto fmutate = [this](const Buffer& buffer) {
+    auto fmutate = [this](const BufferVar& buffer) {
       // m16n8k8.matrix[A/B/C] buffers are composed ofseveral small blocks. Assume the block's
       // shape is [bi, bj]. Inside each small block, we have 8 threads in stride dimension and 4
       // threads in contiguous dimension, so we change the buffer's shape from [i, j]
@@ -67,12 +68,12 @@ class MmaBufferLayoutTransformer : public StmtExprMutator {
           new_shape.push_back(buffer->shape[i]);
         }
         new_shape.insert(new_shape.end(),
-                         {Integer(dim0->value / 16), Integer(dim1->value / 8), 2, 2});
+                         {IntImm::Int32(dim0->value / 16), IntImm::Int32(dim1->value / 8), 2, 2});
 
-        Buffer new_buffer = decl_buffer(std::move(new_shape), buffer->dtype, buffer->name, "local",
-                                        buffer->axis_separators);
+        BufferVar new_buffer =
+            decl_buffer(std::move(new_shape), buffer->dtype, buffer.name(), "local");
         this->buffer_map_.insert({buffer, new_buffer});
-        this->buffer_var_map_.insert({buffer->data, new_buffer->data});
+        this->buffer_var_map_.insert({buffer.var(), new_buffer.var()});
         return new_buffer;
 
       } else if (buffer.scope() == "m16n8k8.matrixA") {
@@ -89,12 +90,12 @@ class MmaBufferLayoutTransformer : public StmtExprMutator {
           new_shape.push_back(buffer->shape[i]);
         }
         new_shape.insert(new_shape.end(),
-                         {Integer(dim0->value / 32), Integer(dim1->value / 8), 4, 2});
+                         {IntImm::Int32(dim0->value / 32), IntImm::Int32(dim1->value / 8), 4, 2});
 
-        Buffer new_buffer = decl_buffer(std::move(new_shape), buffer->dtype, buffer->name, "local",
-                                        buffer->axis_separators);
+        BufferVar new_buffer =
+            decl_buffer(std::move(new_shape), buffer->dtype, buffer.name(), "local");
         this->buffer_map_.insert({buffer, new_buffer});
-        this->buffer_var_map_.insert({buffer->data, new_buffer->data});
+        this->buffer_var_map_.insert({buffer.var(), new_buffer.var()});
         return new_buffer;
 
       } else if (buffer.scope() == "m16n8k8.matrixB") {
@@ -111,12 +112,12 @@ class MmaBufferLayoutTransformer : public StmtExprMutator {
           new_shape.push_back(buffer->shape[i]);
         }
         new_shape.insert(new_shape.end(),
-                         {Integer(dim0->value / 8), Integer(dim1->value / 32), 1, 8});
+                         {IntImm::Int32(dim0->value / 8), IntImm::Int32(dim1->value / 32), 1, 8});
 
-        Buffer new_buffer = decl_buffer(std::move(new_shape), buffer->dtype, buffer->name, "local",
-                                        buffer->axis_separators);
+        BufferVar new_buffer =
+            decl_buffer(std::move(new_shape), buffer->dtype, buffer.name(), "local");
         this->buffer_map_.insert({buffer, new_buffer});
-        this->buffer_var_map_.insert({buffer->data, new_buffer->data});
+        this->buffer_var_map_.insert({buffer.var(), new_buffer.var()});
         return new_buffer;
       }
       return buffer;
@@ -127,14 +128,14 @@ class MmaBufferLayoutTransformer : public StmtExprMutator {
   }
 
   Stmt VisitStmt_(const BufferStoreNode* op) {
-    BufferStore store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
+    BufferStore store = StmtExprMutator::VisitStmt_(op).as_or_throw<BufferStore>();
     if (buffer_map_.count(store->buffer)) {
       auto* n = store.CopyOnWrite();
       if (store->buffer.scope() == "m16n8k8.matrixC") {
         const auto index_map_func = tvm::ffi::Function::GetGlobal("tirx.index_map_m16n8k8.matrixC");
         TVM_FFI_ICHECK(index_map_func.has_value());
         auto index_map = IndexMap::FromFunc(2, *index_map_func);
-        auto new_indices = index_map->MapIndices(store->indices, &analyzer);
+        auto new_indices = index_map->MapIndices(store->indices, analyzer);
         n->buffer = buffer_map_[store->buffer];
         n->indices = std::move(new_indices);
       } else if (store->buffer.scope() == "m16n8k8.matrixA" ||
@@ -145,15 +146,15 @@ class MmaBufferLayoutTransformer : public StmtExprMutator {
     return store;
   }
 
-  PrimExpr VisitExpr_(const BufferLoadNode* op) {
-    BufferLoad load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
+  Expr VisitExpr_(const BufferLoadNode* op) {
+    BufferLoad load = StmtExprMutator::VisitExpr_(op).as_or_throw<BufferLoad>();
     if (buffer_map_.count(load->buffer)) {
       auto* n = load.CopyOnWrite();
       if (load->buffer.scope() == "m16n8k8.matrixC") {
         const auto index_map_func = tvm::ffi::Function::GetGlobal("tirx.index_map_m16n8k8.matrixC");
         TVM_FFI_ICHECK(index_map_func.has_value());
         auto index_map = IndexMap::FromFunc(2, *index_map_func);
-        auto new_indices = index_map->MapIndices(load->indices, &analyzer);
+        auto new_indices = index_map->MapIndices(load->indices, analyzer);
         n->buffer = buffer_map_[load->buffer];
         n->indices = std::move(new_indices);
       } else if (load->buffer.scope() == "m16n8k8.matrixA" ||
@@ -164,7 +165,7 @@ class MmaBufferLayoutTransformer : public StmtExprMutator {
     return load;
   }
 
-  PrimExpr VisitExpr_(const VarNode* op) {
+  Expr VisitExpr_(const VarNode* op) {
     if (buffer_var_map_.count(ffi::GetRef<Var>(op))) {
       return buffer_var_map_[ffi::GetRef<Var>(op)];
     }
@@ -172,7 +173,7 @@ class MmaBufferLayoutTransformer : public StmtExprMutator {
   }
 
  private:
-  std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_map_;
+  std::unordered_map<BufferVar, BufferVar, ffi::ObjectPtrHash, ffi::ObjectPtrEqual> buffer_map_;
   std::unordered_map<Var, Var> buffer_var_map_;
   arith::Analyzer analyzer;
 };

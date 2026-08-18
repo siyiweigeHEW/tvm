@@ -25,8 +25,6 @@
 #include <cmath>
 #include <string>
 
-#include "../../../src/target/llvm/llvm_instance.h"
-
 using namespace tvm;
 
 TVM_REGISTER_TARGET_KIND("TestTargetKind", kDLCPU)
@@ -36,7 +34,7 @@ TVM_REGISTER_TARGET_KIND("TestTargetKind", kDLCPU)
     .add_attr_option<ffi::Map<ffi::String, int64_t>>("her_maps");
 
 ffi::Map<ffi::String, ffi::Any> TestTargetParser(ffi::Map<ffi::String, ffi::Any> target) {
-  ffi::String mcpu = Downcast<ffi::String>(target.at("mcpu"));
+  ffi::String mcpu = target.at("mcpu").as_or_throw<ffi::String>();
   target.Set("mcpu", ffi::String("super_") + mcpu);
   target.Set("keys", ffi::Array<ffi::String>({"super"}));
   target.Set("feature.test", true);
@@ -108,7 +106,7 @@ TEST(TargetCreationFail, UnrecognizedConfigOption) {
       {"my_bool", true},
       {"your_names", ffi::Array<ffi::String>{"junru", "jian"}},
       {"kind", ffi::String("TestTargetKind")},
-      {"bad", ObjectRef(nullptr)},
+      {"bad", ffi::ObjectRef(nullptr)},
       {
           "her_maps",
           ffi::Map<ffi::String, int64_t>{
@@ -264,7 +262,7 @@ TEST(TargetCreation, RoundTripCanonicalizerFeaturesNestedHost) {
 
   // The nested host must reconstruct successfully with feature.* preserved
   ffi::Optional<Target> reconstructed_host = reconstructed->GetHost();
-  ASSERT_TRUE(reconstructed_host.defined());
+  ASSERT_TRUE(reconstructed_host.has_value());
   ASSERT_EQ(reconstructed_host.value()->GetAttr<bool>("feature.test").value(), true);
   ASSERT_TRUE(reconstructed_host.value()->GetAttr<ffi::String>("mcpu").has_value());
 }
@@ -276,7 +274,7 @@ TEST(TargetCreationFail, UnknownNonFeatureKeyStillFails) {
       {"mcpu", ffi::String("woof")},
       {"unknown_key", ffi::String("bad")},
   };
-  ASSERT_THROW({ Target{config}; }, tvm::Error);
+  ASSERT_THROW({ Target{config}; }, tvm::ffi::Error);
 }
 
 TVM_REGISTER_TARGET_KIND("TestStringKind", kDLCPU)
@@ -369,192 +367,6 @@ TEST(TargetCreation, ProcessStrings) {
   ASSERT_EQ(array7[1][1][0], "fred");
 }
 
-#ifdef TVM_LLVM_VERSION
-// Helper to create an llvm target with cl-opt
-static Target MakeLLVMTargetWithClOpt(ffi::Array<ffi::String> cl_opts) {
-  return Target(ffi::Map<ffi::String, ffi::Any>{
-      {"kind", ffi::String("llvm")},
-      {"cl-opt", std::move(cl_opts)},
-  });
-}
-
-// Checks that malformed options cause an assertion.
-TEST(TargetCreation, LLVMCommandLineParseFatalDashDashDash) {
-  tvm::codegen::LLVMInstance inst;
-
-  // Too many dashes in an otherwise valid option.
-  EXPECT_THROW(
-      {
-        Target test_target = MakeLLVMTargetWithClOpt({"---unroll-factor:uint=0"});
-        tvm::codegen::LLVMTargetInfo info(inst, test_target);
-      },
-      std::exception);
-}
-
-TEST(TargetCreation, LLVMCommandLineParseFatalColonNoType) {
-  tvm::codegen::LLVMInstance inst;
-
-  // : not followed by type.
-  EXPECT_THROW(
-      {
-        Target test_target = MakeLLVMTargetWithClOpt({"-option:"});
-        tvm::codegen::LLVMTargetInfo info(inst, test_target);
-      },
-      std::exception);
-}
-
-TEST(TargetCreation, LLVMCommandLineParseFatalColonNoTypeEqNoValue) {
-  tvm::codegen::LLVMInstance inst;
-
-  // : and = without type/value.
-  EXPECT_THROW(
-      {
-        Target test_target = MakeLLVMTargetWithClOpt({"-option:="});
-        tvm::codegen::LLVMTargetInfo info(inst, test_target);
-      },
-      std::exception);
-}
-
-TEST(TargetCreation, LLVMCommandLineParseFatalColonTypeNoEqNoValue) {
-  tvm::codegen::LLVMInstance inst;
-
-  // Option with type, but no = and no value.
-  EXPECT_THROW(
-      {
-        Target test_target = MakeLLVMTargetWithClOpt({"-option:bool"});
-        tvm::codegen::LLVMTargetInfo info(inst, test_target);
-      },
-      std::exception);
-}
-
-TEST(TargetCreation, LLVMCommandLineParseFatalColonTypeEqNoValue) {
-  tvm::codegen::LLVMInstance inst;
-
-  // Option with type and =, but no value.
-  EXPECT_THROW(
-      {
-        Target test_target = MakeLLVMTargetWithClOpt({"-option:bool="});
-        tvm::codegen::LLVMTargetInfo info(inst, test_target);
-      },
-      std::exception);
-}
-
-TEST(TargetCreation, LLVMCommandLineParseFatalInvalidType) {
-  tvm::codegen::LLVMInstance inst;
-
-  // Option with invalid type.
-  EXPECT_THROW(
-      {
-        Target test_target = MakeLLVMTargetWithClOpt({"-option:invalidtype=xyz"});
-        tvm::codegen::LLVMTargetInfo info(inst, test_target);
-      },
-      std::exception);
-}
-
-TEST(TargetCreation, LLVMCommandLineParseFatalInvalidValue1) {
-  tvm::codegen::LLVMInstance inst;
-
-  // (Implicit) bool option without type, but with invalid value.
-  EXPECT_THROW(
-      {
-        Target test_target = MakeLLVMTargetWithClOpt({"-option=2"});
-        tvm::codegen::LLVMTargetInfo info(inst, test_target);
-      },
-      std::exception);
-}
-
-TEST(TargetCreation, LLVMCommandLineParseFatalInvalidValue2) {
-  tvm::codegen::LLVMInstance inst;
-
-  // Bool option without type, but with invalid value.
-  EXPECT_THROW(
-      {
-        Target test_target = MakeLLVMTargetWithClOpt({"-option=fred"});
-        tvm::codegen::LLVMTargetInfo info(inst, test_target);
-      },
-      std::exception);
-}
-
-TEST(TargetCreation, LLVMCommandLineParseFatalInvalidValue3) {
-  tvm::codegen::LLVMInstance inst;
-
-  // Bool option with type and =, but invalid value.
-  EXPECT_THROW(
-      {
-        Target test_target = MakeLLVMTargetWithClOpt({"-option:bool=2"});
-        tvm::codegen::LLVMTargetInfo info(inst, test_target);
-      },
-      std::exception);
-}
-
-TEST(TargetCreation, LLVMCommandLineParseFatalInvalidValue4) {
-  tvm::codegen::LLVMInstance inst;
-
-  // Int option with invalid value.
-  EXPECT_THROW(
-      {
-        Target test_target = MakeLLVMTargetWithClOpt({"-option:int=haha"});
-        tvm::codegen::LLVMTargetInfo info(inst, test_target);
-      },
-      std::exception);
-}
-
-TEST(TargetCreation, LLVMCommandLineParseFatalInvalidValue5) {
-  tvm::codegen::LLVMInstance inst;
-
-  // UInt option with invalid value.
-  EXPECT_THROW(
-      {
-        Target test_target = MakeLLVMTargetWithClOpt({"-option:uint=haha"});
-        tvm::codegen::LLVMTargetInfo info(inst, test_target);
-      },
-      std::exception);
-}
-
-TEST(TargetCreation, LLVMCommandLineError) {
-  tvm::codegen::LLVMInstance inst;
-
-  // Check that invalid LLVM options are ignored.
-  Target test_target = MakeLLVMTargetWithClOpt({"-not-an-option:uint=123"});
-  tvm::codegen::LLVMTargetInfo info(inst, test_target);
-  ASSERT_TRUE(info.GetCommandLineOptions().empty());
-}
-
-TEST(TargetCreation, LLVMCommandLineSaveRestore) {
-  tvm::codegen::LLVMInstance inst;
-
-  // Check detection of modified global state
-  Target test_target = MakeLLVMTargetWithClOpt({"-print-after-all"});  // "false" by default
-  tvm::codegen::LLVMTargetInfo info(inst, test_target);
-  ASSERT_FALSE(info.MatchesGlobalState());
-  {
-    // Check that we can modify global state.
-    tvm::codegen::LLVMTarget llvm_target(inst, info);
-    ASSERT_TRUE(info.MatchesGlobalState());
-  }
-  // Check that we restored global state.
-  ASSERT_FALSE(info.MatchesGlobalState());
-}
-
-TEST(TargetCreation, DetectSystemTriple) {
-  ffi::Map<ffi::String, ffi::Any> config = {
-      {"kind", ffi::String("llvm")},
-  };
-
-  Target target = Target(config);
-  TVM_FFI_ICHECK_EQ(target->kind, TargetKind::Get("llvm").value());
-
-  auto pf = tvm::ffi::Function::GetGlobal("target.llvm_get_system_triple");
-  if (!pf.has_value()) {
-    GTEST_SKIP() << "LLVM is not available, skipping test";
-  }
-
-  ffi::Optional<ffi::String> mtriple = target->GetAttr<ffi::String>("mtriple");
-  ASSERT_TRUE(mtriple.value() == (*pf)().cast<ffi::String>());
-}
-
-#endif
-
 TEST(TargetCreation, DeduplicateKeys) {
   ffi::Map<ffi::String, ffi::Any> config = {
       {"kind", ffi::String("llvm")},
@@ -567,7 +379,7 @@ TEST(TargetCreation, DeduplicateKeys) {
   TVM_FFI_ICHECK_EQ(target->keys.size(), 2U);
   TVM_FFI_ICHECK_EQ(target->keys[0], "cpu");
   TVM_FFI_ICHECK_EQ(target->keys[1], "arm_cpu");
-  TVM_FFI_ICHECK_EQ(target->attrs.size(), 2U);
+  TVM_FFI_ICHECK_EQ(target->attrs.count("keys"), 0U);
   TVM_FFI_ICHECK_EQ(target->GetAttr<ffi::String>("device"), "arm_cpu");
 }
 

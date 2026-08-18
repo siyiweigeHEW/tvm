@@ -16,6 +16,8 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+#include <tvm/ffi/cast.h>
+
 #include <set>
 
 #include "../utils.h"
@@ -30,7 +32,7 @@ using namespace tvm::tirx;
  */
 class InvalidReorderIndex : public ScheduleError {
  public:
-  explicit InvalidReorderIndex(IRModule mod, SBlock block, ffi::Array<Integer> new_order)
+  explicit InvalidReorderIndex(IRModule mod, SBlock block, ffi::Array<int64_t> new_order)
       : mod_(mod), block_(block), new_order_(new_order) {}
   IRModule mod() const final { return mod_; }
   ffi::String FastErrorString() const final {
@@ -42,12 +44,12 @@ class InvalidReorderIndex : public ScheduleError {
        << " is not a valid permutation of [0, 1, ..., num_block_iter_vars-1] in block {0}.";
     return ffi::String(os.str());
   }
-  ffi::Array<ObjectRef> LocationsOfInterest() const final { return {block_}; }
+  ffi::Array<ffi::ObjectRef> LocationsOfInterest() const final { return {block_}; }
 
  private:
   IRModule mod_;
   SBlock block_;
-  ffi::Array<Integer> new_order_;
+  ffi::Array<int64_t> new_order_;
 };
 
 class BlockIterVarRewriter : public StmtMutator {
@@ -83,11 +85,11 @@ class BlockIterVarRewriter : public StmtMutator {
 };
 
 void ReorderBlockIterVar(ScheduleState self, const StmtSRef& block_sref,
-                         const ffi::Array<Integer>& new_order) {
+                         const ffi::Array<int64_t>& new_order) {
   const SBlockNode* block_n = TVM_SREF_TO_SBLOCK(block_sref);
   std::vector<int> new_order_vec;
-  for (const Integer& x : new_order) {
-    new_order_vec.push_back(x->value);
+  for (int64_t x : new_order) {
+    new_order_vec.push_back(static_cast<int>(x));
   }
   // check whether new_order is valid or not;
   size_t num_block_itervars = block_n->iter_vars.size();
@@ -116,7 +118,7 @@ void ReorderBlockIterVar(ScheduleState self, const StmtSRef& block_sref,
 
   // rewrite block and blockrealize
   BlockIterVarRewriter rewriter(block_n, std::move(new_order_vec));
-  SBlock new_parent_block = Downcast<SBlock>(rewriter(parent_block));
+  SBlock new_parent_block = rewriter(parent_block).as_or_throw<SBlock>();
   rewriter.block_map.Set(parent_block, new_parent_block);
   self->Replace(parent_block_sref, new_parent_block, rewriter.block_map);
 }
@@ -130,12 +132,12 @@ struct ReorderBlockIterVarTraits : public UnpackedInstTraits<ReorderBlockIterVar
   static constexpr size_t kNumAttrs = 0;
   static constexpr size_t kNumDecisions = 0;
 
-  static void UnpackedApplyToSchedule(Schedule sch, SBlockRV block, ffi::Array<Integer> new_order) {
+  static void UnpackedApplyToSchedule(Schedule sch, SBlockRV block, ffi::Array<int64_t> new_order) {
     sch->ReorderBlockIterVar(block, new_order);
   }
 
   static ffi::String UnpackedAsPython(ffi::Array<ffi::String> outputs, ffi::String block,
-                                      ffi::Array<Integer> new_order) {
+                                      ffi::Array<int64_t> new_order) {
     PythonAPICall py("reorder_block_iter_var");
     py.Input("block", block);
     py.Input("new_order", new_order);

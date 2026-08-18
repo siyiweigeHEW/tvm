@@ -17,6 +17,7 @@
  * under the License.
  */
 
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
 
 #include <mutex>
@@ -405,11 +406,11 @@ class EvolutionarySearchNode : public SearchStrategyNode {
 
   void InitializeWithTuneContext(const TuneContext& ctx) final {
     TVM_FFI_CHECK(ctx->num_threads > 0, ValueError) << "`TuneContext.num_threads` must be > 0";
-    TVM_FFI_CHECK(ctx->space_generator.defined(), ValueError)
+    TVM_FFI_CHECK(ctx->space_generator.has_value(), ValueError)
         << "`TuneContext.space_generator` must be defined";
-    TVM_FFI_CHECK(ctx->space_generator.value()->postprocs.defined(), ValueError)
+    TVM_FFI_CHECK(ctx->space_generator.value()->postprocs.has_value(), ValueError)
         << "`TuneContext.space_generator.postprocs` must be defined";
-    TVM_FFI_CHECK(ctx->space_generator.value()->mutator_probs.defined(), ValueError)
+    TVM_FFI_CHECK(ctx->space_generator.value()->mutator_probs.has_value(), ValueError)
         << "`TuneContext.space_generator.mutator_probs` must be defined";
     this->ctx_ = ctx.get();
     this->postprocs_ = ctx->space_generator.value()->postprocs.value();
@@ -424,13 +425,13 @@ class EvolutionarySearchNode : public SearchStrategyNode {
     TVM_FFI_ICHECK(!design_spaces.empty());
     TVM_FFI_CHECK(this->ctx_ != nullptr, ValueError)
         << "Did you forget to initialize the TuneContext?";
-    TVM_FFI_CHECK(database.defined(), ValueError)
+    TVM_FFI_CHECK(database.has_value(), ValueError)
         << "Database is not supplied in PreTuning. Evolutionary"
            "search algorithm requires a database to be present, so that it "
            "could sample from previously-explored population. If you do not "
            "intent to store data on disk, please use "
            "`tvm.s_tir.meta_schedule.database.MemoryDatabase`";
-    TVM_FFI_CHECK(cost_model.defined(), ValueError)
+    TVM_FFI_CHECK(cost_model.has_value(), ValueError)
         << "CostModel is not supplied in PreTuning. Evolutionary search "
            "algorithm expects a cost model to filter out potentially less efficient kernels. If "
            "you do not expect a cost model to help, please use "
@@ -460,7 +461,7 @@ class EvolutionarySearchNode : public SearchStrategyNode {
   }
 
   SearchStrategy Clone() const final {
-    ObjectPtr<EvolutionarySearchNode> n = ffi::make_object<EvolutionarySearchNode>();
+    ffi::ObjectPtr<EvolutionarySearchNode> n = ffi::make_object<EvolutionarySearchNode>();
     n->population_size = this->population_size;
     n->num_empty_iters_before_early_stop = this->num_empty_iters_before_early_stop;
     n->init_measured_ratio = this->init_measured_ratio;
@@ -498,13 +499,24 @@ std::vector<Schedule> EvolutionarySearchNode::State::PickBestFromDatabase(int nu
     TVM_FFI_ICHECK(!result.defined());
     if (ffi::Optional<Schedule> sch = pp.Apply(mod, trace, rand_state)) {
       result = sch.value();
-    } else {
-      TVM_FFI_THROW(ValueError) << "Cannot postprocess the trace:\n" << trace;
-      throw;
     }
   };
   support::parallel_for_dynamic(0, actual_num, self->ctx_->num_threads, f_proc_measured);
-  return results;
+  TVM_PY_LOG(INFO, self->ctx_->logger) << "Pick-Best-From-Database summary:\n"
+                                       << pp.SummarizeFailures();
+  if (pp.TraceFailCount() > 0) {
+    TVM_PY_LOG(WARNING, self->ctx_->logger)
+        << "PickBestFromDatabase skipped " << pp.TraceFailCount()
+        << " candidate(s) due to trace replay failures";
+  }
+  std::vector<Schedule> filtered;
+  filtered.reserve(actual_num);
+  for (const Schedule& sch : results) {
+    if (sch.defined()) {
+      filtered.push_back(sch);
+    }
+  }
+  return filtered;
 }
 
 std::vector<Schedule> EvolutionarySearchNode::State::SampleInitPopulation(int num) {
@@ -538,6 +550,11 @@ std::vector<Schedule> EvolutionarySearchNode::State::SampleInitPopulation(int nu
     fail_count += !found_new;
     TVM_PY_LOG(INFO, self->ctx_->logger) << "Sample-Init-Population summary:\n"
                                          << pp.SummarizeFailures();
+    if (pp.TraceFailCount() > 0) {
+      TVM_PY_LOG(WARNING, self->ctx_->logger)
+          << "SampleInitPopulation encountered " << pp.TraceFailCount()
+          << " trace replay failure(s); invalid candidates were skipped";
+    }
   }
   return out_schs;
 }
@@ -768,7 +785,7 @@ SearchStrategy SearchStrategy::EvolutionarySearch(int population_size,         /
   TVM_META_SCHEDULE_CHECK_PROB_RANGE(init_measured_ratio, "Initial measured ratio");
   TVM_META_SCHEDULE_CHECK_PROB_RANGE(genetic_mutate_prob, "Mutation probability");
   TVM_META_SCHEDULE_CHECK_PROB_RANGE(eps_greedy, "Greedy pick probability");
-  ObjectPtr<EvolutionarySearchNode> n = ffi::make_object<EvolutionarySearchNode>();
+  ffi::ObjectPtr<EvolutionarySearchNode> n = ffi::make_object<EvolutionarySearchNode>();
   n->population_size = population_size;
   n->num_empty_iters_before_early_stop = 5;
   n->init_measured_ratio = init_measured_ratio;

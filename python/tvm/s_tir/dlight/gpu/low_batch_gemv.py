@@ -14,19 +14,22 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-# ruff: noqa: E741, F821
+# ruff: noqa: E741
 """A rule for low-batch GEMM / decode-GEMM using GEMV schedule."""
 
 from functools import reduce
 from typing import Literal
 
-from tvm import arith, ir, s_tir, tirx
+import tvm_ffi
+
+from tvm import arith, s_tir, tirx
 from tvm.target import Target
 
 from ..analysis import (
     SBlockInfo,
     collect_block_iter_vars_used_in_access_region,
     collect_vars_used_in_prim_expr,
+    get_max_shared_memory_per_block,
     is_broadcast_epilogue,
     normalize_prim_func,
 )
@@ -34,20 +37,31 @@ from ..base import auto_vectorize, get_bytes, get_extent, try_inline_contiguous_
 from .base import GPUScheduleRule
 
 
-def _get_reduction_expr(block: tirx.SBlock) -> tirx.PrimExpr | None:
+def _get_reduction_expr(block: tirx.SBlock) -> tirx.Expr | None:
     # Detect and return `Y` in `X[...] = X[...] + Y`
     buffer_store = block.body
     if not isinstance(buffer_store, tirx.BufferStore):
         return None
     if not isinstance(buffer_store.value, tirx.Add):
         return None
-    if not ir.structural_equal(
+    if not tvm_ffi.structural_equal(
         buffer_store.value.a,
         tirx.BufferLoad(buffer_store.buffer, block.body.indices),
         map_free_vars=True,
     ):
         return None
     return buffer_store.value.b
+
+
+def _has_pad_einsum_compatible_access(block: tirx.SBlock) -> bool:
+    """Check the point-access restriction required by ``Schedule.pad_einsum``."""
+    return all(
+        isinstance(dim.extent, tirx.IntImm)
+        and int(dim.extent) == 1
+        and isinstance(dim.min, tirx.IntImm | tirx.Var)
+        for region in [*block.reads, *block.writes]
+        for dim in region.region
+    )
 
 
 def is_gemv(sch: s_tir.Schedule, block_info: SBlockInfo) -> list[tirx.Buffer] | None:
@@ -76,6 +90,7 @@ def is_gemv(sch: s_tir.Schedule, block_info: SBlockInfo) -> list[tirx.Buffer] | 
     conditions.append(len(block_stmt.reads) >= 2)
     conditions.append(len(block_stmt.writes) == 1)
     conditions.append(_get_reduction_expr(block_stmt) is not None)
+    conditions.append(_has_pad_einsum_compatible_access(block_stmt))
     conditions.append(
         len(collect_block_iter_vars_used_in_access_region(block_stmt, block_stmt.writes[0].region))
         > 0
@@ -111,7 +126,7 @@ def is_gemv(sch: s_tir.Schedule, block_info: SBlockInfo) -> list[tirx.Buffer] | 
     return ret if 0 < len(ret) < len(block_stmt.reads) else None
 
 
-def detect_dominant_read(block: tirx.SBlock, const_iter_vars: set[tirx.Var]) -> tirx.PrimExpr:
+def detect_dominant_read(block: tirx.SBlock, const_iter_vars: set[tirx.Var]) -> tirx.Expr:
     """Detect the dominant read indices in the block."""
     dominant_read = None
     num_read_iters = -1
@@ -351,13 +366,14 @@ class LowBatchGEMV(GPUScheduleRule):
             shared_mem_usage = 0
             for buf in vector_input_buffers:
                 buf_size = reduce(
-                    lambda x, y: x * y, buf.shape, tirx.IntImm(buf.shape[0].dtype, 1)
+                    lambda x, y: x * y, buf.shape, tirx.IntImm(buf.shape[0].ty, 1)
                 ) * get_bytes(buf.dtype)
                 shared_mem_usage += buf_size
+            max_smem = get_max_shared_memory_per_block(target)
             LOAD_V_SHARED = (
                 LOAD_V_SHARED
                 and isinstance(shared_mem_usage, tirx.IntImm)
-                and shared_mem_usage.value <= int(target.attrs["max_shared_memory_per_block"])
+                and shared_mem_usage.value <= max_smem
             )
 
             # vectorize load A
@@ -488,7 +504,7 @@ class LowBatchGEMV(GPUScheduleRule):
                     sch.reverse_compute_at(epilogue, bx)
                     sch.set_scope(block, 0, "shared")
                     _, _, _, *s = sch.get_loops(epilogue)  # pylint: disable=invalid-name
-                    _, tx = sch.split(sch.fuse(*s), factors=[None, TX])
+                    _, tx = sch.split(sch.fuse(*s), factors=[None, TS])
                     sch.bind(tx, TAG_S)
                 else:
                     sch.reverse_compute_at(epilogue, bx, preserve_unit_loops=True)

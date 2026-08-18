@@ -478,6 +478,7 @@ def test_function_doc(args, decorators, return_type, body):
     assert list(doc.decorators) == decorators
     assert doc.return_type == return_type
     assert list(doc.body) == body
+    assert list(doc.type_params) == []
 
 
 @pytest.mark.parametrize(
@@ -551,7 +552,7 @@ def test_doc_source_paths():
     source_paths = [AccessPath.root(), AccessPath.root().attr("x")]
 
     doc.source_paths = source_paths
-    # This should triggers the __getattr__ and gets a tvm.ir.container.Array
+    # This should triggers the __getattr__ and gets a tvm_ffi.Array
     assert not isinstance(doc.source_paths, list)
     assert list(doc.source_paths) == source_paths
 

@@ -37,10 +37,10 @@ namespace transform {
 namespace {
 
 template <typename T>
-using PSet = std::unordered_set<T, ObjectPtrHash, ObjectPtrEqual>;
+using PSet = std::unordered_set<T, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>;
 
 template <typename T, typename U>
-using PMap = std::unordered_map<T, U, ObjectPtrHash, ObjectPtrEqual>;
+using PMap = std::unordered_map<T, U, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>;
 
 PMap<GlobalVar, PSet<GlobalVar>> CollectCallMap(const IRModule& mod) {
   struct Visitor : StmtExprVisitor {
@@ -115,8 +115,9 @@ bool IsInlinablePrimFunc(const GlobalVar& gvar, const PrimFunc& prim_func,
 
   // We do not currently support inlining of functions that accept
   // buffer arguments.
-  bool has_buffer_arguments = prim_func->buffer_map.size();
-  if (has_buffer_arguments) return false;
+  for (const Var& param : prim_func->params) {
+    if (param->ty.as<BufferTypeNode>()) return false;
+  }
 
   // We do not currently support inlining of schedulable TIR
   // functions.  To support this use case, repeated names in
@@ -201,7 +202,7 @@ class PrimFuncInliner : StmtExprMutator {
     return VisitStmt(inlined);
   }
 
-  PrimExpr VisitExpr_(const CallNode* call) override {
+  Expr VisitExpr_(const CallNode* call) override {
     // Because the current implementation inlines a subroutine inserts
     // the `tirx::Stmt` body at the point of use, replacement must
     // occur in a context where a `tirx::Stmt` can be returned. Support
@@ -222,18 +223,19 @@ class PrimFuncInliner : StmtExprMutator {
     return StmtExprMutator::VisitExpr_(call);
   }
 
-  Stmt InlineArguments(const GlobalVar& gvar, PrimFunc callee,
-                       const ffi::Array<PrimExpr>& args) const {
+  Stmt InlineArguments(const GlobalVar& gvar, PrimFunc callee, const ffi::Array<Expr>& args) const {
     TVM_FFI_ICHECK_EQ(callee->params.size(), args.size())
         << "Callee " << gvar << " accepts " << callee->params.size() << " parameters ("
         << callee->params << "), but is called with " << args.size() << " arguments (" << args
         << ")";
 
-    TVM_FFI_ICHECK(callee->buffer_map.empty())
-        << "Inlining of PrimFuncs with buffer arguments is not yet supported, "
-        << "but callee " << gvar << " has non-empty buffer map " << callee->buffer_map;
+    for (const Var& param : callee->params) {
+      TVM_FFI_ICHECK(!param->ty.as<BufferTypeNode>())
+          << "Inlining of PrimFuncs with buffer arguments is not yet supported, "
+          << "but callee " << gvar << " has BufferType-annotated parameter " << param;
+    }
 
-    ffi::Map<Var, ffi::Variant<tirx::Buffer, tvm::PrimExpr>> param_map;
+    ffi::Map<Var, ffi::Variant<tirx::BufferVar, tvm::Expr>> param_map;
     for (size_t i = 0; i < callee->params.size(); i++) {
       param_map.Set(callee->params[i], args[i]);
     }

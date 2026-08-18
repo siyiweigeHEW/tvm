@@ -25,7 +25,6 @@
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/op.h>
 #include <tvm/ir/type.h>
-#include <tvm/runtime/module.h>
 #include <tvm/tirx/op_attr_types.h>
 
 #include <memory>
@@ -34,7 +33,10 @@
 
 namespace tvm {
 
-TVM_FFI_STATIC_INIT_BLOCK() { OpNode::RegisterReflection(); }
+TVM_FFI_STATIC_INIT_BLOCK() {
+  ArgumentInfoNode::RegisterReflection();
+  OpNode::RegisterReflection();
+}
 
 using ffi::Any;
 using ffi::Function;
@@ -50,11 +52,13 @@ const Op& Op::Get(const ffi::String& name) {
   return reg->op();
 }
 
-OpRegEntry::OpRegEntry(uint32_t reg_index) {
-  ObjectPtr<OpNode> n = ffi::make_object<OpNode>();
+Op OpRegEntry::MakeOp(uint32_t reg_index) {
+  ffi::ObjectPtr<OpNode> n = ffi::make_object<OpNode>();
   n->index_ = reg_index;
-  op_ = Op(n);
+  return Op(n);
 }
+
+OpRegEntry::OpRegEntry(uint32_t reg_index) : op_(MakeOp(reg_index)) {}
 
 OpRegEntry& OpRegEntry::RegisterOrGet(const ffi::String& name) {
   return OpRegistry::Global()->RegisterOrGet(name);
@@ -161,10 +165,6 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def("__data_from_json__", [](const ffi::String& name) -> Op { return Op::Get(name); });
 }
 
-TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
-    .set_dispatch<OpNode>([](const ObjectRef& ref, ReprPrinter* p) {
-      auto* node = static_cast<const OpNode*>(ref.get());
-      p->stream << "Op(" << node->name << ")";
-    });
+// Pattern A (RM): auto-default repr from reflection.
 
 }  // namespace tvm

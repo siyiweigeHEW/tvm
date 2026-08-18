@@ -86,10 +86,10 @@ class ReplayTraceNode : public SearchStrategyNode {
                                     SearchStrategyNode);
 
   void InitializeWithTuneContext(const TuneContext& ctx) final {
-    TVM_FFI_CHECK(ctx->mod.defined(), ValueError) << "TuneContext.mod is not defined";
-    TVM_FFI_CHECK(ctx->space_generator.defined(), ValueError)
+    TVM_FFI_CHECK(ctx->mod.has_value(), ValueError) << "TuneContext.mod is not defined";
+    TVM_FFI_CHECK(ctx->space_generator.has_value(), ValueError)
         << "TuneContext.space_generator is not defined";
-    if (!ctx->space_generator.value()->postprocs.defined()) {
+    if (!ctx->space_generator.value()->postprocs.has_value()) {
       TVM_PY_LOG(WARNING, ctx->logger)
           << "`postprocs` is not defined in " << ctx->space_generator.value()
           << ". Please explicitly set `postprocs` to an empty list if you don't want to "
@@ -135,7 +135,7 @@ class ReplayTraceNode : public SearchStrategyNode {
   }
 
   SearchStrategy Clone() const final {
-    ObjectPtr<ReplayTraceNode> n = ffi::make_object<ReplayTraceNode>();
+    ffi::ObjectPtr<ReplayTraceNode> n = ffi::make_object<ReplayTraceNode>();
     n->max_fail_count = this->max_fail_count;
     n->rand_state_ = this->rand_state_;
     n->state_ = nullptr;  // cleared the state
@@ -186,7 +186,7 @@ inline void ReplayTraceNode::State::NotifyRunnerResults(const ffi::Array<RunnerR
 }
 
 SearchStrategy SearchStrategy::ReplayTrace(int max_fail_count) {
-  ObjectPtr<ReplayTraceNode> n = ffi::make_object<ReplayTraceNode>();
+  ffi::ObjectPtr<ReplayTraceNode> n = ffi::make_object<ReplayTraceNode>();
   n->max_fail_count = max_fail_count;
   return SearchStrategy(n);
 }

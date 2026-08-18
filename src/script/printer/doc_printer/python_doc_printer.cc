@@ -16,14 +16,18 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+#include <tvm/ffi/error.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/runtime/logging.h>
 #include <tvm/script/printer/doc.h>
+#include <tvm/tirx/tile_primitive.h>
 
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <optional>
+#include <sstream>
+#include <streambuf>
 #include <string>
 
 #include "../../../support/str_escape.h"
@@ -33,6 +37,111 @@
 namespace tvm {
 namespace script {
 namespace printer {
+namespace {
+
+/*!
+ * \brief Escape an ExprStringDoc child while preserving final output positions.
+ *
+ * ExprStringDoc must print its child through the active PythonDocPrinter so that the child's
+ * precedence, printer configuration, and source-path bookkeeping stay in the current traversal.
+ * However, escaping after printing into a temporary buffer would make PrintDoc record positions
+ * in that unescaped buffer, rather than the final Python source. This scoped adapter instead
+ * replaces the output stream's buffer only while the child is printed. It escapes each write and
+ * forwards it immediately to the original final buffer; the caller emits the surrounding quotes
+ * outside the scope so that only the child is transformed.
+ *
+ * The adapter owns neither the output stream nor its original buffer. Both outlive this stack
+ * object. The constructor saves the original buffer in destination_ and installs this adapter;
+ * the destructor restores the original buffer before the caller continues writing to the stream.
+ *
+ * PrintDoc uses tellp() before and after every child to record source spans. tellp() reaches
+ * seekoff(0, cur, out), which is the only seek this adapter accepts and delegates directly to the
+ * original buffer. Because that buffer already contains the preceding output and advances by the
+ * escaped byte count, child spans use absolute positions in the final source, including any
+ * expansion introduced by StrEscape.
+ *
+ * A raw newline violates the one-line expression-string contract. xsputn records its presence
+ * while still escaping and forwarding the write, and the caller checks saw_newline() before
+ * completing the literal. On every exit path, including exception unwinding, the noexcept
+ * destructor restores the original buffer.
+ */
+class ScopedExprStringEscapeBuf : public std::streambuf {
+ public:
+  explicit ScopedExprStringEscapeBuf(std::ostream* output)
+      : output_(output), destination_(output->rdbuf()) {
+    output_->rdbuf(this);
+  }
+
+  ~ScopedExprStringEscapeBuf() noexcept { output_->rdbuf(destination_); }
+
+  ScopedExprStringEscapeBuf(const ScopedExprStringEscapeBuf&) = delete;
+  ScopedExprStringEscapeBuf& operator=(const ScopedExprStringEscapeBuf&) = delete;
+
+  bool saw_newline() const { return saw_newline_; }
+
+ protected:
+  std::streamsize xsputn(const char* data, std::streamsize count) final {
+    if (count <= 0) return 0;
+    saw_newline_ = saw_newline_ || std::find(data, data + count, '\n') != data + count;
+    // StrEscape is byte-wise, so each write can be transformed independently and forwarded
+    // without retaining or copying the complete output. Report consumed input bytes, not the
+    // potentially larger number of escaped bytes written to the destination.
+    std::string escaped = support::StrEscape(data, static_cast<size_t>(count));
+    destination_->sputn(escaped.data(), escaped.size());
+    return count;
+  }
+
+  int_type overflow(int_type ch) final {
+    if (traits_type::eq_int_type(ch, traits_type::eof())) {
+      return traits_type::not_eof(ch);
+    }
+    char value = traits_type::to_char_type(ch);
+    return xsputn(&value, 1) == 1 ? ch : traits_type::eof();
+  }
+
+  int sync() final { return destination_->pubsync(); }
+
+  pos_type seekoff(off_type offset, std::ios_base::seekdir direction,
+                   std::ios_base::openmode mode) final {
+    // Support the current-position query used by tellp(), preserving the destination's absolute
+    // escaped offset. ExprStringDoc rendering never needs to reposition the output sequence.
+    if (offset == 0 && direction == std::ios_base::cur && (mode & std::ios_base::out)) {
+      return destination_->pubseekoff(offset, direction, mode);
+    }
+    return pos_type(off_type(-1));
+  }
+
+ private:
+  std::ostream* output_;
+  std::streambuf* destination_;
+  bool saw_newline_{false};
+};
+
+ffi::String RenderInvisiblePathInfo(const ffi::String& script,
+                                    const ffi::Array<AccessPath>& requested_paths,
+                                    const ffi::Array<ffi::Optional<AccessPath>>& visible_paths) {
+  if (requested_paths.empty()) return script;
+
+  std::ostringstream os;
+  for (size_t i = 0; i < requested_paths.size(); ++i) {
+    if (i != 0) os << "\n";
+    const AccessPath& requested_path = requested_paths[i];
+    os << "Access path: " << requested_path;
+
+    ffi::Optional<AccessPath> visible_path = std::nullopt;
+    if (i < visible_paths.size()) visible_path = visible_paths[i];
+    if (!visible_path.has_value()) {
+      os << "\nNote: No visible object for this path is rendered in TVMScript.";
+    } else if (!visible_path.value()->PathEqual(requested_path) &&
+               visible_path.value()->IsPrefixOf(requested_path)) {
+      os << "\nNote: The underlined object is the nearest visible parent of this path.";
+    }
+  }
+  os << "\n\n" << script;
+  return ffi::String(os.str());
+}
+
+}  // namespace
 
 /*!
  * \brief Operator precedence
@@ -103,6 +212,7 @@ ExprPrecedence GetExprPrecedence(const ExprDoc& doc) {
         {OpKind::kGtE, ExprPrecedence::kComparison},
         {OpKind::kAnd, ExprPrecedence::kBooleanAnd},
         {OpKind::kOr, ExprPrecedence::kBooleanOr},
+        {OpKind::kMatMul, ExprPrecedence::kMult},
         {OpKind::kIfThenElse, ExprPrecedence::kIfThenElse},
     };
     int n = static_cast<int>(OpKind::kSpecialEnd);
@@ -116,6 +226,7 @@ ExprPrecedence GetExprPrecedence(const ExprDoc& doc) {
   // Key is the type index of Doc
   static const std::unordered_map<uint32_t, ExprPrecedence> doc_type_precedence = {
       {LiteralDocNode::RuntimeTypeIndex(), ExprPrecedence::kIdentity},
+      {ExprStringDocNode::RuntimeTypeIndex(), ExprPrecedence::kIdentity},
       {IdDocNode::RuntimeTypeIndex(), ExprPrecedence::kIdentity},
       {AttrAccessDocNode::RuntimeTypeIndex(), ExprPrecedence::kIdentity},
       {IndexDocNode::RuntimeTypeIndex(), ExprPrecedence::kIdentity},
@@ -150,6 +261,7 @@ class PythonDocPrinter : public DocPrinter {
   using DocPrinter::PrintDoc;
 
   void PrintTypedDoc(const LiteralDoc& doc) final;
+  void PrintTypedDoc(const ExprStringDoc& doc) final;
   void PrintTypedDoc(const IdDoc& doc) final;
   void PrintTypedDoc(const AttrAccessDoc& doc) final;
   void PrintTypedDoc(const IndexDoc& doc) final;
@@ -164,6 +276,8 @@ class PythonDocPrinter : public DocPrinter {
   void PrintTypedDoc(const AssignDoc& doc) final;
   void PrintTypedDoc(const IfDoc& doc) final;
   void PrintTypedDoc(const WhileDoc& doc) final;
+  void PrintTypedDoc(const BreakDoc& doc) final;
+  void PrintTypedDoc(const ContinueDoc& doc) final;
   void PrintTypedDoc(const ForDoc& doc) final;
   void PrintTypedDoc(const ExprStmtDoc& doc) final;
   void PrintTypedDoc(const AssertDoc& doc) final;
@@ -173,6 +287,7 @@ class PythonDocPrinter : public DocPrinter {
   void PrintTypedDoc(const ClassDoc& doc) final;
   void PrintTypedDoc(const CommentDoc& doc) final;
   void PrintTypedDoc(const DocStringDoc& doc) final;
+  void PrintTypedDoc(const OpCallDoc& doc) final;
 
  private:
   void NewLineWithoutIndent() {
@@ -318,7 +433,8 @@ void PythonDocPrinter::PrintTypedDoc(const LiteralDoc& doc) {
   if (value == nullptr) {
     output_ << "None";
   } else if (const auto* int_imm = value.as<IntImmNode>()) {
-    if (int_imm->dtype.is_bool()) {
+    PrimType int_ty = int_imm->ty.as_or_throw<PrimType>();
+    if (int_ty.MatchesCode(DLDataTypeCode::kDLBool)) {
       output_ << (int_imm->value ? "True" : "False");
     } else {
       output_ << int_imm->value;
@@ -357,6 +473,17 @@ void PythonDocPrinter::PrintTypedDoc(const LiteralDoc& doc) {
   } else {
     TVM_FFI_THROW(TypeError) << "Unsupported literal value type: " << value.GetTypeKey();
   }
+}
+
+void PythonDocPrinter::PrintTypedDoc(const ExprStringDoc& doc) {
+  this->output_ << '"';
+  {
+    ScopedExprStringEscapeBuf escaping_scope(&this->output_);
+    this->PrintDoc(doc->value);
+    TVM_FFI_ICHECK(!escaping_scope.saw_newline())
+        << "An expression rendered inside a Python string literal must be one line";
+  }
+  this->output_ << '"';
 }
 
 void PythonDocPrinter::PrintTypedDoc(const IdDoc& doc) { output_ << doc->name; }
@@ -404,6 +531,7 @@ const std::string OperatorToString(OperationDocNode::Kind operation_kind) {
         {OpKind::kGtE, ">="},       //
         {OpKind::kAnd, "and"},      //
         {OpKind::kOr, "or"},        //
+        {OpKind::kMatMul, "@"},     //
     };
 
     std::vector<std::string> table;
@@ -609,6 +737,10 @@ void PythonDocPrinter::PrintTypedDoc(const WhileDoc& doc) {
   PrintIndentedBlock(doc->body);
 }
 
+void PythonDocPrinter::PrintTypedDoc(const BreakDoc& doc) { output_ << "break"; }
+
+void PythonDocPrinter::PrintTypedDoc(const ContinueDoc& doc) { output_ << "continue"; }
+
 void PythonDocPrinter::PrintTypedDoc(const ForDoc& doc) {
   MaybePrintCommenMultiLines(doc, true);
   output_ << "for ";
@@ -650,7 +782,7 @@ void PythonDocPrinter::PrintTypedDoc(const ExprStmtDoc& doc) {
 void PythonDocPrinter::PrintTypedDoc(const AssertDoc& doc) {
   output_ << "assert ";
   PrintDoc(doc->test);
-  if (doc->msg.defined()) {
+  if (doc->msg.has_value()) {
     output_ << ", ";
     PrintDoc(doc->msg.value());
   }
@@ -673,12 +805,17 @@ void PythonDocPrinter::PrintTypedDoc(const FunctionDoc& doc) {
 
   output_ << "def ";
   PrintDoc(doc->name);
+  if (!doc->type_params.empty()) {
+    output_ << "[";
+    PrintJoinedDocs(doc->type_params, ", ");
+    output_ << "]";
+  }
 
   output_ << "(";
   PrintJoinedDocs(doc->args, ", ");
   output_ << ")";
 
-  if (doc->return_type.defined()) {
+  if (doc->return_type.has_value()) {
     output_ << " -> ";
     PrintDoc(doc->return_type.value());
   }
@@ -717,18 +854,88 @@ void PythonDocPrinter::PrintTypedDoc(const DocStringDoc& doc) {
   }
 }
 
+void PythonDocPrinter::PrintTypedDoc(const OpCallDoc& doc) {
+  PrintDoc(doc->callee);
+
+  output_ << "(";
+
+  // Print positional args
+  bool wrote_any = false;
+  for (const Doc& arg : doc->args) {
+    if (wrote_any) {
+      output_ << ", ";
+    }
+    wrote_any = true;
+    PrintDoc(arg);
+  }
+  // workspace first (if present and non-empty)
+  if (doc->workspace.has_value() && !doc->workspace.value()->keys.empty()) {
+    if (wrote_any) output_ << ", ";
+    wrote_any = true;
+    output_ << "workspace=";
+    PrintDoc(doc->workspace.value());
+  }
+  // dispatch next (if present)
+  if (doc->dispatch.has_value()) {
+    if (wrote_any) output_ << ", ";
+    wrote_any = true;
+    output_ << "dispatch=";
+    PrintDoc(doc->dispatch.value());
+  }
+  // Flatten config as keyword args: key=value
+  if (doc->config.has_value() && !doc->config.value()->keys.empty()) {
+    const auto* dict = doc->config.value().as<DictDocNode>();
+    // Only flatten if all keys are literal strings; otherwise, fallback to config={...}
+    bool all_str_keys = true;
+    for (const ExprDoc& k : dict->keys) {
+      if (!k.as<LiteralDocNode>()) {
+        all_str_keys = false;
+        break;
+      }
+      const auto* lit = k.as<LiteralDocNode>();
+      if (!lit->value.as<ffi::String>()) {
+        all_str_keys = false;
+        break;
+      }
+    }
+    if (all_str_keys) {
+      int n = dict->keys.size();
+      for (int i = 0; i < n; ++i) {
+        const auto* lit = dict->keys[i].as<LiteralDocNode>();
+        std::string key = lit->value.as_or_throw<ffi::String>();
+        if (wrote_any) output_ << ", ";
+        wrote_any = true;
+        output_ << key << "=";
+        PrintDoc(dict->values[i]);
+      }
+    } else {
+      if (wrote_any) output_ << ", ";
+      wrote_any = true;
+      output_ << "config=";
+      PrintDoc(doc->config.value());
+    }
+  }
+  output_ << ")";
+}
+
 ffi::String DocToPythonScript(Doc doc, const PrinterConfig& cfg) {
   if (cfg->num_context_lines < 0) {
     cfg->num_context_lines = std::numeric_limits<int32_t>::max();
   }
   PythonDocPrinter printer(cfg);
   printer.Append(doc, cfg);
-  std::string result = printer.GetString();
-  int last_space = result.size();
-  while (last_space > 0 && std::isspace(result[last_space - 1])) {
-    last_space--;
+  std::string script = printer.GetString();
+
+  // GetString terminates non-empty output with one newline.  Preserve the
+  // established DocToPythonScript result without normalizing any other
+  // trailing whitespace.
+  if (!script.empty()) {
+    TVM_FFI_ICHECK_EQ(script.back(), '\n');
+    script.pop_back();
   }
-  return result.substr(0, last_space);
+
+  if (!cfg->render_invisible_path_info) return script;
+  return RenderInvisiblePathInfo(script, cfg->path_to_underline, printer.GetVisiblePaths());
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

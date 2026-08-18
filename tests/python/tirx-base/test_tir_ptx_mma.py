@@ -16,13 +16,15 @@
 # under the License.
 
 import numpy as np
+import pytest
 
 import tvm
 import tvm.testing
 from tvm.script import tirx as T
+from tvm.testing import env
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def gemm_mma_m8n8k4_row_col_fp64pf64fp64(a: T.handle, b: T.handle, c: T.handle):
     T.func_attr({"global_symbol": "default_function", "tirx.noalias": True})
     A = T.match_buffer(a, [8, 4], dtype="float64")
@@ -43,13 +45,13 @@ def gemm_mma_m8n8k4_row_col_fp64pf64fp64(a: T.handle, b: T.handle, c: T.handle):
     MultiA[0] = A[(tx % 32) // 4, (tx % 32) % 4]
     MultiB[0] = B[(tx % 32) // 4, (tx % 32) % 4]
     T.evaluate(
-        T.ptx_mma(
+        T.ptx_legacy.mma(
             "m8n8k4",
             "row",
             "col",
-            "fp64",
-            "fp64",
-            "fp64",
+            "float64",
+            "float64",
+            "float64",
             MultiA.data,
             0,
             MultiB.data,
@@ -64,7 +66,8 @@ def gemm_mma_m8n8k4_row_col_fp64pf64fp64(a: T.handle, b: T.handle, c: T.handle):
         C[(tx % 32) // 4, (tx % 32) % 4 * 2 + mma_accum_c_id] = Accum[mma_accum_c_id]
 
 
-@tvm.testing.requires_cuda_compute_version(8)
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(8), reason="need cuda compute >= 8.0")
 def test_gemm_mma_m8n8k4_row_col_fp64pf64fp64():
     sch = tvm.s_tir.Schedule(gemm_mma_m8n8k4_row_col_fp64pf64fp64)
     cuda_mod = tvm.compile(sch.mod, target="cuda")
@@ -73,21 +76,21 @@ def test_gemm_mma_m8n8k4_row_col_fp64pf64fp64():
     B_np = np.random.uniform(-1, 1, [8, 4]).astype("float64")
     C_np = np.zeros([8, 8]).astype("float64")
 
-    ctx = tvm.cuda()
-    A_tvm = tvm.runtime.tensor(A_np, ctx)
-    B_tvm = tvm.runtime.tensor(B_np, ctx)
-    C_tvm = tvm.runtime.tensor(C_np, ctx)
-
-    cuda_mod(A_tvm, B_tvm, C_tvm)
-
     golden = np.matmul(A_np.astype("float64"), B_np.astype("float64").T)
 
-    C_numpy = C_tvm.numpy()
+    def run_and_check():
+        ctx = tvm.cuda()
+        A_tvm = tvm.runtime.tensor(A_np, ctx)
+        B_tvm = tvm.runtime.tensor(B_np, ctx)
+        C_tvm = tvm.runtime.tensor(C_np, ctx)
+        cuda_mod(A_tvm, B_tvm, C_tvm)
+        C_numpy = C_tvm.numpy()
+        tvm.testing.assert_allclose(golden, C_numpy, atol=1e-3, rtol=1e-3)
 
-    tvm.testing.assert_allclose(golden, C_numpy, atol=1e-3, rtol=1e-3)
+    tvm.testing.run_with_gpu_lock(run_and_check)
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def gemm_mma_m8n8k4_row_row_fp16fp16fp16(a: T.handle, b: T.handle, c: T.handle):
     T.func_attr({"global_symbol": "default_function", "tirx.noalias": True})
     A = T.match_buffer(a, [16, 4], dtype="float16")
@@ -116,13 +119,13 @@ def gemm_mma_m8n8k4_row_row_fp16fp16fp16(a: T.handle, b: T.handle, c: T.handle):
             mma_multi_b_col + (4 * ((tx % 32) // 8)),
         ]
     T.evaluate(
-        T.ptx_mma(
+        T.ptx_legacy.mma(
             "m8n8k4",
             "row",
             "row",
-            "fp16",
-            "fp16",
-            "fp16",
+            "float16",
+            "float16",
+            "float16",
             MultiA.data,
             0,
             MultiB.data,
@@ -140,7 +143,8 @@ def gemm_mma_m8n8k4_row_row_fp16fp16fp16(a: T.handle, b: T.handle, c: T.handle):
         ] = Accum[mma_accum_c_id]
 
 
-@tvm.testing.requires_cuda_compute_version(7)
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(7), reason="need cuda compute >= 7.0")
 def test_gemm_mma_m8n8k4_row_row_fp16fp16fp16():
     sch = tvm.s_tir.Schedule(gemm_mma_m8n8k4_row_row_fp16fp16fp16)
     cuda_mod = tvm.compile(sch.mod, target="cuda")
@@ -149,21 +153,21 @@ def test_gemm_mma_m8n8k4_row_row_fp16fp16fp16():
     B_np = np.random.uniform(-1, 1, [4, 16]).astype("float16")
     C_np = np.zeros([16, 16]).astype("float16")
 
-    ctx = tvm.cuda()
-    A_tvm = tvm.runtime.tensor(A_np, ctx)
-    B_tvm = tvm.runtime.tensor(B_np, ctx)
-    C_tvm = tvm.runtime.tensor(C_np, ctx)
-
-    cuda_mod(A_tvm, B_tvm, C_tvm)
-
     golden = np.matmul(A_np.astype("float16"), B_np.astype("float16"))
 
-    C_numpy = C_tvm.numpy()
+    def run_and_check():
+        ctx = tvm.cuda()
+        A_tvm = tvm.runtime.tensor(A_np, ctx)
+        B_tvm = tvm.runtime.tensor(B_np, ctx)
+        C_tvm = tvm.runtime.tensor(C_np, ctx)
+        cuda_mod(A_tvm, B_tvm, C_tvm)
+        C_numpy = C_tvm.numpy()
+        tvm.testing.assert_allclose(golden, C_numpy, atol=1e-3, rtol=1e-3)
 
-    tvm.testing.assert_allclose(golden, C_numpy, atol=1e-3, rtol=1e-3)
+    tvm.testing.run_with_gpu_lock(run_and_check)
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def gemm_mma_m8n8k4_row_row_fp16fp16fp32(a: T.handle, b: T.handle, c: T.handle):
     T.func_attr({"global_symbol": "default_function", "tirx.noalias": True})
     A = T.match_buffer(a, [16, 4], dtype="float16")
@@ -193,13 +197,13 @@ def gemm_mma_m8n8k4_row_row_fp16fp16fp32(a: T.handle, b: T.handle, c: T.handle):
             mma_multi_b_col + (4 * ((tx % 32) // 8)),
         ]
     T.evaluate(
-        T.ptx_mma(
+        T.ptx_legacy.mma(
             "m8n8k4",
             "row",
             "row",
-            "fp16",
-            "fp16",
-            "fp32",
+            "float16",
+            "float16",
+            "float32",
             MultiA.data,
             0,
             MultiB.data,
@@ -223,7 +227,8 @@ def gemm_mma_m8n8k4_row_row_fp16fp16fp32(a: T.handle, b: T.handle, c: T.handle):
         ] = Accum[mma_accum_c_id]
 
 
-@tvm.testing.requires_cuda_compute_version(7)
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(7), reason="need cuda compute >= 7.0")
 def test_gemm_mma_m8n8k4_row_row_fp16fp16fp32():
     sch = tvm.s_tir.Schedule(gemm_mma_m8n8k4_row_row_fp16fp16fp32)
     cuda_mod = tvm.compile(sch.mod, target="cuda")
@@ -232,21 +237,21 @@ def test_gemm_mma_m8n8k4_row_row_fp16fp16fp32():
     B_np = np.random.uniform(-1, 1, [4, 16]).astype("float16")
     C_np = np.zeros([16, 16]).astype("float32")
 
-    ctx = tvm.cuda()
-    A_tvm = tvm.runtime.tensor(A_np, ctx)
-    B_tvm = tvm.runtime.tensor(B_np, ctx)
-    C_tvm = tvm.runtime.tensor(C_np, ctx)
-
-    cuda_mod(A_tvm, B_tvm, C_tvm)
-
     golden = np.matmul(A_np.astype("float32"), B_np.astype("float32"))
 
-    C_numpy = C_tvm.numpy()
+    def run_and_check():
+        ctx = tvm.cuda()
+        A_tvm = tvm.runtime.tensor(A_np, ctx)
+        B_tvm = tvm.runtime.tensor(B_np, ctx)
+        C_tvm = tvm.runtime.tensor(C_np, ctx)
+        cuda_mod(A_tvm, B_tvm, C_tvm)
+        C_numpy = C_tvm.numpy()
+        tvm.testing.assert_allclose(golden, C_numpy, atol=1e-3, rtol=1e-3)
 
-    tvm.testing.assert_allclose(golden, C_numpy, atol=1e-3, rtol=1e-3)
+    tvm.testing.run_with_gpu_lock(run_and_check)
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def gemm_mma_m8n8k16_row_col_s8s8s32(a: T.handle, b: T.handle, c: T.handle):
     T.func_attr({"global_symbol": "default_function", "tirx.noalias": True})
     A = T.match_buffer(a, [8, 16], dtype="int8")
@@ -269,7 +274,7 @@ def gemm_mma_m8n8k16_row_col_s8s8s32(a: T.handle, b: T.handle, c: T.handle):
     for mma_multi_b_col in T.vectorized(4):
         MultiB[mma_multi_b_col] = B[(tx % 32) // 4, mma_multi_b_col + (tx % 32) % 4 * 4]
     T.evaluate(
-        T.ptx_mma(
+        T.ptx_legacy.mma(
             "m8n8k16",
             "row",
             "col",
@@ -293,8 +298,9 @@ def gemm_mma_m8n8k16_row_col_s8s8s32(a: T.handle, b: T.handle, c: T.handle):
 # This test uses mma instructions that are not available on NVCC 10.1.
 # Failure occurs during the external call to nvcc, when attempting to
 # generate the .fatbin file.
-@tvm.testing.requires_nvcc_version(11)
-@tvm.testing.requires_cuda_compute_version(7, 5)
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_nvcc_version(11), reason="need nvcc >= 11")
+@pytest.mark.skipif(not env.has_cuda_compute(7, 5), reason="need cuda compute >= 7.5")
 def test_gemm_mma_m8n8k16_row_col_s8s8s32():
     sch = tvm.s_tir.Schedule(gemm_mma_m8n8k16_row_col_s8s8s32)
     cuda_mod = tvm.compile(sch.mod, target="cuda")
@@ -303,21 +309,21 @@ def test_gemm_mma_m8n8k16_row_col_s8s8s32():
     B_np = np.random.uniform(-10, 10, [8, 16]).astype("int8")
     C_np = np.zeros([8, 8]).astype("int32")
 
-    ctx = tvm.cuda()
-    A_tvm = tvm.runtime.tensor(A_np, ctx)
-    B_tvm = tvm.runtime.tensor(B_np, ctx)
-    C_tvm = tvm.runtime.tensor(C_np, ctx)
-
-    cuda_mod(A_tvm, B_tvm, C_tvm)
-
     golden = np.matmul(A_np.astype("int32"), B_np.astype("int32").T)
 
-    C_numpy = C_tvm.numpy()
+    def run_and_check():
+        ctx = tvm.cuda()
+        A_tvm = tvm.runtime.tensor(A_np, ctx)
+        B_tvm = tvm.runtime.tensor(B_np, ctx)
+        C_tvm = tvm.runtime.tensor(C_np, ctx)
+        cuda_mod(A_tvm, B_tvm, C_tvm)
+        C_numpy = C_tvm.numpy()
+        tvm.testing.assert_allclose(golden, C_numpy, atol=1e-3, rtol=1e-3)
 
-    tvm.testing.assert_allclose(golden, C_numpy, atol=1e-3, rtol=1e-3)
+    tvm.testing.run_with_gpu_lock(run_and_check)
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def gemm_mma_m8n8k16_row_col_s8u8s32(a: T.handle, b: T.handle, c: T.handle):
     T.func_attr({"global_symbol": "default_function", "tirx.noalias": True})
     A = T.match_buffer(a, [8, 16], dtype="int8")
@@ -340,7 +346,7 @@ def gemm_mma_m8n8k16_row_col_s8u8s32(a: T.handle, b: T.handle, c: T.handle):
     for mma_multi_b_col in T.vectorized(4):
         MultiB[mma_multi_b_col] = B[(tx % 32) // 4, mma_multi_b_col + (tx % 32) % 4 * 4]
     T.evaluate(
-        T.ptx_mma(
+        T.ptx_legacy.mma(
             "m8n8k16",
             "row",
             "col",
@@ -364,8 +370,9 @@ def gemm_mma_m8n8k16_row_col_s8u8s32(a: T.handle, b: T.handle, c: T.handle):
 # This test uses mma instructions that are not available on NVCC 10.1.
 # Failure occurs during the external call to nvcc, when attempting to
 # generate the .fatbin file.
-@tvm.testing.requires_nvcc_version(11)
-@tvm.testing.requires_cuda_compute_version(7, 5)
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_nvcc_version(11), reason="need nvcc >= 11")
+@pytest.mark.skipif(not env.has_cuda_compute(7, 5), reason="need cuda compute >= 7.5")
 def test_gemm_mma_m8n8k16_row_col_s8u8s32():
     sch = tvm.s_tir.Schedule(gemm_mma_m8n8k16_row_col_s8u8s32)
     cuda_mod = tvm.compile(sch.mod, target="cuda")
@@ -374,21 +381,21 @@ def test_gemm_mma_m8n8k16_row_col_s8u8s32():
     B_np = np.random.uniform(-10, 10, [8, 16]).astype("uint8")
     C_np = np.zeros([8, 8]).astype("int32")
 
-    ctx = tvm.cuda()
-    A_tvm = tvm.runtime.tensor(A_np, ctx)
-    B_tvm = tvm.runtime.tensor(B_np, ctx)
-    C_tvm = tvm.runtime.tensor(C_np, ctx)
-
-    cuda_mod(A_tvm, B_tvm, C_tvm)
-
     golden = np.matmul(A_np.astype("int32"), B_np.astype("int32").T)
 
-    C_numpy = C_tvm.numpy()
+    def run_and_check():
+        ctx = tvm.cuda()
+        A_tvm = tvm.runtime.tensor(A_np, ctx)
+        B_tvm = tvm.runtime.tensor(B_np, ctx)
+        C_tvm = tvm.runtime.tensor(C_np, ctx)
+        cuda_mod(A_tvm, B_tvm, C_tvm)
+        C_numpy = C_tvm.numpy()
+        tvm.testing.assert_allclose(golden, C_numpy, atol=1e-3, rtol=1e-3)
 
-    tvm.testing.assert_allclose(golden, C_numpy, atol=1e-3, rtol=1e-3)
+    tvm.testing.run_with_gpu_lock(run_and_check)
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def gemm_mma_m8n8k32_row_col_s4s4s32(a: T.handle, b: T.handle, c: T.handle):
     T.func_attr({"global_symbol": "default_function", "tirx.noalias": True})
     A = T.match_buffer(a, [8, 32], dtype="int4")
@@ -411,7 +418,7 @@ def gemm_mma_m8n8k32_row_col_s4s4s32(a: T.handle, b: T.handle, c: T.handle):
     for mma_multi_b_col in T.vectorized(8):
         MultiB[mma_multi_b_col] = B[(tx % 32) // 4, mma_multi_b_col + (tx % 32) % 4 * 8]
     T.evaluate(
-        T.ptx_mma(
+        T.ptx_legacy.mma(
             "m8n8k32",
             "row",
             "col",
@@ -435,23 +442,26 @@ def gemm_mma_m8n8k32_row_col_s4s4s32(a: T.handle, b: T.handle, c: T.handle):
 # This test uses mma instructions that are not available on NVCC 10.1.
 # Failure occurs during the external call to nvcc, when attempting to
 # generate the .fatbin file.
-@tvm.testing.requires_nvcc_version(11)
-@tvm.testing.requires_cuda_compute_version(7, 5)
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_nvcc_version(11), reason="need nvcc >= 11")
+@pytest.mark.skipif(not env.has_cuda_compute(7, 5), reason="need cuda compute >= 7.5")
 def test_gemm_mma_m8n8k32_row_col_s4s4s32():
     sch = tvm.s_tir.Schedule(gemm_mma_m8n8k32_row_col_s4s4s32)
     cuda_mod = tvm.compile(sch.mod, target="cuda")
 
-    ctx = tvm.cuda()
-    A_tvm = tvm.runtime.empty([8, 32], "int4", ctx)
-    B_tvm = tvm.runtime.empty([8, 32], "int4", ctx)
-    C_tvm = tvm.runtime.empty([8, 8], "int32", ctx)
+    def run_and_check():
+        ctx = tvm.cuda()
+        A_tvm = tvm.runtime.empty([8, 32], "int4", ctx)
+        B_tvm = tvm.runtime.empty([8, 32], "int4", ctx)
+        C_tvm = tvm.runtime.empty([8, 8], "int32", ctx)
+        cuda_mod(A_tvm, B_tvm, C_tvm)
 
-    cuda_mod(A_tvm, B_tvm, C_tvm)
+    tvm.testing.run_with_gpu_lock(run_and_check)
     # Currently the correctness is not checked.
     # TODO: add correctness checking here.
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def gemm_mma_m8n8k32_row_col_s4u4s32(a: T.handle, b: T.handle, c: T.handle):
     T.func_attr({"global_symbol": "default_function", "tirx.noalias": True})
     A = T.match_buffer(a, [8, 32], dtype="int4")
@@ -474,7 +484,7 @@ def gemm_mma_m8n8k32_row_col_s4u4s32(a: T.handle, b: T.handle, c: T.handle):
     for mma_multi_b_col in T.vectorized(8):
         MultiB[mma_multi_b_col] = B[(tx % 32) // 4, mma_multi_b_col + (tx % 32) % 4 * 8]
     T.evaluate(
-        T.ptx_mma(
+        T.ptx_legacy.mma(
             "m8n8k32",
             "row",
             "col",
@@ -498,23 +508,26 @@ def gemm_mma_m8n8k32_row_col_s4u4s32(a: T.handle, b: T.handle, c: T.handle):
 # This test uses mma instructions that are not available on NVCC 10.1.
 # Failure occurs during the external call to nvcc, when attempting to
 # generate the .fatbin file.
-@tvm.testing.requires_nvcc_version(11)
-@tvm.testing.requires_cuda_compute_version(7, 5)
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_nvcc_version(11), reason="need nvcc >= 11")
+@pytest.mark.skipif(not env.has_cuda_compute(7, 5), reason="need cuda compute >= 7.5")
 def test_gemm_mma_m8n8k32_row_col_s4u4s32():
     sch = tvm.s_tir.Schedule(gemm_mma_m8n8k32_row_col_s4u4s32)
     cuda_mod = tvm.compile(sch.mod, target="cuda")
 
-    ctx = tvm.cuda()
-    A_tvm = tvm.runtime.empty([8, 32], "int4", ctx)
-    B_tvm = tvm.runtime.empty([8, 32], "uint4", ctx)
-    C_tvm = tvm.runtime.empty([8, 8], "int32", ctx)
+    def run_and_check():
+        ctx = tvm.cuda()
+        A_tvm = tvm.runtime.empty([8, 32], "int4", ctx)
+        B_tvm = tvm.runtime.empty([8, 32], "uint4", ctx)
+        C_tvm = tvm.runtime.empty([8, 8], "int32", ctx)
+        cuda_mod(A_tvm, B_tvm, C_tvm)
 
-    cuda_mod(A_tvm, B_tvm, C_tvm)
+    tvm.testing.run_with_gpu_lock(run_and_check)
     # Currently the correctness is not checked.
     # TODO: add correctness checking here.
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def gemm_mma_m16n8k8_row_col_fp16fp16fp32(a: T.handle, b: T.handle, c: T.handle):
     T.func_attr({"global_symbol": "default_function", "tirx.noalias": True})
     A = T.match_buffer(a, [16, 8], dtype="float16")
@@ -541,13 +554,13 @@ def gemm_mma_m16n8k8_row_col_fp16fp16fp32(a: T.handle, b: T.handle, c: T.handle)
             (tx % 32) // 4 + mma_multi_b_col // 2 * 8, (tx % 32) % 4 * 2 + mma_multi_b_col % 2
         ]
     T.evaluate(
-        T.ptx_mma(
+        T.ptx_legacy.mma(
             "m16n8k8",
             "row",
             "col",
-            "fp16",
-            "fp16",
-            "fp32",
+            "float16",
+            "float16",
+            "float32",
             MultiA.data,
             0,
             MultiB.data,
@@ -564,7 +577,8 @@ def gemm_mma_m16n8k8_row_col_fp16fp16fp32(a: T.handle, b: T.handle, c: T.handle)
         ]
 
 
-@tvm.testing.requires_cuda_compute_version(8)
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(8), reason="need cuda compute >= 8.0")
 def test_gemm_mma_m16n8k8_row_col_fp16fp16fp32():
     sch = tvm.s_tir.Schedule(gemm_mma_m16n8k8_row_col_fp16fp16fp32)
     cuda_mod = tvm.compile(sch.mod, target="cuda")
@@ -573,21 +587,21 @@ def test_gemm_mma_m16n8k8_row_col_fp16fp16fp32():
     B_np = np.random.uniform(-1, 1, [8, 8]).astype("float16")
     C_np = np.zeros([16, 8]).astype("float32")
 
-    ctx = tvm.cuda()
-    A_tvm = tvm.runtime.tensor(A_np, ctx)
-    B_tvm = tvm.runtime.tensor(B_np, ctx)
-    C_tvm = tvm.runtime.tensor(C_np, ctx)
-
-    cuda_mod(A_tvm, B_tvm, C_tvm)
-
     golden = np.matmul(A_np.astype("float32"), B_np.astype("float32").T)
 
-    C_numpy = C_tvm.numpy()
+    def run_and_check():
+        ctx = tvm.cuda()
+        A_tvm = tvm.runtime.tensor(A_np, ctx)
+        B_tvm = tvm.runtime.tensor(B_np, ctx)
+        C_tvm = tvm.runtime.tensor(C_np, ctx)
+        cuda_mod(A_tvm, B_tvm, C_tvm)
+        C_numpy = C_tvm.numpy()
+        tvm.testing.assert_allclose(golden, C_numpy, atol=1e-3, rtol=1e-3)
 
-    tvm.testing.assert_allclose(golden, C_numpy, atol=1e-3, rtol=1e-3)
+    tvm.testing.run_with_gpu_lock(run_and_check)
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def gemm_mma_m16n8k16_row_col_fp16fp16fp16(a: T.handle, b: T.handle, c: T.handle):
     T.func_attr({"global_symbol": "default_function", "tirx.noalias": True})
     A = T.match_buffer(a, [16, 16], dtype="float16")
@@ -616,13 +630,13 @@ def gemm_mma_m16n8k16_row_col_fp16fp16fp16(a: T.handle, b: T.handle, c: T.handle
             (tx % 32) % 4 * 2 + mma_multi_b_col % 2 + mma_multi_b_col // 2 * 8,
         ]
     T.evaluate(
-        T.ptx_mma(
+        T.ptx_legacy.mma(
             "m16n8k16",
             "row",
             "col",
-            "fp16",
-            "fp16",
-            "fp16",
+            "float16",
+            "float16",
+            "float16",
             MultiA.data,
             0,
             MultiB.data,
@@ -640,7 +654,8 @@ def gemm_mma_m16n8k16_row_col_fp16fp16fp16(a: T.handle, b: T.handle, c: T.handle
         ] = Accum[mma_accum_c_id]
 
 
-@tvm.testing.requires_cuda_compute_version(8)
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(8), reason="need cuda compute >= 8.0")
 def test_gemm_mma_m16n8k16_row_col_fp16fp16fp16():
     sch = tvm.s_tir.Schedule(gemm_mma_m16n8k16_row_col_fp16fp16fp16)
     cuda_mod = tvm.compile(sch.mod, target="cuda")
@@ -649,21 +664,21 @@ def test_gemm_mma_m16n8k16_row_col_fp16fp16fp16():
     B_np = np.random.uniform(-1, 1, [8, 16]).astype("float16")
     C_np = np.zeros([16, 8]).astype("float16")
 
-    ctx = tvm.cuda()
-    A_tvm = tvm.runtime.tensor(A_np, ctx)
-    B_tvm = tvm.runtime.tensor(B_np, ctx)
-    C_tvm = tvm.runtime.tensor(C_np, ctx)
-
-    cuda_mod(A_tvm, B_tvm, C_tvm)
-
     golden = np.matmul(A_np.astype("float16"), B_np.astype("float16").T)
 
-    C_numpy = C_tvm.numpy()
+    def run_and_check():
+        ctx = tvm.cuda()
+        A_tvm = tvm.runtime.tensor(A_np, ctx)
+        B_tvm = tvm.runtime.tensor(B_np, ctx)
+        C_tvm = tvm.runtime.tensor(C_np, ctx)
+        cuda_mod(A_tvm, B_tvm, C_tvm)
+        C_numpy = C_tvm.numpy()
+        tvm.testing.assert_allclose(golden, C_numpy, atol=1e-3, rtol=1e-3)
 
-    tvm.testing.assert_allclose(golden, C_numpy, atol=1e-3, rtol=1e-3)
+    tvm.testing.run_with_gpu_lock(run_and_check)
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def gemm_mma_m16n8k16_row_col_fp16fp16fp32(a: T.handle, b: T.handle, c: T.handle):
     T.func_attr({"global_symbol": "default_function", "tirx.noalias": True})
     A = T.match_buffer(a, [16, 16], dtype="float16")
@@ -692,13 +707,13 @@ def gemm_mma_m16n8k16_row_col_fp16fp16fp32(a: T.handle, b: T.handle, c: T.handle
             (tx % 32) % 4 * 2 + mma_multi_b_col % 2 + mma_multi_b_col // 2 * 8,
         ]
     T.evaluate(
-        T.ptx_mma(
+        T.ptx_legacy.mma(
             "m16n8k16",
             "row",
             "col",
-            "fp16",
-            "fp16",
-            "fp32",
+            "float16",
+            "float16",
+            "float32",
             MultiA.data,
             0,
             MultiB.data,
@@ -716,7 +731,8 @@ def gemm_mma_m16n8k16_row_col_fp16fp16fp32(a: T.handle, b: T.handle, c: T.handle
         ] = Accum[mma_accum_c_id]
 
 
-@tvm.testing.requires_cuda_compute_version(8)
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(8), reason="need cuda compute >= 8.0")
 def test_gemm_mma_m16n8k16_row_col_fp16fp16fp32():
     sch = tvm.s_tir.Schedule(gemm_mma_m16n8k16_row_col_fp16fp16fp32)
     cuda_mod = tvm.compile(sch.mod, target="cuda")
@@ -725,21 +741,21 @@ def test_gemm_mma_m16n8k16_row_col_fp16fp16fp32():
     B_np = np.random.uniform(-1, 1, [8, 16]).astype("float16")
     C_np = np.zeros([16, 8]).astype("float32")
 
-    ctx = tvm.cuda()
-    A_tvm = tvm.runtime.tensor(A_np, ctx)
-    B_tvm = tvm.runtime.tensor(B_np, ctx)
-    C_tvm = tvm.runtime.tensor(C_np, ctx)
-
-    cuda_mod(A_tvm, B_tvm, C_tvm)
-
     golden = np.matmul(A_np.astype("float32"), B_np.astype("float32").T)
 
-    C_numpy = C_tvm.numpy()
+    def run_and_check():
+        ctx = tvm.cuda()
+        A_tvm = tvm.runtime.tensor(A_np, ctx)
+        B_tvm = tvm.runtime.tensor(B_np, ctx)
+        C_tvm = tvm.runtime.tensor(C_np, ctx)
+        cuda_mod(A_tvm, B_tvm, C_tvm)
+        C_numpy = C_tvm.numpy()
+        tvm.testing.assert_allclose(golden, C_numpy, atol=1e-3, rtol=1e-3)
 
-    tvm.testing.assert_allclose(golden, C_numpy, atol=1e-3, rtol=1e-3)
+    tvm.testing.run_with_gpu_lock(run_and_check)
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def gemm_mma_m16n8k16_row_col_s8s8s32(a: T.handle, b: T.handle, c: T.handle):
     T.func_attr({"global_symbol": "default_function", "tirx.noalias": True})
     A = T.match_buffer(a, [16, 16], dtype="int8")
@@ -768,7 +784,7 @@ def gemm_mma_m16n8k16_row_col_s8s8s32(a: T.handle, b: T.handle, c: T.handle):
             (tx % 32) % 4 * 4 + mma_multi_b_col,
         ]
     T.evaluate(
-        T.ptx_mma(
+        T.ptx_legacy.mma(
             "m16n8k16",
             "row",
             "col",
@@ -792,7 +808,8 @@ def gemm_mma_m16n8k16_row_col_s8s8s32(a: T.handle, b: T.handle, c: T.handle):
         ] = Accum[mma_accum_c_id]
 
 
-@tvm.testing.requires_cuda_compute_version(8)
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(8), reason="need cuda compute >= 8.0")
 def test_gemm_mma_m16n8k16_row_col_s8s8s32():
     sch = tvm.s_tir.Schedule(gemm_mma_m16n8k16_row_col_s8s8s32)
     cuda_mod = tvm.compile(sch.mod, target="cuda")
@@ -801,21 +818,21 @@ def test_gemm_mma_m16n8k16_row_col_s8s8s32():
     B_np = np.random.uniform(-10, 10, [8, 16]).astype("int8")
     C_np = np.zeros([16, 8]).astype("int32")
 
-    ctx = tvm.cuda()
-    A_tvm = tvm.runtime.tensor(A_np, ctx)
-    B_tvm = tvm.runtime.tensor(B_np, ctx)
-    C_tvm = tvm.runtime.tensor(C_np, ctx)
-
-    cuda_mod(A_tvm, B_tvm, C_tvm)
-
     golden = np.matmul(A_np.astype("int32"), B_np.astype("int32").T)
 
-    C_numpy = C_tvm.numpy()
+    def run_and_check():
+        ctx = tvm.cuda()
+        A_tvm = tvm.runtime.tensor(A_np, ctx)
+        B_tvm = tvm.runtime.tensor(B_np, ctx)
+        C_tvm = tvm.runtime.tensor(C_np, ctx)
+        cuda_mod(A_tvm, B_tvm, C_tvm)
+        C_numpy = C_tvm.numpy()
+        tvm.testing.assert_allclose(golden, C_numpy, atol=1e-3, rtol=1e-3)
 
-    tvm.testing.assert_allclose(golden, C_numpy, atol=1e-3, rtol=1e-3)
+    tvm.testing.run_with_gpu_lock(run_and_check)
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def gemm_mma_m16n8k16_row_col_s8u8s32(a: T.handle, b: T.handle, c: T.handle):
     T.func_attr({"global_symbol": "default_function", "tirx.noalias": True})
     A = T.match_buffer(a, [16, 16], dtype="int8")
@@ -844,7 +861,7 @@ def gemm_mma_m16n8k16_row_col_s8u8s32(a: T.handle, b: T.handle, c: T.handle):
             (tx % 32) % 4 * 4 + mma_multi_b_col,
         ]
     T.evaluate(
-        T.ptx_mma(
+        T.ptx_legacy.mma(
             "m16n8k16",
             "row",
             "col",
@@ -868,7 +885,8 @@ def gemm_mma_m16n8k16_row_col_s8u8s32(a: T.handle, b: T.handle, c: T.handle):
         ] = Accum[mma_accum_c_id]
 
 
-@tvm.testing.requires_cuda_compute_version(8)
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(8), reason="need cuda compute >= 8.0")
 def test_gemm_mma_m16n8k16_row_col_s8u8s32():
     sch = tvm.s_tir.Schedule(gemm_mma_m16n8k16_row_col_s8u8s32)
     cuda_mod = tvm.compile(sch.mod, target="cuda")
@@ -877,21 +895,21 @@ def test_gemm_mma_m16n8k16_row_col_s8u8s32():
     B_np = np.random.uniform(-10, 10, [8, 16]).astype("uint8")
     C_np = np.zeros([16, 8]).astype("int32")
 
-    ctx = tvm.cuda()
-    A_tvm = tvm.runtime.tensor(A_np, ctx)
-    B_tvm = tvm.runtime.tensor(B_np, ctx)
-    C_tvm = tvm.runtime.tensor(C_np, ctx)
-
-    cuda_mod(A_tvm, B_tvm, C_tvm)
-
     golden = np.matmul(A_np.astype("int32"), B_np.astype("int32").T)
 
-    C_numpy = C_tvm.numpy()
+    def run_and_check():
+        ctx = tvm.cuda()
+        A_tvm = tvm.runtime.tensor(A_np, ctx)
+        B_tvm = tvm.runtime.tensor(B_np, ctx)
+        C_tvm = tvm.runtime.tensor(C_np, ctx)
+        cuda_mod(A_tvm, B_tvm, C_tvm)
+        C_numpy = C_tvm.numpy()
+        tvm.testing.assert_allclose(golden, C_numpy, atol=1e-3, rtol=1e-3)
 
-    tvm.testing.assert_allclose(golden, C_numpy, atol=1e-3, rtol=1e-3)
+    tvm.testing.run_with_gpu_lock(run_and_check)
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def gemm_mma_m16n8k32_row_col_s8s8s32(a: T.handle, b: T.handle, c: T.handle):
     T.func_attr({"global_symbol": "default_function", "tirx.noalias": True})
     A = T.match_buffer(a, [16, 32], dtype="int8")
@@ -920,7 +938,7 @@ def gemm_mma_m16n8k32_row_col_s8s8s32(a: T.handle, b: T.handle, c: T.handle):
             (tx % 32) % 4 * 4 + mma_multi_b_col % 4 + mma_multi_b_col // 4 * 16,
         ]
     T.evaluate(
-        T.ptx_mma(
+        T.ptx_legacy.mma(
             "m16n8k32",
             "row",
             "col",
@@ -944,7 +962,8 @@ def gemm_mma_m16n8k32_row_col_s8s8s32(a: T.handle, b: T.handle, c: T.handle):
         ] = Accum[mma_accum_c_id]
 
 
-@tvm.testing.requires_cuda_compute_version(8)
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(8), reason="need cuda compute >= 8.0")
 def test_gemm_mma_m16n8k32_row_col_s8s8s32():
     sch = tvm.s_tir.Schedule(gemm_mma_m16n8k32_row_col_s8s8s32)
     cuda_mod = tvm.compile(sch.mod, target="cuda")
@@ -953,21 +972,21 @@ def test_gemm_mma_m16n8k32_row_col_s8s8s32():
     B_np = np.random.uniform(-10, 10, [8, 32]).astype("int8")
     C_np = np.zeros([16, 8]).astype("int32")
 
-    ctx = tvm.cuda()
-    A_tvm = tvm.runtime.tensor(A_np, ctx)
-    B_tvm = tvm.runtime.tensor(B_np, ctx)
-    C_tvm = tvm.runtime.tensor(C_np, ctx)
-
-    cuda_mod(A_tvm, B_tvm, C_tvm)
-
     golden = np.matmul(A_np.astype("int32"), B_np.astype("int32").T)
 
-    C_numpy = C_tvm.numpy()
+    def run_and_check():
+        ctx = tvm.cuda()
+        A_tvm = tvm.runtime.tensor(A_np, ctx)
+        B_tvm = tvm.runtime.tensor(B_np, ctx)
+        C_tvm = tvm.runtime.tensor(C_np, ctx)
+        cuda_mod(A_tvm, B_tvm, C_tvm)
+        C_numpy = C_tvm.numpy()
+        tvm.testing.assert_allclose(golden, C_numpy, atol=1e-3, rtol=1e-3)
 
-    tvm.testing.assert_allclose(golden, C_numpy, atol=1e-3, rtol=1e-3)
+    tvm.testing.run_with_gpu_lock(run_and_check)
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def gemm_mma_m16n8k32_row_col_s8u8s32(a: T.handle, b: T.handle, c: T.handle):
     T.func_attr({"global_symbol": "default_function", "tirx.noalias": True})
     A = T.match_buffer(a, [16, 32], dtype="int8")
@@ -996,7 +1015,7 @@ def gemm_mma_m16n8k32_row_col_s8u8s32(a: T.handle, b: T.handle, c: T.handle):
             (tx % 32) % 4 * 4 + mma_multi_b_col % 4 + mma_multi_b_col // 4 * 16,
         ]
     T.evaluate(
-        T.ptx_mma(
+        T.ptx_legacy.mma(
             "m16n8k32",
             "row",
             "col",
@@ -1020,7 +1039,8 @@ def gemm_mma_m16n8k32_row_col_s8u8s32(a: T.handle, b: T.handle, c: T.handle):
         ] = Accum[mma_accum_c_id]
 
 
-@tvm.testing.requires_cuda_compute_version(8)
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(8), reason="need cuda compute >= 8.0")
 def test_gemm_mma_m16n8k32_row_col_s8u8s32():
     sch = tvm.s_tir.Schedule(gemm_mma_m16n8k32_row_col_s8u8s32)
     cuda_mod = tvm.compile(sch.mod, target="cuda")
@@ -1029,21 +1049,21 @@ def test_gemm_mma_m16n8k32_row_col_s8u8s32():
     B_np = np.random.uniform(-10, 10, [8, 32]).astype("uint8")
     C_np = np.zeros([16, 8]).astype("int32")
 
-    ctx = tvm.cuda()
-    A_tvm = tvm.runtime.tensor(A_np, ctx)
-    B_tvm = tvm.runtime.tensor(B_np, ctx)
-    C_tvm = tvm.runtime.tensor(C_np, ctx)
-
-    cuda_mod(A_tvm, B_tvm, C_tvm)
-
     golden = np.matmul(A_np.astype("int32"), B_np.astype("int32").T)
 
-    C_numpy = C_tvm.numpy()
+    def run_and_check():
+        ctx = tvm.cuda()
+        A_tvm = tvm.runtime.tensor(A_np, ctx)
+        B_tvm = tvm.runtime.tensor(B_np, ctx)
+        C_tvm = tvm.runtime.tensor(C_np, ctx)
+        cuda_mod(A_tvm, B_tvm, C_tvm)
+        C_numpy = C_tvm.numpy()
+        tvm.testing.assert_allclose(golden, C_numpy, atol=1e-3, rtol=1e-3)
 
-    tvm.testing.assert_allclose(golden, C_numpy, atol=1e-3, rtol=1e-3)
+    tvm.testing.run_with_gpu_lock(run_and_check)
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def gemm_mma_m16n8k64_row_col_s4s4s32(a: T.handle, b: T.handle, c: T.handle):
     T.func_attr({"global_symbol": "default_function", "tirx.noalias": True})
     A = T.match_buffer(a, [16, 64], dtype="int4")
@@ -1072,7 +1092,7 @@ def gemm_mma_m16n8k64_row_col_s4s4s32(a: T.handle, b: T.handle, c: T.handle):
             (tx % 32) % 4 * 8 + mma_multi_b_col % 8 + mma_multi_b_col // 8 * 32,
         ]
     T.evaluate(
-        T.ptx_mma(
+        T.ptx_legacy.mma(
             "m8n8k32",
             "row",
             "col",
@@ -1096,22 +1116,25 @@ def gemm_mma_m16n8k64_row_col_s4s4s32(a: T.handle, b: T.handle, c: T.handle):
         ] = Accum[mma_accum_c_id]
 
 
-@tvm.testing.requires_cuda_compute_version(8)
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(8), reason="need cuda compute >= 8.0")
 def test_gemm_mma_m16n8k64_row_col_s4s4s32():
     sch = tvm.s_tir.Schedule(gemm_mma_m16n8k64_row_col_s4s4s32)
     cuda_mod = tvm.compile(sch.mod, target="cuda")
 
-    ctx = tvm.cuda()
-    A_tvm = tvm.runtime.empty([16, 64], "int4", ctx)
-    B_tvm = tvm.runtime.empty([8, 64], "int4", ctx)
-    C_tvm = tvm.runtime.empty([16, 8], "int32", ctx)
+    def run_and_check():
+        ctx = tvm.cuda()
+        A_tvm = tvm.runtime.empty([16, 64], "int4", ctx)
+        B_tvm = tvm.runtime.empty([8, 64], "int4", ctx)
+        C_tvm = tvm.runtime.empty([16, 8], "int32", ctx)
+        cuda_mod(A_tvm, B_tvm, C_tvm)
 
-    cuda_mod(A_tvm, B_tvm, C_tvm)
+    tvm.testing.run_with_gpu_lock(run_and_check)
     # Currently the correctness is not checked.
     # TODO: add correctness checking here.
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def gemm_mma_m16n8k64_row_col_s4u4s32(a: T.handle, b: T.handle, c: T.handle):
     T.func_attr({"global_symbol": "default_function", "tirx.noalias": True})
     A = T.match_buffer(a, [16, 64], dtype="int4")
@@ -1140,7 +1163,7 @@ def gemm_mma_m16n8k64_row_col_s4u4s32(a: T.handle, b: T.handle, c: T.handle):
             (tx % 32) % 4 * 8 + mma_multi_b_col % 8 + mma_multi_b_col // 8 * 32,
         ]
     T.evaluate(
-        T.ptx_mma(
+        T.ptx_legacy.mma(
             "m8n8k32",
             "row",
             "col",
@@ -1164,22 +1187,25 @@ def gemm_mma_m16n8k64_row_col_s4u4s32(a: T.handle, b: T.handle, c: T.handle):
         ] = Accum[mma_accum_c_id]
 
 
-@tvm.testing.requires_cuda_compute_version(8)
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(8), reason="need cuda compute >= 8.0")
 def test_gemm_mma_m16n8k64_row_col_s4u4s32():
     sch = tvm.s_tir.Schedule(gemm_mma_m16n8k64_row_col_s4u4s32)
     cuda_mod = tvm.compile(sch.mod, target="cuda")
 
-    ctx = tvm.cuda()
-    A_tvm = tvm.runtime.empty([16, 64], "int4", ctx)
-    B_tvm = tvm.runtime.empty([8, 64], "uint4", ctx)
-    C_tvm = tvm.runtime.empty([16, 8], "int32", ctx)
+    def run_and_check():
+        ctx = tvm.cuda()
+        A_tvm = tvm.runtime.empty([16, 64], "int4", ctx)
+        B_tvm = tvm.runtime.empty([8, 64], "uint4", ctx)
+        C_tvm = tvm.runtime.empty([16, 8], "int32", ctx)
+        cuda_mod(A_tvm, B_tvm, C_tvm)
 
-    cuda_mod(A_tvm, B_tvm, C_tvm)
+    tvm.testing.run_with_gpu_lock(run_and_check)
     # Currently the correctness is not checked.
     # TODO: add correctness checking here.
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def gemm_mma_m16n8k256_row_col_b1b1s32(a: T.handle, b: T.handle, c: T.handle):
     T.func_attr({"global_symbol": "default_function", "tirx.noalias": True})
     A = T.match_buffer(a, [16, 256], dtype="int1")
@@ -1208,7 +1234,7 @@ def gemm_mma_m16n8k256_row_col_b1b1s32(a: T.handle, b: T.handle, c: T.handle):
             (tx % 32) % 4 * 32 + mma_multi_b_col % 32 + mma_multi_b_col // 32 * 128,
         ]
     T.evaluate(
-        T.ptx_mma(
+        T.ptx_legacy.mma(
             "m16n8k256",
             "row",
             "col",
@@ -1233,17 +1259,20 @@ def gemm_mma_m16n8k256_row_col_b1b1s32(a: T.handle, b: T.handle, c: T.handle):
         ] = Accum[mma_accum_c_id]
 
 
-@tvm.testing.requires_cuda_compute_version(8)
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda_compute(8), reason="need cuda compute >= 8.0")
 def test_gemm_mma_m16n8k256_row_col_b1b1s32():
     sch = tvm.s_tir.Schedule(gemm_mma_m16n8k256_row_col_b1b1s32)
     cuda_mod = tvm.compile(sch.mod, target="cuda")
 
-    ctx = tvm.cuda()
-    A_tvm = tvm.runtime.empty([16, 256], "int1", ctx)
-    B_tvm = tvm.runtime.empty([8, 256], "int1", ctx)
-    C_tvm = tvm.runtime.empty([16, 8], "int32", ctx)
+    def run_and_check():
+        ctx = tvm.cuda()
+        A_tvm = tvm.runtime.empty([16, 256], "int1", ctx)
+        B_tvm = tvm.runtime.empty([8, 256], "int1", ctx)
+        C_tvm = tvm.runtime.empty([16, 8], "int32", ctx)
+        cuda_mod(A_tvm, B_tvm, C_tvm)
 
-    cuda_mod(A_tvm, B_tvm, C_tvm)
+    tvm.testing.run_with_gpu_lock(run_and_check)
     # Currently the correctness is not checked.
     # TODO: add correctness checking here.
 

@@ -135,6 +135,15 @@ def _causal_mask(causal, row, col, kv_len, qo_len):
     )
 
 
+def _causal_or_sliding_cross_mask(causal, row, col, kv_len, qo_len, sliding_window_size):
+    visible_past = T.max(sliding_window_size - row - 1, 0)
+    return T.if_then_else(
+        tirx.And(causal > 0, sliding_window_size > 0),
+        tirx.And(col < kv_len, col >= T.max(kv_len - visible_past, 0)),
+        _causal_mask(causal, row, col, kv_len, qo_len),
+    )
+
+
 def _declare_length_info(var_length_info, batch_size, sliding_window, elem_offset):
     return (
         T.match_buffer(var_length_info, (3, batch_size), "int32", elem_offset=elem_offset)
@@ -215,7 +224,7 @@ def _make_prefill_macros(tile_x, tile_y, tile_z, tile_o, bdx, num_warps, group_s
         m_smem: T.Buffer, d_smem: T.Buffer, O_local: T.Buffer, ty: T.int32, tx: T.int32,
     ):
         for i in T.serial(T.ceildiv(tile_x, bdx * num_warps)):
-            row: T.int32 = i * bdx * num_warps + ty * bdx + tx
+            row: T.let[T.int32] = i * bdx * num_warps + ty * bdx + tx
             if row < tile_x:
                 m_smem[row] = -5e4
                 d_smem[row] = 1.0
@@ -248,35 +257,35 @@ def _make_prefill_macros(tile_x, tile_y, tile_z, tile_o, bdx, num_warps, group_s
         S_smem: T.Buffer, m_smem: T.Buffer, d_smem: T.Buffer, m_prev_smem: T.Buffer,
         m_new: T.Buffer, m_prev: T.Buffer, d_new: T.Buffer,
         ty: T.int32, tx: T.int32, LH_start: T.int32, L_kv_start: T.int32,
-        causal: T.int32, kv_len: T.int32, qo_len: T.int32,
+        causal: T.int32, kv_len: T.int32, qo_len: T.int32, sliding_window_size: T.int32,
     ):
         # Phase 1: compute m_new = max(masked S over kv tile), d_new = d_prev * exp2(m_prev - m_new)
         for i in T.serial(T.ceildiv(tile_x, bdx * num_warps)):
-            row: T.int32 = i * bdx * num_warps + ty * bdx + tx
+            row: T.let[T.int32] = i * bdx * num_warps + ty * bdx + tx
             if row < tile_x:
                 with T.sblock("update1"):
                     m_prev[i] = m_smem[row]
                     m_new[i] = m_smem[row]
-                    row_: T.int32 = (LH_start + row) // group_size
+                    row_: T.let[T.int32] = (LH_start + row) // group_size
                     for j in T.serial(tile_z):
-                        if _causal_mask(causal, row=row_, col=L_kv_start + j, kv_len=kv_len, qo_len=qo_len):
+                        if _causal_or_sliding_cross_mask(causal, row=row_, col=L_kv_start + j, kv_len=kv_len, qo_len=qo_len, sliding_window_size=sliding_window_size):
                             m_new[i] = T.max(m_new[i], S_smem[row, j])
                     d_new[i] = d_smem[row] * T.exp2(m_prev[i] - m_new[i])
         # Phase 2: exp-and-scale S_smem; masked-out entries use -inf
         for i in T.serial(T.ceildiv(tile_x, bdx * num_warps)):
-            row: T.int32 = i * bdx * num_warps + ty * bdx + tx
+            row: T.let[T.int32] = i * bdx * num_warps + ty * bdx + tx
             with T.sblock("update"):
                 for j in T.serial(tile_z):
                     # predicate sits inside loop so sync stays outside conditional branches
                     if row < tile_x:
-                        row_: T.int32 = (LH_start + row) // group_size
-                        if _causal_mask(causal, row=row_, col=L_kv_start + j, kv_len=kv_len, qo_len=qo_len):
+                        row_: T.let[T.int32] = (LH_start + row) // group_size
+                        if _causal_or_sliding_cross_mask(causal, row=row_, col=L_kv_start + j, kv_len=kv_len, qo_len=qo_len, sliding_window_size=sliding_window_size):
                             S_smem[row, j] = T.exp2(S_smem[row, j] - m_new[i])
                         else:
                             S_smem[row, j] = T.exp2(-5e4 - m_new[i])
         # Phase 3: d_new += sum(S_smem[row, :]); write m/d/m_prev back to smem
         for i in T.serial(T.ceildiv(tile_x, bdx * num_warps)):
-            row: T.int32 = i * bdx * num_warps + ty * bdx + tx
+            row: T.let[T.int32] = i * bdx * num_warps + ty * bdx + tx
             if row < tile_x:
                 with T.sblock("update"):
                     for j in T.serial(tile_z):
@@ -312,15 +321,15 @@ def _make_prefill_macros(tile_x, tile_y, tile_z, tile_o, bdx, num_warps, group_s
         for li, lj in T.grid(tile_x, tile_o):
             with T.sblock("O_store"):
                 i, j = T.axis.remap("SS", [li, lj])
-                cur_L: T.int32 = q_indptr[b_idx] + (LH_start + i) // group_size
-                cur_H_qo: T.int32 = by * group_size + (LH_start + i) % group_size
+                cur_L: T.let[T.int32] = q_indptr[b_idx] + (LH_start + i) // group_size
+                cur_H_qo: T.let[T.int32] = by * group_size + (LH_start + i) % group_size
                 if cur_L < q_indptr[b_idx + 1]:
                     output[cur_L, cur_H_qo, j] = O_local[i, j] / d_smem[i]
         for li in T.grid(tile_x):
             with T.sblock("lse_store"):
                 i = T.axis.remap("S", [li])
-                cur_L: T.int32 = q_indptr[b_idx] + (LH_start + i) // group_size
-                cur_H_qo: T.int32 = by * group_size + (LH_start + i) % group_size
+                cur_L: T.let[T.int32] = q_indptr[b_idx] + (LH_start + i) // group_size
+                cur_H_qo: T.let[T.int32] = by * group_size + (LH_start + i) % group_size
                 if cur_L < q_indptr[b_idx + 1]:
                     lse[cur_L, cur_H_qo] = m_smem[i] + T.log2(d_smem[i])
 
@@ -338,7 +347,7 @@ def _make_prefill_macros(tile_x, tile_y, tile_z, tile_o, bdx, num_warps, group_s
             tile_id[0] -= batch_tiles[0]
             batch_idx[0] += 1
             if batch_idx[0] < batch_size:
-                b_idx: T.int32 = batch_idx[0]
+                b_idx: T.let[T.int32] = batch_idx[0]
                 batch_rows[0] = (q_indptr[b_idx + 1] - q_indptr[b_idx]) * group_size
                 batch_tiles[0] = T.ceildiv(batch_rows[0], tile_x)
 
@@ -347,33 +356,33 @@ def _make_prefill_macros(tile_x, tile_y, tile_z, tile_o, bdx, num_warps, group_s
         S_smem: T.Buffer, m_smem: T.Buffer, d_smem: T.Buffer, m_prev_smem: T.Buffer,
         m_new: T.Buffer, m_prev: T.Buffer, d_new: T.Buffer,
         ty: T.int32, tx: T.int32, LH_start: T.int32, L_kv_start: T.int32,
-        valid_len: T.int32, qo_len: T.int32,
+        valid_len: T.int32, qo_len: T.int32, kv_len: T.int32,
     ):
         # Same three-phase online softmax as softmax_update_causal but with a
         # per-batch right-padding mask in place of causal masking.
         for i in T.serial(T.ceildiv(tile_x, bdx * num_warps)):
-            row: T.int32 = i * bdx * num_warps + ty * bdx + tx
+            row: T.let[T.int32] = i * bdx * num_warps + ty * bdx + tx
             if row < tile_x:
                 with T.sblock("update1"):
                     m_prev[i] = m_smem[row]
                     m_new[i] = m_smem[row]
-                    row_: T.int32 = (LH_start + row) // group_size
+                    row_: T.let[T.int32] = (LH_start + row) // group_size
                     for j in T.serial(tile_z):
                         if tirx.And(tirx.And(row_ < qo_len, row_ < valid_len), L_kv_start + j < valid_len):
                             m_new[i] = T.max(m_new[i], S_smem[row, j])
                     d_new[i] = d_smem[row] * T.exp2(m_prev[i] - m_new[i])
         for i in T.serial(T.ceildiv(tile_x, bdx * num_warps)):
-            row: T.int32 = i * bdx * num_warps + ty * bdx + tx
+            row: T.let[T.int32] = i * bdx * num_warps + ty * bdx + tx
             with T.sblock("update"):
                 for j in T.serial(tile_z):
                     if row < tile_x:
-                        row_: T.int32 = (LH_start + row) // group_size
+                        row_: T.let[T.int32] = (LH_start + row) // group_size
                         if tirx.And(tirx.And(row_ < qo_len, row_ < valid_len), L_kv_start + j < valid_len):
                             S_smem[row, j] = T.exp2(S_smem[row, j] - m_new[i])
                         else:
                             S_smem[row, j] = T.exp2(-5e4 - m_new[i])
         for i in T.serial(T.ceildiv(tile_x, bdx * num_warps)):
-            row: T.int32 = i * bdx * num_warps + ty * bdx + tx
+            row: T.let[T.int32] = i * bdx * num_warps + ty * bdx + tx
             if row < tile_x:
                 with T.sblock("update"):
                     for j in T.serial(tile_z):
@@ -383,7 +392,56 @@ def _make_prefill_macros(tile_x, tile_y, tile_z, tile_o, bdx, num_warps, group_s
                     m_prev_smem[row] = m_prev[i]
         T.tvm_storage_sync("shared")
 
-    return init_states, compute_s_gemm, softmax_update_causal, compute_o_gemm, softmax_update_valid_length, advance_tile_batch, paged_store_output_lse
+    @T.macro
+    def softmax_update_causal_padded_left(
+        S_smem: T.Buffer, m_smem: T.Buffer, d_smem: T.Buffer, m_prev_smem: T.Buffer,
+        m_new: T.Buffer, m_prev: T.Buffer, d_new: T.Buffer,
+        ty: T.int32, tx: T.int32, LH_start: T.int32, L_kv_start: T.int32,
+        valid_len: T.int32, qo_len: T.int32, kv_len: T.int32,
+    ):
+        # Three-phase online softmax with left-padding + causal mask. Real
+        # queries occupy [qo_len - valid_len, qo_len); real keys occupy
+        # [kv_len - valid_len, kv_len). Causal keeps
+        # col <= row + (kv_len - qo_len) within those valid suffixes.
+        for i in T.serial(T.ceildiv(tile_x, bdx * num_warps)):
+            row: T.let[T.int32] = i * bdx * num_warps + ty * bdx + tx
+            if row < tile_x:
+                with T.sblock("update1"):
+                    m_prev[i] = m_smem[row]
+                    m_new[i] = m_smem[row]
+                    row_: T.let[T.int32] = (LH_start + row) // group_size
+                    pad_q: T.let[T.int32] = qo_len - valid_len
+                    pad_kv: T.let[T.int32] = kv_len - valid_len
+                    for j in T.serial(tile_z):
+                        col_: T.let[T.int32] = L_kv_start + j
+                        if tirx.And(tirx.And(row_ < qo_len, row_ >= pad_q), tirx.And(col_ >= pad_kv, col_ < kv_len - qo_len + row_ + 1)):
+                            m_new[i] = T.max(m_new[i], S_smem[row, j])
+                    d_new[i] = d_smem[row] * T.exp2(m_prev[i] - m_new[i])
+        for i in T.serial(T.ceildiv(tile_x, bdx * num_warps)):
+            row: T.let[T.int32] = i * bdx * num_warps + ty * bdx + tx
+            with T.sblock("update"):
+                for j in T.serial(tile_z):
+                    if row < tile_x:
+                        row_: T.let[T.int32] = (LH_start + row) // group_size
+                        pad_q: T.let[T.int32] = qo_len - valid_len
+                        pad_kv: T.let[T.int32] = kv_len - valid_len
+                        col_: T.let[T.int32] = L_kv_start + j
+                        if tirx.And(tirx.And(row_ < qo_len, row_ >= pad_q), tirx.And(col_ >= pad_kv, col_ < kv_len - qo_len + row_ + 1)):
+                            S_smem[row, j] = T.exp2(S_smem[row, j] - m_new[i])
+                        else:
+                            S_smem[row, j] = T.exp2(-5e4 - m_new[i])
+        for i in T.serial(T.ceildiv(tile_x, bdx * num_warps)):
+            row: T.let[T.int32] = i * bdx * num_warps + ty * bdx + tx
+            if row < tile_x:
+                with T.sblock("update"):
+                    for j in T.serial(tile_z):
+                        d_new[i] += S_smem[row, j]
+                    m_smem[row] = m_new[i]
+                    d_smem[row] = d_new[i]
+                    m_prev_smem[row] = m_prev[i]
+        T.tvm_storage_sync("shared")
+
+    return init_states, compute_s_gemm, softmax_update_causal, compute_o_gemm, softmax_update_valid_length, advance_tile_batch, paged_store_output_lse, softmax_update_causal_padded_left
 
 
 def _get_prefill_kernel_config(h_kv, h_q, d, dtype, target: Target):

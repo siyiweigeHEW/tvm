@@ -28,6 +28,7 @@
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/s_tir/stmt.h>
 #include <tvm/tirx/analysis.h>
+#include <tvm/tirx/op.h>
 
 #include <utility>
 
@@ -37,15 +38,16 @@ namespace tirx {
 /*! \brief Generate surrounding loops automatically */
 class ScriptCompleter : public StmtMutator {
  public:
-  explicit ScriptCompleter(ffi::Map<Var, Buffer>* buffer_var_map)
-      : buffer_var_map_(buffer_var_map) {}
+  explicit ScriptCompleter(ffi::Map<Var, BufferVar>* buffer_var_map, bool s_tir = false)
+      : buffer_var_map_(buffer_var_map), s_tir_(s_tir) {}
 
  private:
-  ffi::Map<Var, Buffer>* buffer_var_map_;
+  ffi::Map<Var, BufferVar>* buffer_var_map_;
   Stmt VisitStmt_(const SBlockRealizeNode* op) final {
     for (const PrimExpr& value : op->iter_values) {
-      TVM_FFI_ICHECK(value.dtype().is_int())
-          << "BlockRealize iter_value expected a IntImm, but got " << value.dtype();
+      PrimType value_ty = value.ty();
+      TVM_FFI_ICHECK(value_ty.code() == DLDataTypeCode::kDLInt)
+          << "BlockRealize iter_value expected a IntImm, but got " << value_ty->dtype;
     }
     return StmtMutator::VisitStmt_(op);
   }
@@ -53,35 +55,35 @@ class ScriptCompleter : public StmtMutator {
   Stmt VisitStmt_(const SBlockNode* op) final {
     // Buffers allocated in the block can be accessed by its body.
     for (const auto& alloc_buffer : op->alloc_buffers) {
-      buffer_var_map_->Set(alloc_buffer->data, alloc_buffer);
+      buffer_var_map_->Set(alloc_buffer.var(), alloc_buffer);
     }
     for (const auto& match_buffer : op->match_buffers) {
-      const Buffer& target_buffer = match_buffer->buffer;
-      buffer_var_map_->Set(target_buffer->data, target_buffer);
+      const BufferVar& target_buffer = match_buffer->buffer;
+      buffer_var_map_->Set(target_buffer.var(), target_buffer);
     }
 
     bool is_root_block = this->is_root_block_;
     this->is_root_block_ = false;
-    SBlock block = Downcast<SBlock>(StmtMutator::VisitStmt_(op));
+    SBlock block = StmtMutator::VisitStmt_(op).as_or_throw<SBlock>();
     this->is_root_block_ = is_root_block;
 
     // Remove buffers allocated inside block to detect its access region
     for (const auto& alloc_buffer : op->alloc_buffers) {
-      buffer_var_map_->erase(alloc_buffer->data);
+      buffer_var_map_->erase(alloc_buffer.var());
     }
     for (const auto& match_buffer : op->match_buffers) {
-      const Buffer& target_buffer = match_buffer->buffer;
-      buffer_var_map_->erase(target_buffer->data);
+      const BufferVar& target_buffer = match_buffer->buffer;
+      buffer_var_map_->erase(target_buffer.var());
     }
     // Get access detection mask
     // 0 for provided region, 1 and 3 for need detect read, 2 and 3 for need detect write
     int mask = 0;
     auto it = op->annotations.find(s_tir::attr::script_parsing_detect_access);
     if (it != op->annotations.end()) {
-      mask = Downcast<IntImm>((*it).second)->value;
+      mask = (*it).second.as_or_throw<IntImm>()->value;
     }
     // ignore root block or blocks which already has reads/writes regions
-    if (mask != 0) {
+    if (mask != 0 && s_tir_) {
       auto access_region = GetSBlockAccessRegion(block, *buffer_var_map_);
       const ffi::Array<BufferRegion>& reads = access_region[0];
       const ffi::Array<BufferRegion>& writes = access_region[1];
@@ -104,31 +106,33 @@ class ScriptCompleter : public StmtMutator {
 
   Stmt VisitStmt_(const AllocBufferNode* op) final {
     // AllocBuffer is flat: register buffer for subsequent siblings
-    if (!buffer_var_map_->count(op->buffer->data)) {
-      buffer_var_map_->Set(op->buffer->data, op->buffer);
+    if (!buffer_var_map_->count(op->buffer.var())) {
+      buffer_var_map_->Set(op->buffer.var(), op->buffer);
     }
     return StmtMutator::VisitStmt_(op);
   }
 
   Stmt VisitStmt_(const DeclBufferNode* op) final {
     // DeclBuffer is flat: register buffer for subsequent siblings
-    if (!buffer_var_map_->count(op->buffer->data)) {
-      buffer_var_map_->Set(op->buffer->data, op->buffer);
+    if (!buffer_var_map_->count(op->buffer.var())) {
+      buffer_var_map_->Set(op->buffer.var(), op->buffer);
     }
     return StmtMutator::VisitStmt_(op);
   }
 
   bool is_root_block_ = true;
+  bool s_tir_ = false;
 };
 
-PrimFunc ScriptComplete(PrimFunc func, const ffi::Array<Buffer>& root_allocates) {
-  ffi::Map<Var, Buffer> buffer_var_map;
-  for (const auto& pair : func->buffer_map) {
-    const Buffer& buffer = pair.second;
-    buffer_var_map.Set(buffer->data, buffer);
+PrimFunc ScriptComplete(PrimFunc func, const ffi::Array<BufferVar>& root_allocates, bool s_tir) {
+  ffi::Map<Var, BufferVar> buffer_var_map;
+  for (const Var& param : func->params) {
+    if (auto buffer = param.as<BufferVar>()) {
+      buffer_var_map.Set(buffer.value().var(), buffer.value());
+    }
   }
   for (const auto& alloc : root_allocates) {
-    buffer_var_map.Set(alloc->data, alloc);
+    buffer_var_map.Set(alloc.var(), alloc);
   }
 
   Stmt res = func->body;
@@ -150,13 +154,13 @@ PrimFunc ScriptComplete(PrimFunc func, const ffi::Array<Buffer>& root_allocates)
     return false;
   }();
 
-  if (should_insert_root) {
+  if (s_tir && should_insert_root) {
     SBlock root_block({}, {}, {}, "root", std::move(res), std::nullopt, root_allocates);
-    res = SBlockRealize({}, Bool(true), std::move(root_block));
+    res = SBlockRealize({}, IntImm::Bool(true), std::move(root_block));
   }
 
   // generate surrounding loops automatically
-  ScriptCompleter script_completer(&buffer_var_map);
+  ScriptCompleter script_completer(&buffer_var_map, s_tir);
   res = script_completer(std::move(res));
 
   if (func->body.same_as(res)) {

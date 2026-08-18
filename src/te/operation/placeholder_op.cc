@@ -31,16 +31,11 @@ namespace te {
 
 TVM_FFI_STATIC_INIT_BLOCK() { PlaceholderOpNode::RegisterReflection(); }
 
-// PlaceholderOpNode
-TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
-    .set_dispatch<PlaceholderOpNode>([](const ObjectRef& node, ReprPrinter* p) {
-      auto* op = static_cast<const PlaceholderOpNode*>(node.get());
-      p->stream << "placeholder(" << op->name << ", " << op << ")";
-    });
+// Pattern A (RM): auto-default repr from reflection.
 
 int PlaceholderOpNode::num_outputs() const { return 1; }
 
-DataType PlaceholderOpNode::output_dtype(size_t i) const {
+PrimType PlaceholderOpNode::output_dtype(size_t i) const {
   TVM_FFI_ICHECK_EQ(i, 0U);
   return dtype;
 }
@@ -50,7 +45,7 @@ ffi::Array<PrimExpr> PlaceholderOpNode::output_shape(size_t i) const {
   return shape;
 }
 
-PlaceholderOp::PlaceholderOp(std::string name, ffi::Array<PrimExpr> shape, DataType dtype) {
+PlaceholderOp::PlaceholderOp(std::string name, ffi::Array<PrimExpr> shape, PrimType dtype) {
   auto n = ffi::make_object<PlaceholderOpNode>();
   n->name = name;
   n->shape = shape;
@@ -58,14 +53,14 @@ PlaceholderOp::PlaceholderOp(std::string name, ffi::Array<PrimExpr> shape, DataT
   data_ = std::move(n);
 }
 
-Tensor placeholder(ffi::Array<PrimExpr> shape, DataType dtype, std::string name) {
+Tensor placeholder(ffi::Array<PrimExpr> shape, PrimType dtype, std::string name) {
   return PlaceholderOp(name, shape, dtype).output(0);
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("te.Placeholder", [](ffi::Variant<PrimExpr, ffi::Array<PrimExpr>> shape_arg,
-                                             DataType dtype, std::string name) {
+                                             PrimType dtype, std::string name) {
     auto shape = [&]() -> ffi::Array<PrimExpr> {
       if (auto arg_expr = shape_arg.as<PrimExpr>()) {
         return {arg_expr.value()};

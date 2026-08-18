@@ -26,12 +26,11 @@
 
 #include <tvm/ffi/container/shape.h>
 #include <tvm/ffi/container/tensor.h>
+#include <tvm/ffi/dtype.h>
 #include <tvm/ffi/optional.h>
 #include <tvm/ffi/string.h>
 #include <tvm/runtime/base.h>
-#include <tvm/runtime/data_type.h>
 #include <tvm/runtime/device_api.h>
-#include <tvm/runtime/object.h>
 #include <tvm/support/io.h>
 #include <tvm/support/serializer.h>
 
@@ -43,29 +42,24 @@
 namespace tvm {
 namespace runtime {
 
-using ffi::GetDataSize;
-using ffi::IsAligned;
-using ffi::IsContiguous;
-
 /*!
  * \brief Managed Tensor.
  *  The array is backed by reference counted blocks.
  */
 class Tensor : public tvm::ffi::Tensor {
  public:
-  using Container = ffi::TensorObj;
   Tensor() = default;
   /*!
    * \brief constructor.
-   * \param data ObjectPtr to the data container.
+   * \param data ffi::ObjectPtr to the data container.
    */
-  explicit Tensor(ObjectPtr<ffi::TensorObj> data) : tvm::ffi::Tensor(data) {}
+  explicit Tensor(ffi::ObjectPtr<ffi::TensorObj> data) : tvm::ffi::Tensor(data) {}
   explicit Tensor(ffi::UnsafeInit tag) : tvm::ffi::Tensor(tag) {}
   Tensor(ffi::Tensor&& other) : tvm::ffi::Tensor(std::move(other)) {}  // NOLINT(*)
   Tensor(const ffi::Tensor& other) : tvm::ffi::Tensor(other) {}        // NOLINT(*)
 
   ffi::ShapeView Shape() const { return this->shape(); }
-  runtime::DataType DataType() const { return runtime::DataType(this->dtype()); }
+  DLDataType DataType() const { return this->dtype(); }
 
   // DLPack handling
   static Tensor FromDLPack(DLManagedTensor* tensor) {
@@ -91,7 +85,7 @@ class Tensor : public tvm::ffi::Tensor {
    *        Must be equal to the size of the Tensor.
    * \note The copy always triggers a TVMSynchronize.
    */
-  TVM_DLL void CopyFromBytes(const void* data, size_t nbytes);
+  TVM_RUNTIME_DLL void CopyFromBytes(const void* data, size_t nbytes);
   /*!
    * \brief Copy data content into another array.
    * \param other The source array to be copied from.
@@ -107,7 +101,7 @@ class Tensor : public tvm::ffi::Tensor {
    *        Must be equal to the size of the Tensor.
    * \note The copy always triggers a TVMSynchronize.
    */
-  TVM_DLL void CopyToBytes(void* data, size_t nbytes) const;
+  TVM_RUNTIME_DLL void CopyToBytes(void* data, size_t nbytes) const;
   /*!
    * \brief Copy the data to another device.
    * \param dev The target device.
@@ -115,8 +109,8 @@ class Tensor : public tvm::ffi::Tensor {
    * \return The array under another device.
    * \note The copy always triggers a TVMSynchronize.
    */
-  TVM_DLL Tensor CopyTo(const Device& dev,
-                        ffi::Optional<ffi::String> mem_scope = std::nullopt) const;
+  TVM_RUNTIME_DLL Tensor CopyTo(const Device& dev,
+                                ffi::Optional<ffi::String> mem_scope = std::nullopt) const;
   /*!
    * \brief Load Tensor from stream
    * \param stream The input data stream
@@ -149,8 +143,8 @@ class Tensor : public tvm::ffi::Tensor {
    *       outside the bounds of the current array, this function will
    *       raise an exception.
    */
-  TVM_DLL Tensor CreateView(ffi::Shape shape, DLDataType dtype,
-                            uint64_t relative_byte_offset = 0) const;
+  TVM_RUNTIME_DLL Tensor CreateView(ffi::Shape shape, DLDataType dtype,
+                                    uint64_t relative_byte_offset = 0) const;
   /*!
    * \brief Create an empty Tensor.
    * \param shape The shape of the new array.
@@ -159,16 +153,16 @@ class Tensor : public tvm::ffi::Tensor {
    * \param mem_scope The memory scope of the array.
    * \return The created Array
    */
-  TVM_DLL static Tensor Empty(ffi::Shape shape, DLDataType dtype, Device dev,
-                              ffi::Optional<ffi::String> mem_scope = std::nullopt);
+  TVM_RUNTIME_DLL static Tensor Empty(ffi::Shape shape, DLDataType dtype, Device dev,
+                                      ffi::Optional<ffi::String> mem_scope = std::nullopt);
   /*!
    * \brief Function to copy data from one array to another.
    * \param from The source array.
    * \param to The target array.
    * \param stream The stream used in copy.
    */
-  TVM_DLL static void CopyFromTo(const DLTensor* from, DLTensor* to,
-                                 TVMStreamHandle stream = nullptr);
+  TVM_RUNTIME_DLL static void CopyFromTo(const DLTensor* from, DLTensor* to,
+                                         TVMStreamHandle stream = nullptr);
 
   /*!
    * \brief Function to copy data from one array to a byte buffer.
@@ -177,8 +171,8 @@ class Tensor : public tvm::ffi::Tensor {
    * \param nbytes The size of the data buffer.
    * \param stream The stream used in copy.
    */
-  TVM_DLL static void CopyToBytes(const DLTensor* from, void* to, size_t nbytes,
-                                  TVMStreamHandle stream = nullptr);
+  TVM_RUNTIME_DLL static void CopyToBytes(const DLTensor* from, void* to, size_t nbytes,
+                                          TVMStreamHandle stream = nullptr);
 
   /*!
    * \brief Function to copy data from one array to a byte buffer.
@@ -187,8 +181,28 @@ class Tensor : public tvm::ffi::Tensor {
    * \param nbytes The size of the data buffer.
    * \param stream The stream used in copy.
    */
-  TVM_DLL static void CopyFromBytes(const DLTensor* to, void* from, size_t nbytes,
-                                    TVMStreamHandle stream = nullptr);
+  TVM_RUNTIME_DLL static void CopyFromBytes(const DLTensor* to, void* from, size_t nbytes,
+                                            TVMStreamHandle stream = nullptr);
+
+  /*!
+   * \brief Check if two tensors share the same underlying storage.
+   *
+   * This detects runtime storage aliasing (e.g. views from CreateView, etc.) but does
+   * not imply either tensor was created by CreateView.
+   *
+   * \param a The first tensor.
+   * \param b The second tensor.
+   * \return True if the tensors share the same storage.
+   */
+  TVM_RUNTIME_DLL static bool IsStorageShared(const DLTensor* a, const DLTensor* b);
+
+  /*!
+   * \brief Tensor overload of IsStorageShared.
+   * \param a The first tensor.
+   * \param b The second tensor.
+   * \return True if the tensors share the same storage.
+   */
+  static bool IsStorageShared(const Tensor& a, const Tensor& b);
 };
 
 /*!

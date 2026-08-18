@@ -32,7 +32,7 @@ namespace tirx {
 
 class ExprSideEffect : public ExprVisitor {
  public:
-  void VisitExpr(const PrimExpr& e) final {
+  void VisitExpr(const Expr& e) final {
     if (kind_ == CallEffectKind::kUpdateState) return;
     ExprVisitor::VisitExpr(e);
   }
@@ -46,7 +46,7 @@ class ExprSideEffect : public ExprVisitor {
     static auto op_call_effect = Op::GetAttrMap<TCallEffectKind>("TCallEffectKind");
 
     if (auto opt = op->op.as<Op>()) {
-      this->UpdateEffect(static_cast<CallEffectKind>(op_call_effect[opt.value()]->value));
+      this->UpdateEffect(static_cast<CallEffectKind>(op_call_effect[opt.value()]));
     } else {
       this->UpdateEffect(CallEffectKind::kOpaque);
     }

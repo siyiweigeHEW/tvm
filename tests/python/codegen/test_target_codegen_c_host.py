@@ -19,17 +19,17 @@ import numpy as np
 
 import tvm
 import tvm.testing
-from tvm.contrib import utils
 from tvm.script import ir as I
 from tvm.script import tirx as T
+from tvm.support import utils
 
 
 def test_add():
     nn = 1024
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def test_fadd(
             A: T.Buffer((1024,), "float32"),
             B: T.Buffer((1024,), "float32"),
@@ -64,9 +64,9 @@ def test_add():
 def test_reinterpret():
     nn = 1024
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def test_reinterpret(
             A: T.Buffer((1024,), "int32"),
             B: T.Buffer((1024,), "float32"),
@@ -99,9 +99,9 @@ def test_reinterpret():
 def test_ceil():
     nn = 1024
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def test_ceil(
             A: T.Buffer((1024,), "float32"),
             B: T.Buffer((1024,), "float32"),
@@ -134,9 +134,9 @@ def test_ceil():
 def test_floor():
     nn = 1024
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def test_floor(
             A: T.Buffer((1024,), "float32"),
             B: T.Buffer((1024,), "float32"),
@@ -169,9 +169,9 @@ def test_floor():
 def test_round():
     nn = 1024
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def test_round(
             A: T.Buffer((1024,), "float32"),
             B: T.Buffer((1024,), "float32"),
@@ -202,13 +202,13 @@ def test_round():
 
 
 def test_subroutine_call():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(A: T.Buffer(1, dtype="float32")):
             Module.subroutine(A.data)
 
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def subroutine(A_data: T.handle("float32")):
             A = T.decl_buffer(1, dtype="float32", data=A_data)
             A[0] = 42.0
@@ -225,6 +225,64 @@ def test_subroutine_call():
     assert source.count("subroutine(") == 3, (
         "Expected three occurrences, for forward-declaration, definition, and call from main."
     )
+
+
+def test_workspace_allocation_cast():
+    @I.ir_module
+    class Module:
+        @T.prim_func
+        def main(A: T.Buffer((256,), "float32")):
+            workspace = T.alloc_buffer((256,), "float32", scope="global")
+            for i in range(256):
+                workspace[i] = A[i]
+            for i in range(256):
+                A[i] = workspace[i]
+
+    built = tvm.tirx.build(Module, target="c")
+    assert "((float*)TVMBackendAllocWorkspace(" in built.inspect_source()
+
+    temp = utils.tempdir()
+    built.export_library(temp.relpath("workspace.so"))
+
+
+def test_local_alloc_buffer_uses_plain_c_pointer():
+    @I.ir_module(s_tir=True)
+    class Module:
+        @T.prim_func(s_tir=True)
+        def main(A: T.Buffer((1,), "float32")):
+            B = T.alloc_buffer((1,), "float32", scope="local")
+            for i in range(1):
+                with T.sblock("copy"):
+                    vi = T.axis.spatial(1, i)
+                    T.reads(A[vi])
+                    T.writes(B[vi], A[vi])
+                    B[vi] = A[vi] + T.float32(1)
+                    A[vi] = B[vi]
+
+    built = tvm.tirx.build(Module, target="c")
+    assert "local float*" not in built.inspect_source()
+
+    temp = utils.tempdir()
+    path_dso = temp.relpath("local_alloc.so")
+    built.export_library(path_dso)
+    loaded = tvm.runtime.load_module(path_dso)
+
+    data = tvm.runtime.tensor(np.array([1.0], dtype="float32"))
+    loaded["main"](data)
+    tvm.testing.assert_allclose(data.numpy(), np.array([2.0], dtype="float32"))
+
+
+def test_vector_access_ptr_address_uses_ramp_base():
+    buffer = tvm.tirx.decl_buffer((8,), "float32x2", name="A")
+    access_ptr = buffer.access_ptr(access_mask=3, offset=2, extent=4)
+    body = tvm.tirx.Evaluate(tvm.tirx.call_extern("void", "consume", access_ptr))
+    func = tvm.tirx.PrimFunc([buffer], body).with_attr("global_symbol", "main")
+
+    source = tvm.tirx.build(tvm.IRModule.from_expr(func), target="c").inspect_source()
+    call = next(line.strip() for line in source.splitlines() if line.strip().startswith("consume("))
+    assert "int32_t2" not in call
+    assert "float2*" in call
+    assert " + 4" in call
 
 
 if __name__ == "__main__":

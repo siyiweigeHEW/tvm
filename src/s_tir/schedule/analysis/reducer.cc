@@ -16,6 +16,8 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+#include <tvm/ffi/cast.h>
+
 #include "../utils.h"
 
 namespace tvm {
@@ -57,8 +59,10 @@ class PatternMatcher : public ExprVisitor {
     if (it == filled_map_.end()) {
       filled_map_[op] = expr_to_match_;
     } else {
-      ExprDeepEqual equal;
-      if (it->second.same_as(expr_to_match_) || equal(it->second, expr_to_match_)) return;
+      if (it->second.same_as(expr_to_match_) ||
+          ffi::StructuralEqual()(it->second, expr_to_match_)) {
+        return;
+      }
       match_success_ = false;
     }
   }
@@ -68,7 +72,7 @@ class PatternMatcher : public ExprVisitor {
     if (ptr == nullptr) {
       match_success_ = false;
     } else {
-      PrimExpr tmp = expr_to_match_;
+      Expr tmp = expr_to_match_;
       expr_to_match_ = ptr->var;
       VisitExpr(op->var);
       expr_to_match_ = ptr->value;
@@ -84,10 +88,10 @@ class PatternMatcher : public ExprVisitor {
     if (ptr == nullptr) {
       match_success_ = false;
     } else {
-      if (!op->op.same_as(ptr->op)) {
+      if (!op->op.same_as(ptr->op) || op->args.size() != ptr->args.size()) {
         match_success_ = false;
       } else {
-        PrimExpr tmp = expr_to_match_;
+        Expr tmp = expr_to_match_;
         for (size_t i = 0; i < op->args.size(); ++i) {
           expr_to_match_ = ptr->args[i];
           VisitExpr(op->args[i]);
@@ -103,7 +107,7 @@ class PatternMatcher : public ExprVisitor {
     if (ptr == nullptr) {                          \
       match_success_ = false;                      \
     } else {                                       \
-      PrimExpr current = expr_to_match_;           \
+      Expr current = expr_to_match_;               \
       expr_to_match_ = ptr->a;                     \
       VisitExpr(op->a);                            \
       expr_to_match_ = ptr->b;                     \
@@ -135,10 +139,10 @@ class PatternMatcher : public ExprVisitor {
     if (ptr == nullptr) {
       match_success_ = false;
     } else {
-      if (!runtime::TypeEqual(op->dtype, ptr->dtype)) {
+      if (op->ty.as_or_throw<PrimType>() != ptr->ty.as_or_throw<PrimType>()) {
         match_success_ = false;
       } else {
-        PrimExpr tmp = expr_to_match_;
+        Expr tmp = expr_to_match_;
         expr_to_match_ = ptr->value;
         VisitExpr(op->value);
         std::swap(expr_to_match_, tmp);
@@ -151,7 +155,7 @@ class PatternMatcher : public ExprVisitor {
     if (ptr == nullptr) {
       match_success_ = false;
     } else {
-      PrimExpr tmp = expr_to_match_;
+      Expr tmp = expr_to_match_;
       expr_to_match_ = ptr->a;
       VisitExpr(op->a);
       std::swap(expr_to_match_, tmp);
@@ -163,7 +167,7 @@ class PatternMatcher : public ExprVisitor {
     if (ptr == nullptr) {
       match_success_ = false;
     } else {
-      PrimExpr tmp = expr_to_match_;
+      Expr tmp = expr_to_match_;
       expr_to_match_ = ptr->condition;
       VisitExpr(op->condition);
       expr_to_match_ = ptr->true_value;
@@ -179,7 +183,7 @@ class PatternMatcher : public ExprVisitor {
     if (ptr == nullptr) {
       match_success_ = false;
     } else {
-      PrimExpr tmp = expr_to_match_;
+      Expr tmp = expr_to_match_;
       expr_to_match_ = ptr->base;
       VisitExpr(op->base);
       expr_to_match_ = ptr->stride;
@@ -195,7 +199,7 @@ class PatternMatcher : public ExprVisitor {
     if (ptr == nullptr) {
       match_success_ = false;
     } else {
-      PrimExpr tmp = expr_to_match_;
+      Expr tmp = expr_to_match_;
       expr_to_match_ = ptr->value;
       VisitExpr(op->value);
       expr_to_match_ = ptr->lanes;
@@ -212,7 +216,7 @@ class PatternMatcher : public ExprVisitor {
       if (op->vectors.size() != ptr->vectors.size() || op->indices.size() != ptr->indices.size()) {
         match_success_ = false;
       } else {
-        PrimExpr tmp = expr_to_match_;
+        Expr tmp = expr_to_match_;
         for (size_t i = 0; i < op->indices.size(); ++i) {
           expr_to_match_ = ptr->indices[i];
           VisitExpr(op->indices[i]);
@@ -249,7 +253,7 @@ class PatternMatcher : public ExprVisitor {
       if (!op->buffer.same_as(ptr->buffer) || op->indices.size() != ptr->indices.size()) {
         match_success_ = false;
       } else {
-        PrimExpr tmp = expr_to_match_;
+        Expr tmp = expr_to_match_;
         for (size_t i = 0; i < op->indices.size(); ++i) {
           expr_to_match_ = ptr->indices[i];
           VisitExpr(op->indices[i]);
@@ -275,7 +279,7 @@ class PatternMatcher : public ExprVisitor {
     auto it = filled_map_.find(var.operator->());
     TVM_FFI_ICHECK(it != filled_map_.end()) << "Unknown pattern variable";
     TVM_FFI_ICHECK(match_success_) << "Match failed";
-    return it->second;
+    return it->second.as_or_throw<PrimExpr>();
   }
 
   bool Success() const { return match_success_; }
@@ -283,8 +287,8 @@ class PatternMatcher : public ExprVisitor {
  private:
   bool match_success_{true};
   ffi::Array<PrimExpr> pattern_;
-  PrimExpr expr_to_match_;
-  std::unordered_map<const VarNode*, PrimExpr> filled_map_;
+  Expr expr_to_match_;
+  std::unordered_map<const VarNode*, Expr> filled_map_;
 };
 
 /******** Reduction SBlock Related ********/
@@ -325,14 +329,14 @@ void ErrorRFactorCrossThreadReductionNotApplicable(const ffi::Optional<ScheduleS
     }
 
     IRModule mod() const final { return mod_; }
-    ffi::Array<ObjectRef> LocationsOfInterest() const final { return {block_}; }
+    ffi::Array<ffi::ObjectRef> LocationsOfInterest() const final { return {block_}; }
 
     IRModule mod_;
     SBlock block_;
     int violated_cond_;
   };
 
-  if (self.defined()) {
+  if (self.has_value()) {
     throw RFactorNotApplicableError(self.value()->mod, std::move(block), violated_cond);
   } else {
     TVM_FFI_THROW(ValueError) << "Cross-thread reduction cannot be applied to the block "
@@ -356,7 +360,7 @@ void ErrorRFactorCrossThreadReductionNotApplicable(const ffi::Optional<ScheduleS
 void ExtractReductionUpdates(const ffi::Optional<ScheduleState>& self, SBlock block,
                              const ffi::Array<Stmt>& stmts, int n_buffers,
                              ffi::Array<BufferStore>* updates,
-                             std::unordered_map<const BufferNode*, int>* buf2index) {
+                             std::unordered_map<const VarNode*, int>* buf2index) {
   std::unordered_map<const VarNode*, int> var2index;
   ffi::Array<PrimExpr> let_values;
   let_values.reserve(n_buffers);
@@ -374,7 +378,7 @@ void ExtractReductionUpdates(const ffi::Optional<ScheduleState>& self, SBlock bl
     if (bind == nullptr) {
       ErrorRFactorCrossThreadReductionNotApplicable(self, std::move(block), /*violated_cond=*/3);
     }
-    let_values.push_back(bind->value);
+    let_values.push_back(bind->value.as_or_throw<PrimExpr>());
     auto insert_result = var2index.insert(std::make_pair(bind->var.get(), i));
     if (!insert_result.second) {
       ErrorRFactorCrossThreadReductionNotApplicable(self, std::move(block), /*violated_cond=*/4);
@@ -404,10 +408,11 @@ void ExtractReductionUpdates(const ffi::Optional<ScheduleState>& self, SBlock bl
     if (buf_store == nullptr) {
       ErrorRFactorCrossThreadReductionNotApplicable(self, std::move(block), /*violated_cond=*/5);
     }
-    const auto* var = buf_store->value.as<VarNode>();
-    if (var == nullptr) {
+    auto var_ref = buf_store->value.as<PrimVar>();
+    if (!var_ref.has_value()) {
       ErrorRFactorCrossThreadReductionNotApplicable(self, std::move(block), /*violated_cond=*/7);
     }
+    const VarNode* var = var_ref.value().get();
     auto it = var2index.find(var);
     if (it == var2index.end()) {
       ErrorRFactorCrossThreadReductionNotApplicable(self, std::move(block), /*violated_cond=*/7);
@@ -436,7 +441,7 @@ std::pair<ffi::Array<PrimExpr>, ffi::Array<BufferStore>> GetInitValuesAndUpdates
   if (auto init = block->init.as<BufferStore>()) {
     inits.push_back(init.value());
   } else if (const auto* seq_init = block->init.as<SeqStmtNode>()) {
-    std::unordered_set<const BufferNode*> init_buffers;
+    std::unordered_set<const VarNode*> init_buffers;
     for (const Stmt& stmt : seq_init->seq) {
       auto init = stmt.as<BufferStore>();
       if (!init) {
@@ -454,7 +459,7 @@ std::pair<ffi::Array<PrimExpr>, ffi::Array<BufferStore>> GetInitValuesAndUpdates
 
   // Step 2. Extract the block updates, in the form of BufferStores.
   int n_buffers = inits.size();
-  std::unordered_map<const BufferNode*, int> buf2index;
+  std::unordered_map<const VarNode*, int> buf2index;
   if (const auto* update = block->body.as<BufferStoreNode>()) {
     updates.push_back(ffi::GetRef<BufferStore>(update));
     buf2index[update->buffer.get()] = 0;
@@ -488,11 +493,11 @@ std::pair<ffi::Array<PrimExpr>, ffi::Array<BufferStore>> GetInitValuesAndUpdates
       ErrorRFactorCrossThreadReductionNotApplicable(self, std::move(block), /*violated_cond=*/12);
     }
     for (int d = 0; d < n_dim; ++d) {
-      if (!ana.CanProveEqual(updates[i]->buffer->shape[d], expected_shape[d])) {
+      if (!ana->CanProveEqual(updates[i]->buffer->shape[d], expected_shape[d])) {
         ErrorRFactorCrossThreadReductionNotApplicable(self, std::move(block), /*violated_cond=*/11);
       }
-      if (!ana.CanProveEqual(inits[i]->indices[d], expected_indices[d]) ||
-          !ana.CanProveEqual(updates[i]->indices[d], expected_indices[d])) {
+      if (!ana->CanProveEqual(inits[i]->indices[d], expected_indices[d]) ||
+          !ana->CanProveEqual(updates[i]->indices[d], expected_indices[d])) {
         ErrorRFactorCrossThreadReductionNotApplicable(self, std::move(block), /*violated_cond=*/12);
       }
     }
@@ -532,15 +537,15 @@ bool ReductionIterNotIndexOutputBuffer(const SBlock& block) {
     }
   }
   // Step 2. Check if the reduction block iters are used to index the output buffer.
-  std::unordered_set<const BufferNode*> buffer_written;
+  std::unordered_set<const VarNode*> buffer_written;
   buffer_written.reserve(block->writes.size());
   for (const BufferRegion& write_region : block->writes) {
     buffer_written.insert(write_region->buffer.get());
   }
 
-  std::unordered_set<const BufferNode*> buffer_allocated;
+  std::unordered_set<const VarNode*> buffer_allocated;
   buffer_allocated.reserve(block->alloc_buffers.size());
-  for (const Buffer& buffer : block->alloc_buffers) {
+  for (const BufferVar& buffer : block->alloc_buffers) {
     buffer_allocated.insert(buffer.get());
   }
 
@@ -550,12 +555,12 @@ bool ReductionIterNotIndexOutputBuffer(const SBlock& block) {
     });
   };
 
-  std::unordered_map<const BufferNode*, const BufferNode*> match_buffer_sources;
+  std::unordered_map<const VarNode*, const VarNode*> match_buffer_sources;
   for (const MatchBufferRegion& region : block->match_buffers) {
     match_buffer_sources[region->buffer.get()] = region->source->buffer.get();
   }
   bool affected = false;
-  PreOrderVisit(block->body, [&](const ObjectRef& obj) {
+  PreOrderVisit(block->body, [&](const ffi::ObjectRef& obj) {
     if (affected) {
       return false;
     }
@@ -564,6 +569,13 @@ bool ReductionIterNotIndexOutputBuffer(const SBlock& block) {
       for (const MatchBufferRegion& region : block_node->match_buffers) {
         match_buffer_sources[region->buffer.get()] = region->source->buffer.get();
       }
+    }
+    // Inline AllocBufferNode statements (e.g. `T.local_scalar(...)` expansions)
+    // declare buffer-local scratch storage inside the block body; treat them
+    // the same as block->alloc_buffers entries for the "write-without-signature"
+    // check below.
+    if (const auto* alloc = obj.as<AllocBufferNode>()) {
+      buffer_allocated.insert(alloc->buffer.get());
     }
     const auto* store = obj.as<BufferStoreNode>();
     if (!store) {
@@ -612,7 +624,7 @@ class NoMatchedReducerError : public ScheduleError {
   }
 
   IRModule mod() const final { return mod_; }
-  ffi::Array<ObjectRef> LocationsOfInterest() const final { return {}; }
+  ffi::Array<ffi::ObjectRef> LocationsOfInterest() const final { return {}; }
 
   IRModule mod_;
   ffi::Array<PrimExpr> identities_;
@@ -627,7 +639,7 @@ std::tuple<CommReducer, ffi::Array<PrimExpr>, ffi::Array<PrimExpr>> GetReducerAn
   bool matched =
       FromIdentityCombiner(identities, combiners, &reducer, &combiner_lhs, &combiner_rhs);
   if (!matched) {
-    if (self.defined()) {
+    if (self.has_value()) {
       throw NoMatchedReducerError(self.value()->mod, identities, combiners);
     } else {
       TVM_FFI_THROW(ValueError)
@@ -694,7 +706,7 @@ bool FromIdentityCombiner(const ffi::Array<PrimExpr>& identities,
   for (const ffi::TypedFunction<ffi::Optional<CommReducer>(ffi::Array<PrimExpr>)>& reducer_getter :
        GetReducerGetters()) {
     ffi::Optional<CommReducer> reducer = reducer_getter(identities);
-    if (!reducer.defined()) {
+    if (!reducer.has_value()) {
       continue;
     }
     if (MatchReducer(reducer.value(), identities, stored_values, buf_loads, lhs, rhs)) {

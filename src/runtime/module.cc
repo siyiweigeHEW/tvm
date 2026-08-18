@@ -25,7 +25,7 @@
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/c_backend_api.h>
-#include <tvm/runtime/module.h>
+#include <tvm/runtime/device_api.h>
 
 #include <cstring>
 #include <unordered_set>
@@ -78,7 +78,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   // Initialize the functions
   TVM_INIT_CONTEXT_FUNC(TVMFFIFunctionCall);
   TVM_INIT_CONTEXT_FUNC(TVMFFIErrorSetRaisedFromCStr);
-  TVM_INIT_CONTEXT_FUNC(TVMBackendGetFuncFromEnv);
+  TVM_INIT_CONTEXT_FUNC(TVMFFIEnvModLookupFromImports);
+  TVM_INIT_CONTEXT_FUNC(TVMFFIHandleInitOnce);
   TVM_INIT_CONTEXT_FUNC(TVMBackendAllocWorkspace);
   TVM_INIT_CONTEXT_FUNC(TVMBackendFreeWorkspace);
   TVM_INIT_CONTEXT_FUNC(TVMBackendParallelLaunch);

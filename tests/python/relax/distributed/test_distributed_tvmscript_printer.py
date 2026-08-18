@@ -18,8 +18,8 @@
 
 import tvm.testing
 from tvm.ir import Range
-from tvm.relax import TensorStructInfo
-from tvm.relax.distributed import DeviceMesh, DTensorStructInfo, Placement
+from tvm.relax import TensorType
+from tvm.relax.distributed import DeviceMesh, DTensorType, Placement
 from tvm.script.parser import ir as I
 from tvm.script.parser import relax as R
 from tvm.script.parser import tirx as T
@@ -35,9 +35,7 @@ def _assert_print(obj, expected):
 def test_constant():
     constant = R.dist.const(
         1,
-        struct_info=R.DTensor(
-            (), "float32", device_mesh=DeviceMesh((2, 2), Range(0, 4)), placement="R, R"
-        ),
+        ty=R.DTensor((), "float32", device_mesh=DeviceMesh((2, 2), Range(0, 4)), placement="R, R"),
     )
     assert (
         constant.__str__()
@@ -45,35 +43,29 @@ def test_constant():
     )
 
 
-def test_dtensor_struct_info():
-    tensor_sinfo1 = TensorStructInfo((32, 32), "float32")
-    tensor_sinfo2 = TensorStructInfo((32, 32), "void")
-    obj0 = DTensorStructInfo(
-        tensor_sinfo1, DeviceMesh((2, 2), Range(0, 4)), Placement.from_text("S[1], R")
-    )
+def test_dtensor_type():
+    tensor_ty1 = TensorType((32, 32), "float32")
+    tensor_ty2 = TensorType((32, 32), None)
+    obj0 = DTensorType(tensor_ty1, DeviceMesh((2, 2), Range(0, 4)), Placement.from_text("S[1], R"))
     assert (
         obj0.__str__()
         == """R.DTensor((32, 32), "float32", R.device_mesh((2, 2), R.Range(0, 4)), "S[1], R")"""
     )
 
-    obj1 = DTensorStructInfo(
-        tensor_sinfo2, DeviceMesh((2, 2), Range(0, 4)), Placement.from_text("S[1], R")
-    )
+    obj1 = DTensorType(tensor_ty2, DeviceMesh((2, 2), Range(0, 4)), Placement.from_text("S[1], R"))
     assert (
         obj1.__str__()
         == """R.DTensor((32, 32), device_mesh=R.device_mesh((2, 2), R.Range(0, 4)), placement="S[1], R")"""
     )
 
-    obj2 = DTensorStructInfo(
-        tensor_sinfo2, DeviceMesh((2, 2), [0, 1, 2, 3]), Placement.from_text("S[1], R")
-    )
+    obj2 = DTensorType(tensor_ty2, DeviceMesh((2, 2), [0, 1, 2, 3]), Placement.from_text("S[1], R"))
     assert (
         obj2.__str__()
         == """R.DTensor((32, 32), device_mesh=R.device_mesh((2, 2), [0, 1, 2, 3]), placement="S[1], R")"""
     )
 
 
-@I.ir_module
+@I.ir_module(s_tir=True)
 class TestModule:
     I.module_attrs({"device_num": 10})
     I.module_global_infos(
@@ -85,7 +77,7 @@ class TestModule:
         }
     )
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def tir_func(
         x: T.Buffer((T.int64(128), T.int64(128)), "float32"),
         y: T.Buffer((T.int64(128), T.int64(128)), "float32"),
@@ -118,7 +110,7 @@ def test_func():
 
 @R.function
 def foo(x: R.DTensor((128, 128), "float32", R.device_mesh((2, 2), R.Range(0, 4)), "S[0], R")) -> R.DTensor((128, 128), "float32", R.device_mesh((2, 2), R.Range(0, 4)), "S[0], R"):
-    gv0 = R.dist.call_tir(tir_func, (x,), out_sinfo=R.DTensor((128, 128), "float32", R.device_mesh((2, 2), R.Range(0, 4)), "S[0], R"))
+    gv0 = R.dist.call_tir(tir_func, (x,), out_ty=R.DTensor((128, 128), "float32", R.device_mesh((2, 2), R.Range(0, 4)), "S[0], R"))
     return gv0
             """,
     )
@@ -130,13 +122,14 @@ def test_module():
         """
 # from tvm.script import ir as I
 # from tvm.script import tirx as T
+# from tvm.tirx.layout import Axis
 # from tvm.script import relax as R
 
 @I.ir_module
 class Module:
     I.module_attrs({"device_num": 10})
     I.module_global_infos({"mesh": [R.device_mesh((2, 2), I.Range(0, 4)), R.device_mesh((1,), I.Range(4, 5))]})
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def tir_func(x: T.Buffer((T.int64(128), T.int64(128)), "float32"), y: T.Buffer((T.int64(128), T.int64(128)), "float32")):
         T.func_attr({"tirx.noalias": True})
         # with T.sblock("root"):
@@ -150,7 +143,7 @@ class Module:
     @R.function
     def foo(x: R.DTensor((128, 128), "float32", "mesh[0]", "S[0], R")) -> R.DTensor((128, 128), "float32", "mesh[0]", "S[0], R"):
         cls = Module
-        gv0 = R.dist.call_tir(cls.tir_func, (x,), out_sinfo=R.DTensor((128, 128), "float32", "mesh[0]", "S[0], R"))
+        gv0 = R.dist.call_tir(cls.tir_func, (x,), out_ty=R.DTensor((128, 128), "float32", "mesh[0]", "S[0], R"))
         return gv0
     """,
     )

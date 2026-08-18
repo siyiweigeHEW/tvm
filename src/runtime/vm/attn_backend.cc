@@ -59,6 +59,9 @@ std::unique_ptr<RaggedPrefillFunc> ConvertRaggedPrefillFunc(ffi::Array<ffi::Any>
     return std::make_unique<TIRRaggedPrefillFunc>(std::move(attn_func), attn_kind);
   }
   if (backend_name == "flashinfer") {
+    // Regular MHA passes [backend, run, plan]. MLA self-attention additionally
+    // passes [qk_head_dim, v_head_dim] because the ragged kernel runs on
+    // different head dims than the compressed MLA cache.
     TVM_FFI_ICHECK(args.size() == 3 || args.size() == 5);
     ffi::Function attn_func = args[1].cast<ffi::Function>();
     ffi::Function plan_func = args[2].cast<ffi::Function>();

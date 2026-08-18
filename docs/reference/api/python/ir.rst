@@ -20,10 +20,5 @@ tvm.ir
 .. automodule:: tvm.ir
    :members:
    :imported-members:
+   :exclude-members: Expr
    :autosummary:
-
-tvm.ir.diagnostics
-~~~~~~~~~~~~~~~~~~
-.. automodule:: tvm.ir.diagnostics
-   :members:
-   :imported-members:

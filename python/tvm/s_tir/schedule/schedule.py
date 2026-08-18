@@ -22,10 +22,10 @@ from typing import Literal
 
 from tvm_ffi import register_object as _register_object
 
-from tvm.error import TVMError, register_error
-from tvm.ir import GlobalVar, IRModule, PrimExpr
-from tvm.runtime import Object
-from tvm.tirx import Buffer, FloatImm, For, IntImm, PrimFunc, SBlock
+from tvm.error import register_error
+from tvm.ir import Expr, GlobalVar, IRModule, is_prim_expr
+from tvm.runtime import DataTypeCode, Object
+from tvm.tirx import Buffer, FloatImm, For, IntImm, PrimFunc, SBlock, is_buffer_var
 from tvm.tirx.function import IndexMap
 
 from . import _ffi_api
@@ -35,7 +35,7 @@ from .trace import Trace
 
 
 @register_error
-class ScheduleError(TVMError):
+class ScheduleError(RuntimeError):
     """Error that happens during TensorIR scheduling."""
 
 
@@ -65,7 +65,7 @@ class SBlockRV(Object):
 # This feature is not supported until python 3.10:
 # https://docs.python.org/3.10/whatsnew/3.10.html#pep-613-typealias
 # A random variable that evaluates to an integer
-ExprRV = PrimExpr  # pylint: disable=invalid-name
+ExprRV = Expr  # pylint: disable=invalid-name
 
 RAND_VAR_TYPE = ExprRV | SBlockRV | LoopRV  # pylint: disable=invalid-name
 
@@ -103,10 +103,10 @@ def _parse_seed(seed: int | None) -> int:
 
 def _get_sblock_default_dtype(block: SBlock) -> str:
     for i in block.iter_vars:
-        return i.var.dtype
+        return str(i.var.ty)
     for buffer_region in list(block.reads) + list(block.writes):
         for dom in buffer_region.region:
-            return dom.min.dtype
+            return str(dom.min.ty)
     return "int64"
 
 
@@ -621,7 +621,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_merge(a: T.handle, b: T.handle, c: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -649,7 +649,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_fuse(a: T.handle, b: T.handle, c: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -674,6 +674,7 @@ class Schedule(Object):
     @type_checked
     def fuse(self, *loops: list[LoopRV], preserve_unit_iters: bool = True) -> LoopRV:
         """Fuse a list of consecutive loops into one. It requires:
+
         1) The loops can't have annotations or thread bindings.
         2) The (i+1)-th loop must be the only child of the i-th loop.
         3) All loops must start with 0.
@@ -696,7 +697,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_fuse(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -718,7 +719,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_fuse(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -742,8 +743,10 @@ class Schedule(Object):
         disable_predication: bool = False,
     ) -> list[LoopRV]:
         """Split a loop into a list of consecutive loops. It requires:
-        1) The loop can't have annotation or thread binding.
-        2) The loop must start with 0.
+
+        - The loop can't have annotation or thread binding.
+        - The loop must start with 0.
+
         Predicates may be added to ensure the total loop numbers keeps unchanged.
         In `factors`, at most one of the factors can be None,
         which will be automatically inferred.
@@ -756,6 +759,7 @@ class Schedule(Object):
         factors: List[int | ExprRV | None]
             The splitting factors
             Potential inputs are:
+
             - None
             - ExprRV
             - Positive constant integers
@@ -783,7 +787,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_split(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -805,7 +809,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_split(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -837,6 +841,7 @@ class Schedule(Object):
         preserve_unit_iters: bool = True,
     ) -> list[LoopRV]:
         """Partition a loop into a list of consecutive loops. It requires:
+
         1) The loop can't have annotation or thread binding.
         Predicates may be added to ensure the total loop numbers keeps unchanged.
         In `factors`, at most one of the factors can be None,
@@ -869,7 +874,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_partition(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -942,6 +947,7 @@ class Schedule(Object):
         """
         Reorder a list of loops. It doesn't require the loops to be consecutive.
         It requires:
+
         1) The loops are in the same chain. That means: the loops can be ordered to [l_1, l_2, ... ,
         l_n] where l_i is an ancestor of l_{i+1} and there are only single-branch loops between
         l_1 and l_n (which also indicates they are under the same scope).
@@ -962,7 +968,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_reorder(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -984,7 +990,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_reorder(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -1015,7 +1021,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def matmul(
                 A: T.Buffer((128, 128), "float32"),
                 B: T.Buffer((128, 128), "float32"),
@@ -1040,7 +1046,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def matmul_after_reorder_block_iter_var(
                 A: T.Buffer((128, 128), "float32"),
                 B: T.Buffer((128, 128), "float32"),
@@ -1083,7 +1089,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_add_unit_loop(
                 A: T.Buffer((), "int32"),
                 B: T.Buffer((), "int32"),
@@ -1105,7 +1111,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_add_unit_loop(
                 A: T.Buffer((), "int32"),
                 B: T.Buffer((), "int32"),
@@ -1124,11 +1130,12 @@ class Schedule(Object):
     @type_checked
     def parallel(self, loop: LoopRV) -> None:
         """Parallelize the input loop. It requires:
-        1) The scope block that the loop is in should have stage-pipeline property
-        2) All the blocks under the loop are complete blocks or reduction blocks, and have affine
-        bindings
-        3) For each block under the loop, the loop can only be contained in data-parallel block
-        iters' bindings
+
+        - The scope block that the loop is in should have stage-pipeline property.
+        - All the blocks under the loop are complete blocks or reduction blocks, and have affine
+          bindings.
+        - For each block under the loop, the loop can only be contained in data-parallel block
+          iters' bindings.
 
         Parameters
         ----------
@@ -1142,7 +1149,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_parallel(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -1163,7 +1170,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_parallel(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -1179,11 +1186,12 @@ class Schedule(Object):
     @type_checked
     def vectorize(self, loop: LoopRV) -> None:
         """Vectorize the input loop. It requires:
-        1) The scope block that the loop is in should have stage-pipeline property
-        2) All the blocks under the loop are complete blocks or reduction blocks, and have affine
-        bindings
-        3) For each block under the loop, the loop can only be contained in data-parallel block
-        iters' bindings
+
+        - The scope block that the loop is in should have stage-pipeline property.
+        - All the blocks under the loop are complete blocks or reduction blocks, and have affine
+          bindings.
+        - For each block under the loop, the loop can only be contained in data-parallel block
+          iters' bindings.
 
         Parameters
         ----------
@@ -1197,7 +1205,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_vectorize(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -1218,7 +1226,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_vectorize(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -1234,24 +1242,22 @@ class Schedule(Object):
     @type_checked
     def bind(self, loop: LoopRV, thread_axis: str) -> None:
         """Bind the input loop to the given thread axis. It requires:
-        1) The scope block that the loop is in should have stage-pipeline property
-        2) All the blocks under the loop are complete blocks or reduction blocks, and have affine
-        bindings
-        3) For each block under the loop, if the thread axis starts with "threadIdx`, the loop can
-        only be contained in data-parallel block iter and reduction block iters' bindings. Otherwise
-        the loop can only be contained in data-parallel block iters' bindings
+
+        - The scope block that the loop is in should have stage-pipeline property.
+        - All the blocks under the loop are complete blocks or reduction blocks, and have affine
+          bindings.
+        - For each block under the loop, if the thread axis starts with ``threadIdx``, the loop can
+          only be contained in data-parallel block iter and reduction block iters' bindings.
+          Otherwise the loop can only be contained in data-parallel block iters' bindings.
 
         Parameters
         ----------
         loop : LoopRV
             The loop to be bound to the thread axis
         thread_axis : str
-            The thread axis to be bound to the loop. Possible candidates:
-            - blockIdx.x/y/z
-            - threadIdx.x/y/z
-            - vthread.x/y/z
-            - vthread (It is a legacy behavior that will be deprecated. Please use `vthread.x/y/z`
-            instead.)
+            The thread axis to be bound to the loop. Possible candidates are ``blockIdx.x/y/z``,
+            ``threadIdx.x/y/z``, ``vthread.x/y/z``, and ``vthread``. The ``vthread`` value is a
+            legacy behavior that will be deprecated. Please use ``vthread.x/y/z`` instead.
 
         Examples
         --------
@@ -1260,7 +1266,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_bind(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -1282,7 +1288,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_bind(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -1311,7 +1317,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_unroll(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -1332,7 +1338,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_unroll(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -1356,6 +1362,7 @@ class Schedule(Object):
         consumer_blocks: list[SBlockRV | str] | None = None,
     ) -> SBlockRV:
         """Create a block that reads a buffer region into a read cache. It requires:
+
 
         1) There is at most one block who write the buffer in the scope.
 
@@ -1389,7 +1396,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_cache_read(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -1411,7 +1418,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_cache_read(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -1451,6 +1458,7 @@ class Schedule(Object):
     ) -> SBlockRV:
         """Create a block that reads a buffer region into a write cache. It requires:
 
+
         1) There is only one block who write the buffer in the scope.
 
         2) The scope block have stage-pipeline property.
@@ -1483,7 +1491,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_cache_write(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -1505,7 +1513,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_cache_write(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -1576,7 +1584,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_reindex_cache_read(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -1598,7 +1606,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_reindex_cache_read(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -1676,7 +1684,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_reindex_cache_write(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -1698,7 +1706,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_cache_write(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (64, 2, 128))
@@ -1768,7 +1776,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_cache_inplace(data_io: T.Buffer((64), "int32")):
                 for i0 in T.serial(1):
                     with T.sblock("A"):
@@ -1789,7 +1797,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def cache_inplace(data_io: T.Buffer(64, "int32")) -> None:
                 data_io_local = T.sblock_alloc_buffer([64], dtype="int32", scope="local")
                 for i0 in T.serial(1):
@@ -1852,7 +1860,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def resize(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (1, 3, 40, 40))
                 B = T.match_buffer(b, (1, 3, 80, 80))
@@ -1874,7 +1882,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def resize_cache_index(
                 A: T.Buffer((1, 3, 40, 40), "float32"), B: T.Buffer((1, 3, 80, 80), "float32")
             ) -> None:
@@ -1912,6 +1920,7 @@ class Schedule(Object):
         """Create a block that read/write a buffer region into a read/write cache with reindexing.
         The layout of the cache will be the same as by the iterators of the block that reads/writes
         the buffer. It requires:
+
         1) There is only one block who reads/writes the target buffer
         2) There is only one buffer load/store of this buffer in the block
 
@@ -1951,7 +1960,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_reindex(
                 A: T.Buffer((128, 128), "float32"),
                 B: T.Buffer((128, 128), "float32")
@@ -1973,7 +1982,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_reindex(
                 A: T.Buffer((128, 128), "float32"),
                 B: T.Buffer((128, 128), "float32")
@@ -2027,6 +2036,7 @@ class Schedule(Object):
         loops induced by the block so that the buffer region produced by the producer block could
         cover those regions consumed by its consumer blocks under the given loop. It requires:
 
+
         1) `block` and `loop` are under the same scope, `loop` is not the ancestor of `block`
 
         2) The scope block has stage-pipeline property
@@ -2064,7 +2074,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_compute_at(a: T.handle, c: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128), "float32")
                 B = T.sblock_alloc_buffer((128, 128), "float32")
@@ -2092,7 +2102,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_compute_at(a: T.handle, c: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128), "float32")
                 B = T.sblock_alloc_buffer((128, 128), "float32")
@@ -2124,6 +2134,7 @@ class Schedule(Object):
         """Reverse-Compute-At. Move a consumer block under the specific loop, and regenerate the
         loops induced by the block so that the buffer region consumed by the consumer block could
         cover those regions produced by its producer blocks under the given loop. It requires:
+
 
         1) `block` and `loop` are under the same scope, `loop` is not the ancestor of `block`
 
@@ -2159,7 +2170,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_reverse_compute_at(a: T.handle, c: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128), "float32")
                 B = T.sblock_alloc_buffer((128, 128), "float32")
@@ -2187,7 +2198,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_reverse_compute_at(a: T.handle, c: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128), "float32")
                 B = T.sblock_alloc_buffer((128, 128), "float32")
@@ -2212,6 +2223,7 @@ class Schedule(Object):
     def compute_inline(self, block: SBlockRV | str) -> None:
         """Inline a block into its consumer(s). It requires:
 
+
         1) The block is a complete non-root block, which only produces one buffer
 
         2) The block must not be the only leaf in the scope.
@@ -2234,7 +2246,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_inline(a: T.handle, c: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.sblock_alloc_buffer((128, 128))
@@ -2260,7 +2272,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_inline(a: T.handle, c: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 C = T.match_buffer(c, (128, 128))
@@ -2276,6 +2288,7 @@ class Schedule(Object):
     @type_checked
     def reverse_compute_inline(self, block: SBlockRV | str) -> None:
         """Inline a block into its only producer. It requires:
+
 
         1) The block is a complete non-root block, which only produces and consumes one buffer
 
@@ -2302,7 +2315,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_inline(a: T.handle, c: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.sblock_alloc_buffer((128, 128))
@@ -2328,7 +2341,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_inline(a: T.handle, c: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 C = T.match_buffer(c, (128, 128))
@@ -2351,9 +2364,12 @@ class Schedule(Object):
         """Fuse an epilogue block into a reduction block.
 
         It requires:
+
+
         1) The reduction block is a complete reduction block
         2) The epilogue block only reads from the reduction block's output
         3) The epilogue matches one of the supported patterns:
+
            - Bias: ``output = reduction_result + bias``
            - BiasReLU: ``output = max(reduction_result + bias, 0)``
            - Clipping: ``output = min(max(reduction_result, lower), upper)``
@@ -2432,7 +2448,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_decompose(a: ty.handle, b: ty.handle, c: ty.handle) -> None:
                 A = tirx.match_buffer(a, [128, 128])
                 B = tirx.match_buffer(b, [128, 128])
@@ -2457,7 +2473,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_decompose(a: ty.handle, b: ty.handle, c: ty.handle) -> None:
                 A = tirx.match_buffer(a, [128, 128])
                 B = tirx.match_buffer(b, [128, 128])
@@ -2556,7 +2572,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_rfactor(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128, 128))
                 B = T.match_buffer(b, (128,))
@@ -2580,7 +2596,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_rfactor(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, [128, 128, 128])
                 B = T.match_buffer(b, [128])
@@ -2656,7 +2672,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_storage_align(a: T.handle, c: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.sblock_alloc_buffer((128, 128))
@@ -2682,7 +2698,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_storage_align(a: T.handle, c: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.sblock_alloc_buffer((128, 128))
@@ -2731,7 +2747,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_set_scope(
                 A: T.Buffer((128, 128), "float32"), C: T.Buffer((128, 128), "float32")
             ) -> None:
@@ -2758,7 +2774,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_set_scope(
                 A: T.Buffer((128, 128), "float32"), C: T.Buffer((128, 128), "float32")
             ) -> None:
@@ -2810,7 +2826,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_set_dtype(
                 A: T.Buffer((128, 128), "float32"), C: T.Buffer((128, 128), "float32")
             ) -> None:
@@ -2837,7 +2853,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_set_dtype(
                 A: T.Buffer((128, 128), "float32"), C: T.Buffer((128, 128), "float32")
             ) -> None:
@@ -2889,7 +2905,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_blockize(
                 A: T.Buffer((128, 128), "float32"),
                 B: T.Buffer((128, 128), "float32")
@@ -2916,7 +2932,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_blockize(
                 A: T.Buffer((128, 128), "float32"),
                 B: T.Buffer((128, 128), "float32")
@@ -2968,7 +2984,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_tensorize(
                 A: T.Buffer((128, 128), "float32"),
                 B: T.Buffer((128, 128), "float32"),
@@ -2989,7 +3005,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def mma_desc(a: T.handle, b: T.handle, c: T.handle) -> None:
                 A = T.match_buffer(a, (16, 16), align=128, offset_factor=1)
                 B = T.match_buffer(b, (16, 16), align=128, offset_factor=1)
@@ -3004,7 +3020,7 @@ class Schedule(Object):
                             C[vi, vj] = C[vi, vj] + A[vi, vk] * B[vj, vk]
 
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def mma_intrin(a: T.handle, b: T.handle, c: T.handle) -> None:
                 A = T.match_buffer(a, (16, 16), align=128, offset_factor=1)
                 B = T.match_buffer(b, (16, 16), align=128, offset_factor=1)
@@ -3023,7 +3039,7 @@ class Schedule(Object):
                             B.elem_offset // 256,
                             C.data,
                             C.elem_offset // 256,
-                            dtype="handle",
+                            dtype="void",
                         )
                     )
 
@@ -3043,7 +3059,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_tensorize(
                 A: T.Buffer((128, 128), "float32"),
                 B: T.Buffer((128, 128), "float32"),
@@ -3088,7 +3104,7 @@ class Schedule(Object):
                                 B_1.elem_offset // 256,
                                 C_1.data,
                                 C_1.elem_offset // 256,
-                                dtype="handle",
+                                dtype="void",
                             )
                         )
         """
@@ -3127,7 +3143,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_annotate(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -3148,7 +3164,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_annotate(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -3181,7 +3197,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_unannotate(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -3203,7 +3219,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_unannotate(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128))
                 B = T.match_buffer(b, (128, 128))
@@ -3256,7 +3272,7 @@ class Schedule(Object):
             )
             buffer_obj, (buffer_index_type, buffer_index) = next(iter(possible_buffers.items()))
 
-        elif isinstance(buffer, Buffer):
+        elif is_buffer_var(buffer):
             # Buffer lookup has unique id, can break out early
             found = False
             for buffer_index_type, buffer_index, buffer_obj in iter_buffers():
@@ -3299,7 +3315,7 @@ class Schedule(Object):
         block: SBlockRV | str,
         buffer: tuple[str, int] | str | Buffer,
         index_map: IndexMap | Callable,
-        pad_value: int | float | PrimExpr | IndexMap | Callable | None = None,
+        pad_value: int | float | Expr | IndexMap | Callable | None = None,
         *,
         assume_injective_transform: bool = False,
     ) -> None:
@@ -3333,12 +3349,7 @@ class Schedule(Object):
 
             The transformation to apply.
 
-            If `index_map` is a callable, and the returned list
-            contains IndexMap.AXIS_SEPARATOR, the SetAxisSeparators
-            primitive will be called in addition to the
-            TransformLayout primitive.
-
-        pad_value: Optional[int | float | PrimExpr | IndexMap | Callable]
+        pad_value: Optional[int | float | Expr | IndexMap | Callable]
 
             The value to be used for any padding introduced by the
             transformation.  If the schedule contains a producer block
@@ -3361,7 +3372,7 @@ class Schedule(Object):
 
             If None, the transformation may not introduce padding.
 
-            If an int, float or PrimExpr, the transformation is the
+            If an int, float or Expr, the transformation is the
             specific value to be present in the padding.
 
             If an IndexMap or Callable, the transformation is the
@@ -3381,7 +3392,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_transform_layout(a: T.handle, c: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128), "float32")
                 B = T.sblock_alloc_buffer((128, 128), "float32")
@@ -3408,7 +3419,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def two_elementwise_transformed_intermediate_buffer(a: T.handle, c: T.handle) -> None:
                 A = T.match_buffer(a, (128, 128), "float32")
                 B = T.sblock_alloc_buffer((8, 8, 16, 16), "float32")
@@ -3426,15 +3437,13 @@ class Schedule(Object):
         block = self._normalize_block_arg(block)
         buffer_index_type, buffer_index, buffer_obj = self._normalize_buffer_arg(block, buffer)
 
-        ndim = len(buffer_obj.shape)
+        ndim = len(buffer_obj.ty.shape)
         if callable(index_map):
-            index_map, axis_separators = IndexMap.from_func_with_separators(
+            index_map = IndexMap.from_func(
                 index_map,
                 ndim=ndim,
                 index_dtype=_get_sblock_default_dtype(self.get(block)),
             )
-        else:
-            axis_separators = []
 
         if pad_value is None:
             pass
@@ -3449,10 +3458,14 @@ class Schedule(Object):
             # buffer's type.  If the default `tvm.runtime.convert`
             # behavior is applied, these would be converted to
             # int32/float32, which may not match the buffer's type.
-            if "int" in buffer_obj.dtype and isinstance(pad_value, int):
-                pad_value = IntImm(buffer_obj.dtype, pad_value)
-            elif "float" in buffer_obj.dtype and isinstance(pad_value, float):
-                pad_value = FloatImm(buffer_obj.dtype, pad_value)
+            if buffer_obj.ty.dtype.matches_code(DataTypeCode.INT, DataTypeCode.UINT) and isinstance(
+                pad_value, int
+            ):
+                pad_value = IntImm(buffer_obj.ty.dtype.dtype, pad_value)
+            elif buffer_obj.ty.dtype.matches_code(
+                DataTypeCode.FLOAT, DataTypeCode.BFLOAT
+            ) and isinstance(pad_value, float):
+                pad_value = FloatImm(buffer_obj.ty.dtype.dtype, pad_value)
             pad_value = IndexMap.from_func(
                 lambda *indices: pad_value,
                 ndim=len(index_map.final_indices),
@@ -3469,10 +3482,6 @@ class Schedule(Object):
             pad_value,
             assume_injective_transform,
         )
-        if axis_separators:
-            _ffi_api.ScheduleSetAxisSeparator(  # type: ignore # pylint: disable=no-member
-                self, block, buffer_index, buffer_index_type_enum, axis_separators
-            )
 
     @type_checked
     def transform_block_layout(self, block: SBlockRV | str, index_map: IndexMap | Callable) -> None:
@@ -3493,7 +3502,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_transform_block_layout(
                 A: T.Buffer((16, 16), "float32"),
                 B: T.Buffer((16, 16), "float32")
@@ -3515,7 +3524,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_transform_block_layout(
                 A: T.Buffer((16, 16), "float32"),
                 B: T.Buffer((16, 16), "float32")
@@ -3533,103 +3542,6 @@ class Schedule(Object):
             )
         _ffi_api.ScheduleTransformBlockLayout(  # type: ignore # pylint: disable=no-member
             self, block, index_map
-        )
-
-    def set_axis_separator(
-        self,
-        block: SBlockRV | str,
-        buffer: tuple[str, int] | str | Buffer,
-        axis_separators: list[int] | None,
-    ) -> None:
-        """Set the axis separator of a buffer, where the buffer is specified by a block and a read
-        or write index.
-
-        Parameters
-        ----------
-        block : SBlockRV | str
-
-            The block that accesses the target buffer.  If a string,
-            this must uniquely identify a block.
-
-        buffer: Union[Tuple[str,int], Buffer, str]
-
-            The buffer to be transformed, or a specification of how to
-            identify the buffer to be transformed.
-
-            If `buffer` if a tuple of ``(str,int)``, the first item
-            should be either "read" or "write", and the second item is
-            an index into the block's read or write regions.
-
-            If `buffer` is a string, it is the name of the buffer,
-            which must exist within the reads/writes of the block.  In
-            addition, the reads/writes of the block may not contain
-            more than one buffer with this name.
-
-            If `buffer` is a Buffer object, it must exist within the
-            reads/writes of the block.
-
-        axis_separators : Optional[List[int]]
-
-            The axis separators.
-
-        Examples
-        --------
-
-        Before set_axis_separator, in TensorIR, the IR is:
-
-        .. code-block:: python
-
-            @T.prim_func
-            def before_set_axis_separator(
-                A: T.Buffer((128, 128), "float32"), C: T.Buffer((128, 128), "float32")
-            ) -> None:
-                B = T.sblock_alloc_buffer((128, 128), dtype="float32")
-
-                for i, j in T.grid(128, 128):
-                    with T.sblock("B"):
-                        vi, vj = T.axis.remap("SS", [i, j])
-                        B[vi, vj] = A[vi, vj] * 2.0
-                for i, j in T.grid(128, 128):
-                    with T.sblock("C"):
-                        vi, vj = T.axis.remap("SS", [i, j])
-                        C[vi, vj] = B[vi, vj] + 1.0
-
-        Create the schedule and do set_axis_separator:
-
-        .. code-block:: python
-
-            sch = tvm.s_tir.Schedule(before_set_axis_separator)
-            sch.set_axis_separators(sch.get_sblock("B"), buffer=("write", 0),
-                                    axis_separators=[1])
-            print(sch.mod["main"].script())
-
-        After applying set_axis_separator, the IR becomes:
-
-        .. code-block:: python
-
-            @T.prim_func
-            def after_set_axis_separators(
-                A: T.Buffer((128, 128), "float32"), C: T.Buffer((128, 128), "float32")
-            ) -> None:
-                B = T.sblock_alloc_buffer([128, 128], dtype="float32", axis_separators=[1])
-
-                for i, j in T.grid(128, 128):
-                    with T.sblock("B"):
-                        vi, vj = T.axis.remap("SS", [i, j])
-                        B[vi, vj] = A[vi, vj] * T.float32(2)
-                for i, j in T.grid(128, 128):
-                    with T.sblock("C"):
-                        vi, vj = T.axis.remap("SS", [i, j])
-                        C[vi, vj] = B[vi, vj] + T.float32(1)
-        """
-        axis_separators = axis_separators or []
-
-        block = self._normalize_block_arg(block)
-        buffer_index_type, buffer_index, _ = self._normalize_buffer_arg(block, buffer)
-
-        buffer_index_type_enum = 0 if buffer_index_type == "read" else 1
-        _ffi_api.ScheduleSetAxisSeparator(  # type: ignore # pylint: disable=no-member
-            self, block, buffer_index, buffer_index_type_enum, axis_separators
         )
 
     ########## Schedule: Padding decomposition #########
@@ -3669,7 +3581,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_decompose(x: T.Buffer(128, "int32"), y: T.Buffer(140, "int32")):
                 for i in range(140):
                     with T.sblock("block"):
@@ -3689,7 +3601,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_decompose(x: T.Buffer(128, "int32"), y: T.Buffer(140, "int32")):
                 for i in T.serial(140):
                     with T.sblock("block_pad_const"):
@@ -3738,7 +3650,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_pad_einsum(
                 A: T.Buffer((127, 127), "float32"),
                 B: T.Buffer((127, 127), "float32"),
@@ -3764,7 +3676,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def main(
                 A: T.Buffer((127, 127), "float32"),
                 B: T.Buffer((127, 127), "float32"),
@@ -3816,6 +3728,7 @@ class Schedule(Object):
         as `rolling axis`, fold and circularize the buffer along the rolling dimension,
         append block predicate to avoid recomputing overlapping elements. It requires:
 
+
         1) The block is not an output block and has only RAW dependencies.
 
         2) The buffer to be an intermediate buffer defined via `alloc_buffer`.
@@ -3840,7 +3753,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_rolling_buffer(
                 A: T.Buffer((12, 12), "int8"), C: T.Buffer((8, 8), "int8")
             ) -> None:
@@ -3877,7 +3790,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_rolling_buffer(
                 A: T.Buffer((12, 12), "int8"),
                 C: T.Buffer((8, 8), "int8")
@@ -3966,10 +3879,10 @@ class Schedule(Object):
             The buffer type: "read" or "write"
         gen_new_ranges : Callable
             A function that takes the block's iter_vars and returns a
-            Tuple[Union[PrimExpr, Tuple[PrimExpr, PrimExpr]], ...]
+            Tuple[Union[Expr, Tuple[Expr, Expr]], ...]
             which defines the new read or write region for the buffer.
             Each element in the tuple can be:
-            - A single PrimExpr representing the iter_var itself
+            - A single Expr representing the iter_var itself
             - A tuple of two PrimExprs representing the range (begin, end)
 
         Examples
@@ -3979,7 +3892,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def before_annotate_buffer_access(
                 A: T.Buffer((128, 128), "float32"),
                 C: T.Buffer((128, 128), "float32")
@@ -4008,7 +3921,7 @@ class Schedule(Object):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def after_annotate_buffer_access(
                 A: T.Buffer((128, 128), "float32"),
                 C: T.Buffer((128, 128), "float32")
@@ -4063,10 +3976,10 @@ class Schedule(Object):
                         "Tuple must have exactly 2 elements to represent (begin, end)."
                     )
                 result.extend(rng)
-            elif isinstance(rng, PrimExpr):
+            elif is_prim_expr(rng):
                 result.extend([rng, rng + 1])  # Single point represented as (rng, rng + 1)
             else:
-                raise TypeError(f"Expected PrimExpr or tuple of PrimExpr, got {type(rng)}")
+                raise TypeError(f"Expected Expr or tuple of Expr, got {type(rng)}")
 
         # Create index_map using IndexMap constructor
         index_map = IndexMap(

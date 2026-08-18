@@ -19,6 +19,8 @@
 #ifndef TVM_S_TIR_SCHEDULE_CONCRETE_SCHEDULE_H_
 #define TVM_S_TIR_SCHEDULE_CONCRETE_SCHEDULE_H_
 
+#include <tvm/ffi/cast.h>
+
 #include <memory>
 #include <utility>
 #include <vector>
@@ -34,7 +36,7 @@ class ConcreteScheduleNode : public ScheduleNode {
   friend class ScheduleCopier;
 
  public:
-  using TSymbolTable = ffi::Map<ObjectRef, ObjectRef>;
+  using TSymbolTable = ffi::Map<ffi::ObjectRef, ffi::ObjectRef>;
 
  protected:
   /*! \brief The internal state of scheduling */
@@ -46,9 +48,9 @@ class ConcreteScheduleNode : public ScheduleNode {
   /*! \brief A symbol table that maps random variables to concrete StmtSRef/Integers */
   TSymbolTable symbol_table_;
   /*! \brief A persistent stateless arithmetic analyzer. */
-  std::unique_ptr<arith::Analyzer> analyzer_;
+  arith::Analyzer analyzer_;
   /*! \brief The value of random state for sampling. */
-  support::LinearCongruentialEngine::TRandState rand_state_;
+  LinearCongruentialEngine::TRandState rand_state_;
 
  public:
   static void RegisterReflection() {
@@ -64,8 +66,8 @@ class ConcreteScheduleNode : public ScheduleNode {
   ffi::Optional<GlobalVar> func_working_on() const final { return func_working_on_; }
   void WorkOn(const ffi::String& func_name) final;
   Schedule Copy() override;
-  void Seed(support::LinearCongruentialEngine::TRandState seed) final;
-  support::LinearCongruentialEngine::TRandState ForkSeed() final;
+  void Seed(LinearCongruentialEngine::TRandState seed) final;
+  LinearCongruentialEngine::TRandState ForkSeed() final;
 
  public:
   /******** Lookup random variables ********/
@@ -84,16 +86,16 @@ class ConcreteScheduleNode : public ScheduleNode {
 
  public:
   /******** Schedule: Sampling ********/
-  ExprRV SampleCategorical(const ffi::Array<Integer>& candidates, const ffi::Array<FloatImm>& probs,
-                           ffi::Optional<Integer> decision = std::nullopt) override;
+  ExprRV SampleCategorical(const ffi::Array<int64_t>& candidates, const ffi::Array<FloatImm>& probs,
+                           ffi::Optional<int64_t> decision = std::nullopt) override;
   ffi::Array<ExprRV> SamplePerfectTile(
       const LoopRV& loop_rv, int n, int max_innermost_factor,
-      ffi::Optional<ffi::Array<Integer>> decision = std::nullopt) override;
+      ffi::Optional<ffi::Array<int64_t>> decision = std::nullopt) override;
   ffi::Array<ExprRV> SamplePartitionedTile(
       const LoopRV& loop_rv, int n, int partition_pos, int innerpart_factor,
-      ffi::Optional<ffi::Array<Integer>> decision = std::nullopt) override;
+      ffi::Optional<ffi::Array<int64_t>> decision = std::nullopt) override;
   LoopRV SampleComputeLocation(const SBlockRV& block_rv,
-                               ffi::Optional<Integer> decision = std::nullopt) override;
+                               ffi::Optional<int64_t> decision = std::nullopt) override;
   /******** Schedule: Get blocks & loops ********/
   SBlockRV GetSBlock(const ffi::String& name, const ffi::Optional<ffi::String>& func_name) override;
   ffi::Array<LoopRV> GetLoops(const SBlockRV& block_rv) override;
@@ -111,7 +113,7 @@ class ConcreteScheduleNode : public ScheduleNode {
                                    const ffi::Array<ffi::Optional<ExprRV>>& factors,
                                    bool preserve_unit_iters) override;
   void Reorder(const ffi::Array<LoopRV>& ordered_loop_rvs) override;
-  void ReorderBlockIterVar(const SBlockRV& block_rv, const ffi::Array<Integer> new_order) override;
+  void ReorderBlockIterVar(const SBlockRV& block_rv, const ffi::Array<int64_t> new_order) override;
   LoopRV AddUnitLoop(const SBlockRV& block_rv) override;
   LoopRV AddUnitLoop(const LoopRV& loop_rv) override;
   /******** Schedule: Manipulate ForKind ********/
@@ -153,7 +155,7 @@ class ConcreteScheduleNode : public ScheduleNode {
   /******** Schedule: Reduction ********/
   SBlockRV RFactor(const LoopRV& loop_rv, int factor_axis) override;
   SBlockRV DecomposeReduction(const SBlockRV& block_rv, const LoopRV& loop_rv) override;
-  void PadEinsum(const SBlockRV& block_rv, const ffi::Array<Integer>& padding) override;
+  void PadEinsum(const SBlockRV& block_rv, const ffi::Array<int64_t>& padding) override;
   /******** Schedule: SBlock annotation ********/
   void StorageAlign(const SBlockRV& block_rv, int buffer_index, int axis, int factor,
                     int offset) override;
@@ -179,9 +181,6 @@ class ConcreteScheduleNode : public ScheduleNode {
                        const ffi::Optional<IndexMap>& pad_value,
                        bool assume_injective_transform = false) override;
   void TransformBlockLayout(const SBlockRV& block_rv, const IndexMap& index_map) override;
-  void SetAxisSeparator(const SBlockRV& block_rv, int buffer_index,
-                        BufferIndexType buffer_index_type,
-                        const ffi::Array<IntImm>& axis_separators) override;
   /******** Schedule: Padding decomposition ********/
   SBlockRV DecomposePadding(const SBlockRV& block_rv, const LoopRV& loop_rv) override;
   /******** Schedule: Buffer transformation ********/
@@ -233,7 +232,7 @@ class ConcreteScheduleNode : public ScheduleNode {
   inline ffi::Array<ExprRV> CreateRV(const std::vector<int64_t>& value,
                                      bool convert_negone_to_none = false);
   /*! \brief Remove a random variable from the symbol table */
-  inline void RemoveFromSymbolTable(const ObjectRef& rv);
+  inline void RemoveFromSymbolTable(const ffi::ObjectRef& rv);
   /*!
    * \brief Check the annotation value is valid and look up the random variable. Raises an exception
    * if the type of the annotation value is not allowed.
@@ -259,14 +258,14 @@ inline For ConcreteScheduleNode::Get(const LoopRV& loop_rv) const {
 }
 
 inline PrimExpr ConcreteScheduleNode::Get(const ExprRV& expr_rv) const {
-  PrimExpr transformed = Substitute(expr_rv, [this](const Var& var) -> ffi::Optional<PrimExpr> {
+  PrimExpr transformed = Substitute(expr_rv, [this](const Var& var) -> ffi::Optional<Expr> {
     auto it = this->symbol_table_.find(var);
     if (it == this->symbol_table_.end()) {
       TVM_FFI_THROW(IndexError) << "Cannot find corresponding ExprRV: " << var;
     }
-    const ObjectRef& obj = (*it).second;
+    const ffi::ObjectRef& obj = (*it).second;
     const auto* int_imm = TVM_TYPE_AS(obj, IntImmNode);
-    return Integer(int_imm->value);
+    return IntImm::Int32(int_imm->value);
   });
   return this->analyzer_->Simplify(transformed);
 }
@@ -276,7 +275,7 @@ inline bool ConcreteScheduleNode::HasBlock(const SBlockRV& block_rv) const {
   if (it == this->symbol_table_.end()) {
     return false;
   }
-  const ObjectRef& obj = (*it).second;
+  const ffi::ObjectRef& obj = (*it).second;
   const auto* sref = obj.as<StmtSRefNode>();
   if (sref == nullptr || sref->stmt == nullptr) {
     return false;
@@ -289,7 +288,7 @@ inline StmtSRef ConcreteScheduleNode::GetSRef(const SBlockRV& block_rv) const {
   if (it == this->symbol_table_.end()) {
     TVM_FFI_THROW(IndexError) << "Cannot find corresponding SBlockRV: " << block_rv;
   }
-  const ObjectRef& obj = (*it).second;
+  const ffi::ObjectRef& obj = (*it).second;
   const auto* sref = obj.as<StmtSRefNode>();
   if (sref == nullptr) {
     TVM_FFI_THROW(ValueError) << "SBlockRV's corresponding type is invalid: "
@@ -308,7 +307,7 @@ inline StmtSRef ConcreteScheduleNode::GetSRef(const LoopRV& loop_rv) const {
   if (it == this->symbol_table_.end()) {
     TVM_FFI_THROW(IndexError) << "Cannot find corresponding LoopRV: " << loop_rv;
   }
-  const ObjectRef& obj = (*it).second;
+  const ffi::ObjectRef& obj = (*it).second;
   if (obj.same_as(inline_mark)) {
     return inline_mark;
   }
@@ -367,9 +366,9 @@ inline T ConcreteScheduleNode::CreateRV(const StmtSRef& sref) {
 }
 
 inline ExprRV ConcreteScheduleNode::CreateRV(int64_t value) {
-  Var rv("v" + std::to_string(this->symbol_table_.size() + 1), DataType::Int(32));
-  this->symbol_table_.Set(rv, Integer(static_cast<int32_t>(value)));
-  return rv;
+  Var rv("v" + std::to_string(this->symbol_table_.size() + 1), PrimType::Int(32));
+  this->symbol_table_.Set(rv, IntImm::Int32(static_cast<int32_t>(value)));
+  return rv.as_or_throw<PrimExpr>();
 }
 
 inline ffi::Array<ExprRV> ConcreteScheduleNode::CreateRV(const std::vector<int64_t>& value,
@@ -386,7 +385,7 @@ inline ffi::Array<ExprRV> ConcreteScheduleNode::CreateRV(const std::vector<int64
   return results;
 }
 
-inline void ConcreteScheduleNode::RemoveFromSymbolTable(const ObjectRef& obj) {
+inline void ConcreteScheduleNode::RemoveFromSymbolTable(const ffi::ObjectRef& obj) {
   auto it = this->symbol_table_.find(obj);
   if (it != this->symbol_table_.end()) {
     this->symbol_table_.erase(obj);

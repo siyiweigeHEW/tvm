@@ -24,7 +24,7 @@
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ffi/string.h>
-#include <tvm/runtime/object.h>
+#include <tvm/runtime/base.h>
 #include <tvm/s_tir/meta_schedule/arg_info.h>
 #include <tvm/s_tir/meta_schedule/measure_candidate.h>
 #include <tvm/s_tir/meta_schedule/runner.h>
@@ -39,7 +39,7 @@ namespace meta_schedule {
 class TuneContext;
 
 /*! \brief Cost model. */
-class CostModelNode : public runtime::Object {
+class CostModelNode : public ffi::Object {
  public:
   /*! \brief Virtual destructor. */
   virtual ~CostModelNode() = default;
@@ -75,7 +75,7 @@ class CostModelNode : public runtime::Object {
                                       const ffi::Array<MeasureCandidate>& candidates) = 0;
 
   static constexpr const bool _type_mutable = true;
-  TVM_FFI_DECLARE_OBJECT_INFO("s_tir.meta_schedule.CostModel", CostModelNode, Object);
+  TVM_FFI_DECLARE_OBJECT_INFO("s_tir.meta_schedule.CostModel", CostModelNode, ffi::Object);
 };
 
 /*! \brief The cost model with customized methods on the python-side. */
@@ -108,12 +108,6 @@ class PyCostModelNode : public CostModelNode {
    */
   using FPredict = ffi::TypedFunction<void(const TuneContext&, const ffi::Array<MeasureCandidate>&,
                                            void* p_addr)>;
-  /*!
-   * \brief Get the cost model as string with name.
-   * \return The string representation of the cost model.
-   */
-  using FAsString = ffi::TypedFunction<ffi::String()>;
-
   /*! \brief The packed function to the `Load` function. */
   FLoad f_load;
   /*! \brief The packed function to the `Save` function. */
@@ -122,8 +116,6 @@ class PyCostModelNode : public CostModelNode {
   FUpdate f_update;
   /*! \brief The packed function to the `Predict` function. */
   FPredict f_predict;
-  /*! \brief The packed function to the `AsString` function. */
-  FAsString f_as_string;
 
   void Load(const ffi::String& path);
   void Save(const ffi::String& path);
@@ -139,23 +131,21 @@ class PyCostModelNode : public CostModelNode {
  * \brief Managed reference to CostModelNode
  * \sa CostModelNode
  */
-class CostModel : public runtime::ObjectRef {
+class CostModel : public ffi::ObjectRef {
  public:
   /*!
-   * \brief Create a feature extractor with customized methods on the python-side.
+   * \brief Create a cost model with customized methods on the python-side.
    * \param f_load The packed function of `Load`.
    * \param f_save The packed function of `Save`.
    * \param f_update The packed function of `Update`.
    * \param f_predict The packed function of `Predict`.
-   * \param f_as_string The packed function of `AsString`.
-   * \return The feature extractor created.
+   * \return The cost model created.
    */
-  TVM_DLL static CostModel PyCostModel(PyCostModelNode::FLoad f_load,        //
-                                       PyCostModelNode::FSave f_save,        //
-                                       PyCostModelNode::FUpdate f_update,    //
-                                       PyCostModelNode::FPredict f_predict,  //
-                                       PyCostModelNode::FAsString f_as_string);
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(CostModel, ObjectRef, CostModelNode);
+  TVM_DLL static CostModel PyCostModel(PyCostModelNode::FLoad f_load,      //
+                                       PyCostModelNode::FSave f_save,      //
+                                       PyCostModelNode::FUpdate f_update,  //
+                                       PyCostModelNode::FPredict f_predict);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(CostModel, ffi::ObjectRef, CostModelNode);
 };
 
 }  // namespace meta_schedule

@@ -16,6 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/s_tir/stmt.h>
 
@@ -46,7 +47,7 @@ class ParallelizeVectorizeUnrollNode : public ScheduleRuleNode {
  public:
   // Inherited from ScheduleRuleNode
   void InitializeWithTuneContext(const TuneContext& context) final {
-    TVM_FFI_ICHECK(context->target.defined());
+    TVM_FFI_ICHECK(context->target.has_value());
     if (this->max_jobs_per_core != -1) {
       Target target = context->target.value();
       this->max_parallel_extent_ = GetTargetNumCores(target) * max_jobs_per_core;
@@ -63,17 +64,18 @@ class ParallelizeVectorizeUnrollNode : public ScheduleRuleNode {
     // Parallelization
     if (max_jobs_per_core != -1) {
       sch->Annotate(root_rv, s_tir::attr::meta_schedule_parallel,
-                    Integer(this->max_parallel_extent_));
+                    IntImm::Int32(this->max_parallel_extent_));
     }
     // Vectorization
     if (max_vectorize_extent != -1) {
-      sch->Annotate(root_rv, s_tir::attr::meta_schedule_vectorize, Integer(max_vectorize_extent));
+      sch->Annotate(root_rv, s_tir::attr::meta_schedule_vectorize,
+                    IntImm::Int32(max_vectorize_extent));
     }
     // Unroll
     if (!unroll_max_steps.empty() && !s_tir::CheckSpatialPrimFunc(sch, root_rv)) {
       int n = unroll_max_steps.size();
       double prob = 1.0 / n;
-      ffi::Array<FloatImm> probs(n, FloatImm(DataType::Float(32), prob));
+      ffi::Array<FloatImm> probs(n, FloatImm(PrimType::Float(32), prob));
       PrimExpr max_step = sch->SampleCategorical(unroll_max_steps, probs);
       if (unroll_explicit) {
         sch->Annotate(root_rv, s_tir::attr::meta_schedule_unroll_explicit, max_step);
@@ -86,7 +88,7 @@ class ParallelizeVectorizeUnrollNode : public ScheduleRuleNode {
 
   // Inherited from ScheduleRuleNode
   ScheduleRule Clone() const final {
-    ObjectPtr<ParallelizeVectorizeUnrollNode> n =
+    ffi::ObjectPtr<ParallelizeVectorizeUnrollNode> n =
         ffi::make_object<ParallelizeVectorizeUnrollNode>(*this);
     return ScheduleRule(n);
   }
@@ -107,7 +109,7 @@ class ParallelizeVectorizeUnrollNode : public ScheduleRuleNode {
    * \brief The options of the maximum number of unroll steps to be done.
    * Use an empty array to disable unroll.
    */
-  ffi::Array<Integer> unroll_max_steps;
+  ffi::Array<int64_t> unroll_max_steps;
   /*! \brief Whether to explicitly unroll the loop, or just add an "unroll" pragma. */
   bool unroll_explicit;
   /*! \brief The number of maximum available jobs in CPU. */
@@ -127,9 +129,10 @@ class ParallelizeVectorizeUnrollNode : public ScheduleRuleNode {
 
 ScheduleRule ScheduleRule::ParallelizeVectorizeUnroll(int max_jobs_per_core,
                                                       int max_vectorize_extent,
-                                                      ffi::Array<Integer> unroll_max_steps,
+                                                      ffi::Array<int64_t> unroll_max_steps,
                                                       bool unroll_explicit) {
-  ObjectPtr<ParallelizeVectorizeUnrollNode> n = ffi::make_object<ParallelizeVectorizeUnrollNode>();
+  ffi::ObjectPtr<ParallelizeVectorizeUnrollNode> n =
+      ffi::make_object<ParallelizeVectorizeUnrollNode>();
   n->max_jobs_per_core = max_jobs_per_core;
   n->max_vectorize_extent = max_vectorize_extent;
   n->unroll_max_steps = unroll_max_steps;

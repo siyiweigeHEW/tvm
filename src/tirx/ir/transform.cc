@@ -21,10 +21,10 @@
  * \file tirx/ir/transform.cc
  * \brief TIR specific transformation passes.
  */
+#include <tvm/ffi/extra/dataclass.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ffi/rvalue_ref.h>
-#include <tvm/node/repr_printer.h>
 #include <tvm/tirx/transform.h>
 
 namespace tvm {
@@ -32,23 +32,23 @@ namespace tirx {
 namespace transform {
 
 // Register build pipeline related options
-TVM_REGISTER_PASS_CONFIG_OPTION("tirx.noalias", Bool);
-TVM_REGISTER_PASS_CONFIG_OPTION("tirx.detect_global_barrier", Bool);
-TVM_REGISTER_PASS_CONFIG_OPTION("tirx.instrument_bound_checkers", Bool);
-TVM_REGISTER_PASS_CONFIG_OPTION("tirx.disable_assert", Bool);
-TVM_REGISTER_PASS_CONFIG_OPTION("tirx.disable_vectorize", Bool);
-TVM_REGISTER_PASS_CONFIG_OPTION("tirx.enable_buffer_level_predication", Bool);
-TVM_REGISTER_PASS_CONFIG_OPTION("tirx.disable_cse_tir", Bool);
-TVM_REGISTER_PASS_CONFIG_OPTION("tirx.enable_debug", Bool);
-TVM_REGISTER_PASS_CONFIG_OPTION("tirx.disable_storage_rewrite", Bool);
-TVM_REGISTER_PASS_CONFIG_OPTION("tirx.is_entry_func", Bool);
-TVM_REGISTER_PASS_CONFIG_OPTION("tirx.add_lower_pass", ffi::Array<ffi::Array<ObjectRef>>);
-TVM_REGISTER_PASS_CONFIG_OPTION("tirx.debug_keep_trivial_loop", Bool);
-TVM_REGISTER_PASS_CONFIG_OPTION("tirx.use_async_copy", Bool);
-TVM_REGISTER_PASS_CONFIG_OPTION("tirx.merge_static_smem", Bool);
-TVM_REGISTER_PASS_CONFIG_OPTION("tirx.instrument_lwp", Bool);
-TVM_REGISTER_PASS_CONFIG_OPTION("tirx.vtcm_capacity", Integer);
-TVM_REGISTER_PASS_CONFIG_OPTION("tirx.ptx_ldg32", Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION("tirx.noalias", bool);
+TVM_REGISTER_PASS_CONFIG_OPTION("tirx.instrument_bound_checkers", bool);
+TVM_REGISTER_PASS_CONFIG_OPTION("tirx.disable_assert", bool);
+TVM_REGISTER_PASS_CONFIG_OPTION("tirx.disable_vectorize", bool);
+TVM_REGISTER_PASS_CONFIG_OPTION("tirx.enable_buffer_level_predication", bool);
+TVM_REGISTER_PASS_CONFIG_OPTION("tirx.disable_cse_tir", bool);
+TVM_REGISTER_PASS_CONFIG_OPTION("tirx.enable_debug", bool);
+TVM_REGISTER_PASS_CONFIG_OPTION("tirx.disable_storage_rewrite", bool);
+TVM_REGISTER_PASS_CONFIG_OPTION("tirx.is_entry_func", bool);
+TVM_REGISTER_PASS_CONFIG_OPTION("tirx.add_lower_pass", ffi::Array<ffi::Array<ffi::ObjectRef>>);
+TVM_REGISTER_PASS_CONFIG_OPTION("tirx.debug_keep_trivial_loop", bool);
+TVM_REGISTER_PASS_CONFIG_OPTION("tirx.use_async_copy", bool);
+TVM_REGISTER_PASS_CONFIG_OPTION("tirx.merge_static_smem", bool);
+TVM_REGISTER_PASS_CONFIG_OPTION("tirx.instrument_lwp", bool);
+TVM_REGISTER_PASS_CONFIG_OPTION("tirx.vtcm_capacity", int64_t);
+TVM_REGISTER_PASS_CONFIG_OPTION("tirx.s_tir.ldg32", bool);
+TVM_REGISTER_PASS_CONFIG_OPTION("tirx.enable_fast_math", bool);
 
 /*!
  * \brief Function level pass that applies transformations to all
@@ -123,7 +123,7 @@ IRModule PrimFuncPassNode::operator()(IRModule mod, const PassContext& pass_ctx)
       func = pass_func(std::move(func), mod, pass_ctx);
       kv.second = Any(std::move(func));
       if (kv.second == nullptr) {
-        deleted_list.push_back(Downcast<GlobalVar>(kv.first));
+        deleted_list.push_back(kv.first.as_or_throw<GlobalVar>());
       }
     }
   }
@@ -159,12 +159,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       });
 }
 
-TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
-    .set_dispatch<PrimFuncPassNode>([](const ObjectRef& ref, ReprPrinter* p) {
-      auto* node = static_cast<const PrimFuncPassNode*>(ref.get());
-      const PassInfo info = node->Info();
-      p->stream << "PrimFuncPass(" << info->name << ", opt_level=" << info->opt_level << ")";
-    });
+// Pattern A (RM): auto-default repr from reflection.
 
 }  // namespace transform
 }  // namespace tirx

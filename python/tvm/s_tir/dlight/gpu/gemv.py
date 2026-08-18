@@ -14,7 +14,7 @@
 # KIND, either express or implied. See the License for the
 # specific language governing permissions and limitations
 # under the License.
-# ruff: noqa: E741, F821
+# ruff: noqa: E741
 """A rule for GEMV and DecodeGEMV."""
 
 from functools import reduce
@@ -24,6 +24,7 @@ from tvm.target import Target
 
 from ..analysis import (
     SBlockInfo,
+    get_max_shared_memory_per_block,
     is_broadcast_epilogue,
     is_gemv,
     normalize,
@@ -147,7 +148,7 @@ class GEMV(GPUScheduleRule):
             for buf in vector_input_buffers:
                 dtype_bytes = get_bytes(buf.dtype)
                 buf_size = (
-                    reduce(lambda x, y: x * y, buf.shape, tirx.IntImm(buf.shape[0].dtype, 1))
+                    reduce(lambda x, y: x * y, buf.shape, tirx.IntImm(buf.shape[0].ty, 1))
                     * dtype_bytes
                 )
                 shared_mem_usage += buf_size
@@ -156,10 +157,11 @@ class GEMV(GPUScheduleRule):
                     # is implemented with shared memory.
                     shared_mem_usage += TS * TR * dtype_bytes
 
+            max_smem = get_max_shared_memory_per_block(target)
             LOAD_V_SHARED = (
                 LOAD_V_SHARED
                 and isinstance(shared_mem_usage, tirx.IntImm)
-                and shared_mem_usage.value <= int(target.attrs["max_shared_memory_per_block"])
+                and shared_mem_usage.value <= max_smem
             )
 
             # vectorize load A
@@ -286,7 +288,7 @@ class GEMV(GPUScheduleRule):
                     sch.reverse_compute_at(epilogue, bx)
                     sch.set_scope(block, 0, "shared")
                     _, _, *s = sch.get_loops(epilogue)  # pylint: disable=invalid-name
-                    _, tx = sch.split(sch.fuse(*s), factors=[None, TX])
+                    _, tx = sch.split(sch.fuse(*s), factors=[None, TR])
                     sch.bind(tx, "threadIdx.x")
                 else:
                     sch.reverse_compute_at(epilogue, bx, preserve_unit_loops=True)

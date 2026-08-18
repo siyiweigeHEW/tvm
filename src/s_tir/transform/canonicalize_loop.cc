@@ -22,6 +22,7 @@
  * \brief Canonicalize all loops to start from zero and step one.
  */
 #include <tvm/arith/analyzer.h>
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/device_api.h>
 #include <tvm/s_tir/transform.h>
@@ -46,10 +47,11 @@ class LoopCanonicalizer : public StmtExprMutator {
       return StmtExprMutator::VisitStmt_(op);
     }
     const auto* loop_var = op->loop_var.get();
-    PrimExpr step = op->step.value_or(make_const(loop_var->dtype, 1));
+    PrimType loop_var_ty = loop_var->ty.as_or_throw<PrimType>();
+    PrimExpr step = op->step.value_or(IntImm(loop_var_ty, 1));
 
     // report warning for negative step, since it would be a forever loop
-    if (!analyzer_.CanProveGreaterEqual(step, 1)) {
+    if (!analyzer_->CanProveGreaterEqual(step, 1)) {
       // TODO(tvm): prove dynamic shaped step
       TVM_FFI_THROW(InternalError)
           << "Loop step for " << op->loop_var << " may not be positive: " << step;
@@ -58,18 +60,18 @@ class LoopCanonicalizer : public StmtExprMutator {
     new_iter_info_[loop_var] = std::make_pair(step, op->min);
     auto n = CopyOnWrite(op);
     n->body = VisitStmt(op->body);
-    n->min = make_zero(loop_var->dtype);
-    n->extent = analyzer_.Simplify(ceildiv(op->extent, step));
+    n->min = IntImm(loop_var_ty, 0);
+    n->extent = analyzer_->Simplify(ceildiv(op->extent, step));
     n->step = std::nullopt;
     new_iter_info_.erase(loop_var);
     return For(n);
   }
 
-  PrimExpr VisitExpr_(const VarNode* op) final {
+  Expr VisitExpr_(const VarNode* op) final {
     auto it = new_iter_info_.find(op);
     if (it != new_iter_info_.end()) {
       const auto& [stride, offset] = it->second;
-      return ffi::GetRef<Var>(op) * stride + offset;
+      return ffi::GetRef<Var>(op).as_or_throw<PrimExpr>() * stride + offset;
     }
     return ffi::GetRef<Var>(op);
   }

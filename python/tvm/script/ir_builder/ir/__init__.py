@@ -27,6 +27,8 @@ from .ir import (
     module_set_attr,
     module_global_infos,
     lookup_vdevice,
+    lookup_name,
+    meta_var,
     vdevice,
     dummy_global_info,
 )

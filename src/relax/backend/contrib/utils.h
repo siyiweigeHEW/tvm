@@ -24,6 +24,7 @@
 #ifndef TVM_RELAX_BACKEND_CONTRIB_UTILS_H_
 #define TVM_RELAX_BACKEND_CONTRIB_UTILS_H_
 
+#include <tvm/ffi/cast.h>
 #include <tvm/relax/analysis.h>
 #include <tvm/relax/expr.h>
 
@@ -58,9 +59,7 @@ inline std::vector<int64_t> GetIntShape(const ffi::Array<PrimExpr>& shape) {
  * \param typ
  * \return std::string string format of type
  */
-inline std::string DType2String(const tvm::DataType dtype) {
-  return tvm::ffi::DLDataTypeToString(dtype);
-}
+inline std::string DType2String(DLDataType dtype) { return tvm::ffi::DLDataTypeToString(dtype); }
 
 /*!
  * \brief Check if a call node is calling an op with the given name
@@ -72,7 +71,7 @@ inline bool IsOp(const CallNode* call, const std::string& op_name) {
   const auto* op_node = call->op.as<OpNode>();
   if (!op_node) return false;
   Op op = ffi::GetRef<Op>(op_node);
-  return op == Op::Get(op_name);
+  return op.same_as(Op::Get(op_name));
 }
 
 /*!

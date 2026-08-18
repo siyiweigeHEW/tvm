@@ -21,6 +21,9 @@ import pytest
 
 import tvm
 import tvm.testing
+
+pytest.importorskip("scipy")  # tvm.topi.testing imports scipy
+
 import tvm.topi.testing
 from tvm import relax
 from tvm.script import ir as I
@@ -32,7 +35,7 @@ from tvm.script import tirx as T
 def test_basic(consume_params):
     @tvm.script.ir_module
     class Before:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def transform_layout_IOHW_to_OIHW(
             w1: T.Buffer((3, 16, 3, 3), "float32"), out: T.Buffer((16, 3, 3, 3), "float32")
         ) -> None:
@@ -82,7 +85,6 @@ def test_basic(consume_params):
                     data_layout="NCHW",
                     kernel_layout="OIHW",
                     out_layout="NCHW",
-                    out_dtype="void",
                 )
                 conv2: R.Tensor((1, 16, 224, 224), dtype="float32") = R.nn.conv2d(
                     conv1,
@@ -94,12 +96,11 @@ def test_basic(consume_params):
                     data_layout="NCHW",
                     kernel_layout="OIHW",
                     out_layout="NCHW",
-                    out_dtype="void",
                 )
                 R.output(conv2)
             return conv2
 
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def transform_layout_IOHW_to_OIHW(
             w1: T.Buffer((3, 16, 3, 3), "float32"), out: T.Buffer((16, 3, 3, 3), "float32")
         ):
@@ -125,7 +126,7 @@ def test_basic(consume_params):
                 lv2 = R.call_tir(
                     cls.transform_layout_IOHW_to_OIHW,
                     (lv1,),
-                    out_sinfo=R.Tensor((16, 3, 3, 3), dtype="float32"),
+                    out_ty=R.Tensor((16, 3, 3, 3), dtype="float32"),
                 )
                 lv: R.Tensor((16, 16, 3, 3), dtype="float32") = params[1]
                 gv: R.Tuple(
@@ -155,7 +156,6 @@ def test_basic(consume_params):
                     data_layout="NCHW",
                     kernel_layout="OIHW",
                     out_layout="NCHW",
-                    out_dtype="void",
                 )
                 conv2: R.Tensor((1, 16, 224, 224), dtype="float32") = R.nn.conv2d(
                     conv1,
@@ -167,12 +167,11 @@ def test_basic(consume_params):
                     data_layout="NCHW",
                     kernel_layout="OIHW",
                     out_layout="NCHW",
-                    out_dtype="void",
                 )
                 R.output(conv2)
             return conv2
 
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def transform_layout_IOHW_to_OIHW(
             w1: T.Buffer((3, 16, 3, 3), "float32"), out: T.Buffer((16, 3, 3, 3), "float32")
         ):
@@ -199,19 +198,19 @@ def test_basic(consume_params):
                     "vm.builtin.tuple_reset_item",
                     params,
                     R.prim_value(T.int32(0)),
-                    sinfo_args=(R.Tuple,),
+                    ty_args=(R.Tuple,),
                 )
                 lv2 = R.call_tir(
                     cls.transform_layout_IOHW_to_OIHW,
                     (lv1,),
-                    out_sinfo=R.Tensor((16, 3, 3, 3), dtype="float32"),
+                    out_ty=R.Tensor((16, 3, 3, 3), dtype="float32"),
                 )
                 lv: R.Tensor((16, 16, 3, 3), dtype="float32") = params[1]
                 _2: R.Tuple = R.call_pure_packed(
                     "vm.builtin.tuple_reset_item",
                     params,
                     R.prim_value(T.int32(1)),
-                    sinfo_args=(R.Tuple,),
+                    ty_args=(R.Tuple,),
                 )
                 gv: R.Tuple(
                     R.Tensor((16, 16, 3, 3), dtype="float32"),
@@ -228,8 +227,8 @@ def test_basic(consume_params):
         after = relax.transform.LiftTransformParams()(mod)
     tvm.ir.assert_structural_equal(after, expected)
 
-    names_after = [param.name_hint for param in after["main"].params]
-    names_expected = [param.name_hint for param in expected["main"].params]
+    names_after = [param.name for param in after["main"].params]
+    names_expected = [param.name for param in expected["main"].params]
     assert names_after == names_expected
 
 
@@ -273,7 +272,6 @@ def test_tuple():
                     data_layout="NCHW",
                     kernel_layout="OIHW",
                     out_layout="NCHW",
-                    out_dtype="void",
                 )
                 conv2: R.Tensor((1, 16, 224, 224), dtype="float32") = R.nn.conv2d(
                     conv1,
@@ -285,7 +283,6 @@ def test_tuple():
                     data_layout="NCHW",
                     kernel_layout="OIHW",
                     out_layout="NCHW",
-                    out_dtype="void",
                 )
                 R.output(conv2)
             return conv2
@@ -417,7 +414,7 @@ def test_multiple_functions():
         ) -> R.Tensor((256, 256), dtype="float32"):
             R.func_attr({"num_input": 1})
             with R.dataflow():
-                y: R.Tensor((256, 256), dtype="float32") = R.matmul(x, param0, out_dtype="void")
+                y: R.Tensor((256, 256), dtype="float32") = R.matmul(x, param0)
                 R.output(y)
             return y
 
@@ -440,7 +437,7 @@ def test_multiple_functions():
         ) -> R.Tensor((256, 128), dtype="float32"):
             R.func_attr({"num_input": 1})
             with R.dataflow():
-                y: R.Tensor((256, 128), dtype="float32") = R.matmul(x, param0, out_dtype="void")
+                y: R.Tensor((256, 128), dtype="float32") = R.matmul(x, param0)
                 R.output(y)
             return y
 
@@ -462,7 +459,7 @@ def test_multiple_functions():
         ) -> R.Tensor((256, 256), dtype="float32"):
             with R.dataflow():
                 w1_t: R.Tensor((256, 256), dtype="float32") = R.permute_dims(w1, axes=[1, 0])
-                y: R.Tensor((256, 256), dtype="float32") = R.matmul(x, w1_t, out_dtype="void")
+                y: R.Tensor((256, 256), dtype="float32") = R.matmul(x, w1_t)
                 R.output(y)
             return y
 
@@ -479,7 +476,7 @@ def test_share_identical_transform_across_multiple_functions():
     functions must be usable with the same shared transform.
     """
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Before:
         @R.function
         def func1(
@@ -513,7 +510,7 @@ def test_share_identical_transform_across_multiple_functions():
                 R.output(output)
             return output
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Expected:
         @R.function
         def transform_params(
@@ -570,7 +567,7 @@ def test_incompatible_weights_in_shared_transform_raises_error():
     Here, `func1` accepts one model weight, but `func2` accepts two.
     """
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Before:
         @R.function
         def func1(
@@ -601,7 +598,7 @@ def test_incompatible_weights_in_shared_transform_raises_error():
                 R.output(output)
             return output
 
-    with pytest.raises(tvm.TVMError):
+    with pytest.raises(RuntimeError):
         relax.transform.LiftTransformParams(shared_transform=True)(Before)
 
 
@@ -612,7 +609,7 @@ def test_incompatible_shape_in_shared_transform_raises_error():
     requires shape `[128, 256]`.
     """
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Before:
         @R.function
         def func1(
@@ -646,7 +643,7 @@ def test_incompatible_shape_in_shared_transform_raises_error():
                 R.output(output)
             return output
 
-    with pytest.raises(tvm.TVMError):
+    with pytest.raises(RuntimeError):
         relax.transform.LiftTransformParams(shared_transform=True)(Before)
 
 
@@ -657,7 +654,7 @@ def test_incompatible_dtype_in_shared_transform_raises_error():
     `func2` requires "float16".
     """
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Before:
         @R.function
         def func1(
@@ -691,7 +688,7 @@ def test_incompatible_dtype_in_shared_transform_raises_error():
                 R.output(output)
             return output
 
-    with pytest.raises(tvm.TVMError):
+    with pytest.raises(RuntimeError):
         relax.transform.LiftTransformParams(shared_transform=True)(Before)
 
 
@@ -707,7 +704,7 @@ def test_share_transform_across_multiple_functions_has_intersection_of_transform
     functions must be usable with the same shared transform.
     """
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Before:
         @R.function
         def func1(
@@ -751,7 +748,7 @@ def test_share_transform_across_multiple_functions_has_intersection_of_transform
                 R.output(y)
             return y
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Expected:
         @R.function
         def transform_params(
@@ -832,7 +829,7 @@ def test_share_transforms_with_different_binding_order():
     order by name.
     """
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Before:
         @R.function
         def func1(
@@ -866,7 +863,7 @@ def test_share_transforms_with_different_binding_order():
                 R.output(output)
             return output
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Expected:
         @R.function
         def transform_params(
@@ -927,7 +924,7 @@ def test_share_transforms_resulting_in_identical_functions():
     interface must be preserved.
     """
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Before:
         @R.function
         def func1(
@@ -961,7 +958,7 @@ def test_share_transforms_resulting_in_identical_functions():
                 R.output(output)
             return output
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Expected:
         @R.function
         def transform_params(
@@ -1027,7 +1024,7 @@ def test_share_transform_across_specified_functions():
     does not have any parameter transformations lifted out.
     """
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Before:
         @R.function
         def func1(
@@ -1085,7 +1082,7 @@ def test_share_transform_across_specified_functions():
                 R.output(y)
             return y
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Expected:
         @R.function
         def transform_params(
@@ -1177,7 +1174,7 @@ def test_share_transform_with_unused_parameter():
     in other functions can still be lifted out.
     """
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Before:
         @R.function
         def func1(
@@ -1208,7 +1205,7 @@ def test_share_transform_with_unused_parameter():
                 R.output(y1)
             return y1
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Expected:
         @R.function
         def transform_params(
@@ -1276,7 +1273,7 @@ def test_share_transform_with_no_shared_preprocessing():
     order by name.
     """
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Before:
         @R.function
         def func1(
@@ -1304,7 +1301,7 @@ def test_share_transform_with_no_shared_preprocessing():
                 R.output(y1)
             return y1
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Expected:
         @R.function
         def transform_params(
@@ -1368,7 +1365,7 @@ def test_stop_lifting():
                 R.output(y)
             return y
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Expected:
         @R.function
         def func1(
@@ -1378,7 +1375,7 @@ def test_stop_lifting():
             R.func_attr({"num_input": 1})
             with R.dataflow():
                 w1_add: R.Tensor((256, 256), dtype="float32") = R.add(param0, R.const(1, "float32"))
-                y: R.Tensor((256, 256), dtype="float32") = R.matmul(x, w1_add, out_dtype="void")
+                y: R.Tensor((256, 256), dtype="float32") = R.matmul(x, w1_add)
                 R.output(y)
             return y
 
@@ -1410,7 +1407,7 @@ def test_symbolic_var_1():
                 zeros = R.zeros((n, n), "float32")
             return shape
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Expected:
         @R.function
         def main_transform_params(params: R.Tuple) -> R.Tuple:
@@ -1434,9 +1431,9 @@ def test_symbolic_var_1():
 
 
 def test_symbolic_var_2():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Before:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def zeros(var_T_full: T.handle):
             T.func_attr({"tirx.noalias": True})
             n = T.int64()
@@ -1454,15 +1451,13 @@ def test_symbolic_var_2():
             n = T.int64()
             cls = Before
             with R.dataflow():
-                zeros = R.call_tir(
-                    cls.zeros, R.tuple(), out_sinfo=R.Tensor((n, n), dtype="float32")
-                )
+                zeros = R.call_tir(cls.zeros, R.tuple(), out_ty=R.Tensor((n, n), dtype="float32"))
                 R.output()
             return shape
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Expected:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def zeros(var_T_full: T.handle):
             T.func_attr({"tirx.noalias": True})
             n = T.int64()
@@ -1486,9 +1481,7 @@ def test_symbolic_var_2():
             n = T.int64()
             cls = Expected
             with R.dataflow():
-                zeros = R.call_tir(
-                    cls.zeros, R.tuple(), out_sinfo=R.Tensor((n, n), dtype="float32")
-                )
+                zeros = R.call_tir(cls.zeros, R.tuple(), out_ty=R.Tensor((n, n), dtype="float32"))
                 R.output()
             return shape
 
@@ -1498,7 +1491,7 @@ def test_symbolic_var_2():
 
 
 def test_symbolic_var_from_shape():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Before:
         @R.function
         def main(
@@ -1512,25 +1505,23 @@ def test_symbolic_var_from_shape():
             with R.dataflow():
                 B_slice = R.call_tir(
                     cls.slice,
-                    [B],
-                    tir_vars=R.ShapeExpr([slice_index]),
-                    out_sinfo=R.Tensor([16], dtype="int32"),
+                    [B, slice_index],
+                    out_ty=R.Tensor([16], dtype="int32"),
                 )
                 A_slice = R.call_tir(
                     cls.slice,
-                    [A],
-                    tir_vars=R.ShapeExpr([slice_index]),
-                    out_sinfo=R.Tensor([16], dtype="int32"),
+                    [A, slice_index],
+                    out_ty=R.Tensor([16], dtype="int32"),
                 )
                 A_scale = R.multiply(A_slice, B_slice)
                 R.output(A_scale)
             return A_scale
 
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def slice(
             Input_2d: T.Buffer(shape=[16, 16], dtype="int32"),
-            Output_Slice: T.Buffer(shape=[16], dtype="int32"),
             slice_index: T.int64,
+            Output_Slice: T.Buffer(shape=[16], dtype="int32"),
         ):
             T.func_attr({"tirx.noalias": True})
             for j in range(16):
@@ -1538,7 +1529,7 @@ def test_symbolic_var_from_shape():
                     vj = T.axis.remap("S", [j])
                     Output_Slice[vj] = Input_2d[slice_index, vj]
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Expected:
         @R.function
         def main(
@@ -1552,9 +1543,8 @@ def test_symbolic_var_from_shape():
             with R.dataflow():
                 A_slice = R.call_tir(
                     cls.slice,
-                    [A],
-                    tir_vars=R.ShapeExpr([slice_index]),
-                    out_sinfo=R.Tensor([16], dtype="int32"),
+                    [A, slice_index],
+                    out_ty=R.Tensor([16], dtype="int32"),
                 )
                 A_scale = R.multiply(A_slice, B_slice)
                 R.output(A_scale)
@@ -1572,19 +1562,18 @@ def test_symbolic_var_from_shape():
                 # extra_symbolic_vars = params[1]
                 B_slice = R.call_tir(
                     cls.slice,
-                    [B],
-                    tir_vars=R.ShapeExpr([slice_index]),
-                    out_sinfo=R.Tensor([16], dtype="int32"),
+                    [B, slice_index],
+                    out_ty=R.Tensor([16], dtype="int32"),
                 )
                 output = (R.ShapeExpr([slice_index]), B_slice)
                 R.output(output)
             return output
 
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def slice(
             Input_2d: T.Buffer(shape=[16, 16], dtype="int32"),
-            Output_Slice: T.Buffer(shape=[16], dtype="int32"),
             slice_index: T.int64,
+            Output_Slice: T.Buffer(shape=[16], dtype="int32"),
         ):
             T.func_attr({"tirx.noalias": True})
             for j in range(16):
@@ -1619,7 +1608,7 @@ def test_symbolic_var_in_param_shape():
                 R.output(conv2)
             return conv2
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Expected:
         @R.function
         def main_transform_params(
@@ -1664,7 +1653,6 @@ def test_symbolic_var_in_param_shape():
                     data_layout="NCHW",
                     kernel_layout="OIHW",
                     out_layout="NCHW",
-                    out_dtype="void",
                 )
                 conv2: R.Tensor((1, 16, 224, n), dtype="float32") = R.nn.conv2d(
                     conv1,
@@ -1676,7 +1664,6 @@ def test_symbolic_var_in_param_shape():
                     data_layout="NCHW",
                     kernel_layout="OIHW",
                     out_layout="NCHW",
-                    out_dtype="void",
                 )
                 R.output(conv2)
             return conv2
@@ -1693,8 +1680,8 @@ def test_symbolic_var_defined_in_params_but_used_in_weights():
 
     In order to be a source of definition, a symbolic variable in the
     parameters must occur as a distinct parameter, as a tensor shape
-    `R.Tensor(["var"])`, an explicit `R.Shape(["var"])`, or as a
-    `R.Prim(value="var")`.  A variable that is part of a larger
+    `R.Tensor(["var"])` or an explicit `R.Shape(["var"])`.  A variable
+    that is part of a larger
     expression, such as `R.Tensor(["m * n"])`, are variable usages,
     not variable definitions.
     """
@@ -1808,7 +1795,7 @@ def test_only_lift_when_variable_uses_constants():
 def test_lift_transform_is_idempotent(shared_transform):
     """Multiple applicates of LiftTransformParams are allowed"""
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
         @R.function
         def main(
@@ -1837,7 +1824,7 @@ def test_lift_transform_when_one_already_exists():
     """If the module already contains `transform_params`, the
     functions are composed together"""
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
         @R.function
         def main(
@@ -1871,6 +1858,53 @@ def test_lift_transform_when_one_already_exists():
     tvm.ir.assert_structural_equal(
         after_lift_without_previous_identity_function,
         after_lift_with_previous_identity_function,
+    )
+
+
+def test_lift_transform_with_primitive_param_used_by_model_tensor():
+    @I.ir_module
+    class Before:
+        @R.function
+        def main(
+            x: R.Tensor(dtype="float32", ndim=1),
+            extent: R.Prim("int64"),
+            weight: R.Tensor(["extent"], "float32"),
+        ):
+            R.func_attr({"num_input": 1})
+            transformed = R.multiply(weight, weight)
+            out = R.add(x, transformed)
+            return out
+
+    old_extent = Before["main"].params[1]
+    after = relax.transform.LiftTransformParams(shared_transform=False)(Before)
+    relax.analysis.well_formed(after)
+
+    transform = after["main_transform_params"]
+    bundled_ty = transform.params[0].ty
+    assert isinstance(bundled_ty, relax.TupleType)
+    assert isinstance(bundled_ty.fields[0], tvm.ir.PrimType)
+    assert isinstance(bundled_ty.fields[1], relax.TensorType)
+    assert bundled_ty.fields[1].shape is None
+    assert bundled_ty.fields[1].ndim == 1
+
+    bindings = [binding for block in transform.body.blocks for binding in block.bindings]
+    extent_index = next(
+        i
+        for i, binding in enumerate(bindings)
+        if isinstance(binding, relax.VarBinding) and tvm.ir.is_prim_var(binding.var)
+    )
+    match_cast_index = next(
+        i for i, binding in enumerate(bindings) if isinstance(binding, relax.MatchCast)
+    )
+    extent = bindings[extent_index].var
+    weight = bindings[match_cast_index]
+    assert extent_index < match_cast_index
+    assert weight.ty.shape[0].same_as(extent)
+
+    signature_types = [param.ty for param in transform.params] + [transform.ret_ty]
+    assert all(
+        all(not var.same_as(old_extent) for var in relax.analysis.tir_vars_in_type(ty))
+        for ty in signature_types
     )
 
 

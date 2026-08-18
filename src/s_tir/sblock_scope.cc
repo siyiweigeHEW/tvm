@@ -16,6 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/s_tir/sblock_scope.h>
 #include <tvm/s_tir/utils.h>
@@ -32,7 +33,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
 /******** Utility functions ********/
 
 template <class K, class V>
-using SMap = std::unordered_map<K, V, ObjectPtrHash, ObjectPtrEqual>;
+using SMap = std::unordered_map<K, V, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>;
 
 /*!
  * \brief Add a dependency relation.
@@ -52,7 +53,7 @@ void AddDependency(SBlockScopeNode* self, const StmtSRef& src, const StmtSRef& d
 /******** Constructors ********/
 
 StmtSRef::StmtSRef(const StmtNode* stmt, StmtSRefNode* parent, int64_t seq_index) {
-  ObjectPtr<StmtSRefNode> n = ffi::make_object<StmtSRefNode>();
+  ffi::ObjectPtr<StmtSRefNode> n = ffi::make_object<StmtSRefNode>();
   n->stmt = stmt;
   n->parent = parent;
   n->seq_index = seq_index;
@@ -70,7 +71,7 @@ StmtSRef StmtSRef::RootMark() {
 }
 
 Dependency::Dependency(StmtSRef src, StmtSRef dst, DepKind kind) {
-  ObjectPtr<DependencyNode> node = ffi::make_object<DependencyNode>();
+  ffi::ObjectPtr<DependencyNode> node = ffi::make_object<DependencyNode>();
   node->src = std::move(src);
   node->dst = std::move(dst);
   node->kind = kind;
@@ -80,9 +81,9 @@ Dependency::Dependency(StmtSRef src, StmtSRef dst, DepKind kind) {
 SBlockScope::SBlockScope() { data_ = ffi::make_object<SBlockScopeNode>(); }
 
 SBlockScope::SBlockScope(const ffi::Array<StmtSRef>& child_block_srefs) {
-  ObjectPtr<SBlockScopeNode> n = ffi::make_object<SBlockScopeNode>();
-  SMap<Buffer, ffi::Array<StmtSRef>> buffer_readers;
-  SMap<Buffer, ffi::Array<StmtSRef>>& buffer_writers = n->buffer_writers;
+  ffi::ObjectPtr<SBlockScopeNode> n = ffi::make_object<SBlockScopeNode>();
+  SMap<BufferVar, ffi::Array<StmtSRef>> buffer_readers;
+  SMap<BufferVar, ffi::Array<StmtSRef>>& buffer_writers = n->buffer_writers;
   for (const StmtSRef& child_block_sref : child_block_srefs) {
     const SBlockNode* child_block = TVM_SREF_TO_SBLOCK(child_block_sref);
     // Step 1. Update `buffer_readers` and `buffer_writers` for each buffer
@@ -198,11 +199,12 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   refl::GlobalDef()
       .def("s_tir.StmtSRefStmt",
            [](StmtSRef sref) -> ffi::Optional<Stmt> {
-             return ffi::GetRef<ffi::Optional<Stmt>>(sref->stmt);
+             return sref->stmt ? ffi::Optional<Stmt>(ffi::GetRef<Stmt>(sref->stmt)) : std::nullopt;
            })
       .def("s_tir.StmtSRefParent",
            [](StmtSRef sref) -> ffi::Optional<StmtSRef> {
-             return ffi::GetRef<ffi::Optional<StmtSRef>>(sref->parent);
+             return sref->parent ? ffi::Optional<StmtSRef>(ffi::GetRef<StmtSRef>(sref->parent))
+                                 : std::nullopt;
            })
       .def("s_tir.StmtSRefRootMark", StmtSRef::RootMark)
       .def("s_tir.StmtSRefInlineMark", StmtSRef::InlineMark)

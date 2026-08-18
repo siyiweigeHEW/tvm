@@ -28,7 +28,7 @@ from tvm.script import tirx as T
 def test_alloc_seq():
     scope_tb = "local.L0A"
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def func(n: T.int32):
         for i in T.serial(n):
             for j in range(10):
@@ -46,7 +46,7 @@ def test_alloc_seq():
     def verify(n):
         if isinstance(n, tvm.tirx.AllocBuffer):
             num_alloc[0] += 1
-            assert n.buffer.shape[0].value == 200
+            assert n.buffer.ty.shape[0].value == 200
 
     tvm.tirx.stmt_functor.post_order_visit(body, verify)
     assert num_alloc[0] == 1
@@ -57,7 +57,7 @@ def test_alloc_different_dtypes():
     def make_mod(dtype_list, length):
         assert len(dtype_list) == 4
 
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def func():
             # Allocate all buffers in parent scope (before any loops)
             A = T.alloc_buffer((length,), dtype_list[0], scope="local.L0A")
@@ -100,7 +100,7 @@ def test_alloc_different_dtypes():
     def dtype_test(dtype_list, length):
         def verify(n):
             if isinstance(n, tvm.tirx.AllocBuffer):
-                assert n.buffer.shape[0].value == offset
+                assert n.buffer.ty.shape[0].value == offset
 
         mod = make_mod(dtype_list, length)
         offset = offset_generater(dtype_list, length)
@@ -125,7 +125,7 @@ def test_alloc_different_dtypes():
 def test_address_of():
     # In this test, the storage rewrite pass is allowed to
     # combine buffers B and D, but not C
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def before(A: T.Buffer(8, "float32"), E: T.Buffer(8, "float32")):
         B = T.alloc_buffer((8,))
         for i in range(8):
@@ -157,7 +157,7 @@ def test_address_of():
 
     def verify(n):
         if isinstance(n, tvm.tirx.AllocBuffer):
-            total_alloc[0] += n.buffer.shape[0].value
+            total_alloc[0] += n.buffer.ty.shape[0].value
 
     total_alloc = [0]
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
@@ -171,7 +171,7 @@ def test_address_of():
 
 
 def test_parallel_alloc():
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def func1(n: T.int32):
         for i in T.parallel(n):
             for j in range(10):
@@ -184,7 +184,7 @@ def test_parallel_alloc():
     # With flat AllocBuffer, the for body is a SeqStmt; first element is AllocBuffer
     assert isinstance(body.body.body[0], tvm.tirx.AllocBuffer)
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def func2(n: T.int32):
         for t in T.serial(n):
             with T.attr(T.int32(1), "pragma_scope", "parallel_launch_point"):
@@ -200,7 +200,7 @@ def test_parallel_alloc():
 
 
 def test_while_alloc():
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def func_parallel(n: T.int32):
         for i in T.parallel(n):
             j = T.alloc_buffer((1,), "int32")
@@ -210,7 +210,7 @@ def test_while_alloc():
                 A[j[0]] = A[j[0]] + T.float32(2)
                 j[0] = j[0] + j[0] + 1
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def func_serial(n: T.int32):
         for i in T.serial(n):
             j = T.alloc_buffer((1,), "int32")
@@ -255,7 +255,7 @@ def test_while_alloc():
 
 
 def test_alloc_seq_type():
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def func(n: T.int32):
         for i in T.serial(n):
             for j in range(10):
@@ -280,7 +280,7 @@ def test_alloc_seq_type():
     def verify(n):
         if isinstance(n, tvm.tirx.AllocBuffer):
             num_alloc[0] += 1
-            assert n.buffer.shape[0].value == 500
+            assert n.buffer.ty.shape[0].value == 500
 
     tvm.tirx.stmt_functor.post_order_visit(body, verify)
     assert num_alloc[0] == 1
@@ -289,7 +289,7 @@ def test_alloc_seq_type():
 def test_alloc_seq_type2():
     scope_tb = "local.L0A2"
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def func(n: T.int32):
         for i in T.serial(n):
             for j in range(10):
@@ -310,14 +310,14 @@ def test_alloc_seq_type2():
     def verify(n):
         if isinstance(n, tvm.tirx.AllocBuffer):
             num_alloc[0] += 1
-            assert n.buffer.shape[0].value == 200
+            assert n.buffer.ty.shape[0].value == 200
 
     tvm.tirx.stmt_functor.post_order_visit(body, verify)
     assert num_alloc[0] == 1
 
 
 def test_reuse_small_buffer():
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def func(n: T.int32):
         for i in T.serial(n):
             for j in range(10):
@@ -342,27 +342,27 @@ def test_reuse_small_buffer():
     def verify(n):
         if isinstance(n, tvm.tirx.AllocBuffer):
             num_alloc[0] += 1
-            assert n.buffer.shape[0].value == 800
+            assert n.buffer.ty.shape[0].value == 800
 
     tvm.tirx.stmt_functor.post_order_visit(body, verify)
     assert num_alloc[0] == 1
 
 
 def test_access_in_let_value():
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def func(A: T.Buffer((8,), "float32")):
         for i in range(8):
             B = T.alloc_buffer((1,))
             B[0] = 3.14
-            x: T.float32 = T.exp(B[0], dtype="float32")
+            x: T.let[T.float32] = T.exp(B[0], dtype="float32")
             A[i] = (x + 1.0) / (x - 1.0)
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def func_rewritten(A: T.Buffer((8,), "float32")) -> None:
         B = T.alloc_buffer((1,))
         for i in range(8):
             B[0] = 3.14
-            x: T.float32 = T.exp(B[0], dtype="float32")
+            x: T.let[T.float32] = T.exp(B[0], dtype="float32")
             A[i] = (x + 1.0) / (x - 1.0)
 
     mod = tvm.tirx.transform.StorageRewrite()(
@@ -371,128 +371,25 @@ def test_access_in_let_value():
     tvm.ir.assert_structural_equal(mod["main"], func_rewritten.with_attr("global_symbol", "main"))
 
 
-def test_let_buffer_rewrite():
-    """StorageRewrite replaces the bound var of backing allocations
+def test_decl_buffer_is_not_vectorized():
+    """StorageRewrite leaves explicit DeclBuffer views unchanged.
 
-    If StorageRewrite replaces the backing variable of an array, such
-    as when vectorizing the storage type, the variable must be
-    replaced in the Bind that defines it.  Currently, StmtMutator
-    only visits usage of variables, and does not visit definitions of
-    variables, so the definition in a Bind must be explicitly
-    handled.
+    Vectorization of DeclBuffer views was dropped because the rewritten result
+    violates the immutable BufferVar binding invariants.
     """
 
     @I.ir_module
     class Before:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main() -> None:
-            A_data: T.handle("int32") = T.call_extern("dummy_func", dtype="handle")
+            A_data: T.let[T.handle("int32")] = T.call_extern(
+                "dummy_func", dtype=T.handle("int32").ty
+            )
             A = T.decl_buffer([8], "int32", data=A_data)
             A[0:8] = T.broadcast(42, 8)
 
-    @I.ir_module(check_well_formed=False)
-    class Expected:
-        @T.prim_func
-        def main() -> None:
-            A_data: T.handle("int32x8") = T.call_extern("dummy_func", dtype="handle")
-            A = T.decl_buffer([8], "int32", data=A_data)
-            A_1 = T.Buffer([1], "int32x8", data=A_data)
-            A_1[0] = T.broadcast(42, 8)
-
     After = tvm.tirx.transform.StorageRewrite()(Before)
-    tvm.ir.assert_structural_equal(After, Expected)
-
-
-def test_rewrite_in_place_use_of_non_flat_buffer():
-    """A non-flat buffer may be re-used for in-place operations"""
-
-    @I.ir_module
-    class Before:
-        @T.prim_func
-        def main(A: T.Buffer((16, 16), "float32"), D: T.Buffer((16, 16), "float32")):
-            B = T.decl_buffer(
-                [16, 16],
-                dtype="float32",
-                axis_separators=[1],
-            )
-            C = T.decl_buffer(
-                [16, 16],
-                dtype="float32",
-                axis_separators=[1],
-            )
-
-            for i, j in T.grid(16, 16):
-                B[i, j] = A[i, j]
-
-            for i, j in T.grid(16, 16):
-                C[i, j] = 2.0 * B[i, j]
-
-            for i, j in T.grid(16, 16):
-                D[i, j] = C[i, j]
-
-    @I.ir_module
-    class Expected:
-        @T.prim_func
-        def main(A: T.Buffer((16, 16), "float32"), D: T.Buffer((16, 16), "float32")):
-            B = T.decl_buffer([16, 16], dtype="float32", axis_separators=[1])
-            C = T.decl_buffer(
-                [16, 16],
-                dtype="float32",
-                axis_separators=[1],
-                data=B.data,
-            )
-
-            for i, j in T.grid(16, 16):
-                B[i, j] = A[i, j]
-
-            for i, j in T.grid(16, 16):
-                C[i, j] = 2.0 * B[i, j]
-
-            for i, j in T.grid(16, 16):
-                D[i, j] = C[i, j]
-
-    After = tvm.tirx.transform.StorageRewrite()(Before)
-    tvm.ir.assert_structural_equal(After, Expected)
-
-
-def test_no_rewrite_of_shared_non_flat_buffer():
-    """In general, sharing of non-flat buffer isn't supported
-
-    The current packing algorithms in StorageRewrite assume a flat
-    memory space, and do not support packing of N-d buffers.  For
-    buffers with axis separators, normal buffer sharing should be
-    disabled.
-
-    Like test_rewrite_in_place_use_of_non_flat_buffer, except that B and C do
-    not have matching shapes.
-    """
-
-    @T.prim_func
-    def Before(A: T.Buffer((16, 16), "float32"), D: T.Buffer((16, 16), "float32")):
-        B = T.decl_buffer(
-            [16, 16],
-            dtype="float32",
-            axis_separators=[1],
-        )
-        C = T.decl_buffer(
-            [20, 20],
-            dtype="float32",
-            axis_separators=[1],
-        )
-
-        for i, j in T.grid(16, 16):
-            B[i, j] = A[i, j]
-
-        for i, j in T.grid(16, 16):
-            C[i, j] = 2.0 * B[i, j]
-
-        for i, j in T.grid(16, 16):
-            D[i, j] = C[i, j]
-
-    Expected = Before
-
-    After = tvm.tirx.transform.StorageRewrite()(tvm.IRModule.from_expr(Before))
-    tvm.ir.assert_structural_equal(After["Before"], Expected)
+    tvm.ir.assert_structural_equal(After, Before)
 
 
 def test_rewrite_decl_buffer():
@@ -500,7 +397,7 @@ def test_rewrite_decl_buffer():
 
     @I.ir_module
     class Before:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(A: T.Buffer(16, "float32"), D: T.Buffer(16, "float32")):
             B = T.decl_buffer(16, dtype="float32")
             C = T.decl_buffer(16, dtype="float32")
@@ -516,7 +413,7 @@ def test_rewrite_decl_buffer():
 
     @I.ir_module
     class Expected:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(A: T.Buffer(16, "float32"), D: T.Buffer(16, "float32")):
             B = T.decl_buffer(16, dtype="float32")
             C = T.decl_buffer(16, dtype="float32", data=B.data)
@@ -531,7 +428,58 @@ def test_rewrite_decl_buffer():
                 D[i] = C[i]
 
     After = tvm.tirx.transform.StorageRewrite()(Before)
+    assert tvm.tirx.analysis.verify_well_formed(After)
     tvm.ir.assert_structural_equal(After, Expected)
+
+
+def test_decl_buffer_alias_chain_uses_flat_root():
+    """StorageRewrite resolves every alias in a chain to the same flat root."""
+
+    @I.ir_module
+    class Before:
+        @T.prim_func(s_tir=True)
+        def main(D: T.Buffer(1, "float32")):
+            A = T.decl_buffer(16, dtype="float32")
+            B = T.decl_buffer(16, dtype="float32", data=A.data)
+            C = T.decl_buffer(16, dtype="float32", data=B.data)
+            A[0] = 1.0
+            D[0] = C[0]
+
+    @I.ir_module
+    class Expected:
+        @T.prim_func(s_tir=True)
+        def main(D: T.Buffer(1, "float32")):
+            A = T.decl_buffer(16, dtype="float32")
+            B = T.decl_buffer(16, dtype="float32", data=A.data)
+            C = T.decl_buffer(16, dtype="float32", data=A.data)
+            A[0] = 1.0
+            D[0] = C[0]
+
+    After = tvm.tirx.transform.StorageRewrite()(Before)
+    assert tvm.tirx.analysis.verify_well_formed(After)
+    tvm.ir.assert_structural_equal(After, Expected)
+
+
+def test_decl_buffer_alias_extends_source_lifetime():
+    """An access through an alias prevents reuse of its source allocation."""
+
+    @T.prim_func(s_tir=True)
+    def func(D: T.Buffer(1, "float32")):
+        A = T.decl_buffer(16, dtype="float32")
+        B = T.decl_buffer(16, dtype="float32", data=A.data)
+        A[0] = 1.0
+
+        C = T.decl_buffer(16, dtype="float32")
+        C[0] = 2.0
+        D[0] = B[0] + C[0]
+
+    after = tvm.tirx.transform.StorageRewrite()(tvm.IRModule.from_expr(func))["func"]
+    allocations = []
+    tvm.tirx.stmt_functor.post_order_visit(
+        after.body,
+        lambda node: allocations.append(node) if isinstance(node, tvm.tirx.AllocBuffer) else None,
+    )
+    assert len(allocations) == 2
 
 
 def test_no_orphaned_decl_buffer():
@@ -544,7 +492,7 @@ def test_no_orphaned_decl_buffer():
 
     @I.ir_module
     class Before:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(A: T.Buffer(16, "float32"), D: T.Buffer(16, "float32")):
             B = T.decl_buffer(16, dtype="float32")
             C = T.decl_buffer(16, dtype="float32")
@@ -561,7 +509,7 @@ def test_no_orphaned_decl_buffer():
 
     @I.ir_module
     class Expected:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(A: T.Buffer(16, "float32"), D: T.Buffer(16, "float32")):
             B = T.decl_buffer(16, dtype="float32")
             C = T.decl_buffer(16, dtype="float32", data=B.data)

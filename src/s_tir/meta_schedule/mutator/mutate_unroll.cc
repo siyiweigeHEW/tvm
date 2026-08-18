@@ -16,6 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/s_tir/stmt.h>
 
@@ -37,7 +38,7 @@ bool IsAnnotateWithUnroll(const Instruction& inst) {
     return false;
   }
   TVM_FFI_ICHECK_EQ(inst->attrs.size(), 1);
-  ffi::String ann_key = Downcast<ffi::String>(inst->attrs[0]);
+  ffi::String ann_key = inst->attrs[0].as_or_throw<ffi::String>();
   return ann_key == s_tir::attr::meta_schedule_unroll_explicit ||
          ann_key == s_tir::attr::meta_schedule_unroll_implicit;
 }
@@ -70,7 +71,7 @@ class MutateUnrollNode : public MutatorNode {
   ffi::Optional<Trace> Apply(const Trace& trace, TRandState* rand_state) final;
   // Inherit from `MutatorNode`
   Mutator Clone() const final {
-    ObjectPtr<MutateUnrollNode> n = ffi::make_object<MutateUnrollNode>(*this);
+    ffi::ObjectPtr<MutateUnrollNode> n = ffi::make_object<MutateUnrollNode>(*this);
     return Mutator(n);
   }
 };
@@ -97,14 +98,14 @@ bool FindUnrollDecision(const Trace& trace, TRandState* rand_state,
   using s_tir::InstructionKind;
   using s_tir::InstructionNode;
   static const InstructionKind& inst_sample_categorical = InstructionKind::Get("SampleCategorical");
-  std::unordered_map<const PrimExprNode*, const InstructionNode*> sample_insts;
+  std::unordered_map<const ExprNode*, const InstructionNode*> sample_insts;
   std::vector<const InstructionNode*> ann_insts;
   sample_insts.reserve(trace->insts.size());
   ann_insts.reserve(trace->insts.size());
   for (const Instruction& inst : trace->insts) {
     if (inst->kind.same_as(inst_sample_categorical)) {
       TVM_FFI_ICHECK_EQ(inst->outputs.size(), 1);
-      const PrimExprNode* var_rv = TVM_TYPE_AS(inst->outputs[0], PrimExprNode);
+      const ExprNode* var_rv = inst->outputs[0].as_or_throw<PrimExpr>().get();
       sample_insts[var_rv] = inst.get();
     } else if (IsAnnotateWithUnroll(inst)) {
       ann_insts.push_back(inst.get());
@@ -116,15 +117,15 @@ bool FindUnrollDecision(const Trace& trace, TRandState* rand_state,
   }
   const InstructionNode* ann_inst = ann_insts[s_tir::SampleInt(rand_state, 0, n_ann_insts)];
   TVM_FFI_ICHECK_EQ(ann_inst->inputs.size(), 2);
-  const auto* var_rv = TVM_TYPE_AS(ann_inst->inputs[1], PrimExprNode);
+  const auto* var_rv = ann_inst->inputs[1].as_or_throw<PrimExpr>().get();
   TVM_FFI_ICHECK(sample_insts.count(var_rv));
   const InstructionNode* sample_inst = sample_insts.at(var_rv);
   TVM_FFI_ICHECK_EQ(sample_inst->attrs.size(), 2);
   candidate->inst = ffi::GetRef<Instruction>(sample_inst);
-  candidate->decision =
-      Downcast<IntImm>(trace->decisions[ffi::GetRef<Instruction>(sample_inst)])->value;
-  candidate->probs =
-      support::AsVector<FloatImm, double>(Downcast<ffi::Array<FloatImm>>(sample_inst->attrs[1]));
+  // SampleCategorical decision is Optional<int64_t> after the Integer phase-out.
+  candidate->decision = trace->decisions[ffi::GetRef<Instruction>(sample_inst)].cast<int64_t>();
+  candidate->probs = support::AsVector<FloatImm, double>(
+      sample_inst->attrs[1].as_or_throw<ffi::Array<FloatImm>>());
   return true;
 }
 
@@ -141,7 +142,8 @@ ffi::Optional<Trace> MutateUnrollNode::Apply(const Trace& trace, TRandState* ran
   if (result >= candidate.decision) {
     result += 1;
   }
-  return trace->WithDecision(candidate.inst, Integer(result), /*remove_postproc=*/true);
+  return trace->WithDecision(candidate.inst, static_cast<int64_t>(result),
+                             /*remove_postproc=*/true);
 }
 
 Mutator Mutator::MutateUnroll() { return Mutator(ffi::make_object<MutateUnrollNode>()); }

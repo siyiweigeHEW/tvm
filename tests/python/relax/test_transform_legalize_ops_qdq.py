@@ -36,7 +36,7 @@ def test_quantize_fp32_to_int8():
 
     @tvm.script.ir_module
     class Expected:
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def quantize(
             A: T.Buffer((T.int64(2), T.int64(4)), "float32"),
             B: T.Buffer((T.int64(2),), "float32"),
@@ -68,7 +68,7 @@ def test_quantize_fp32_to_int8():
             zp: R.Tensor((2,), dtype="int8"),
         ) -> R.Tensor((2, 4), dtype="int8"):
             out = R.call_tir(
-                Expected.quantize, (data, scale, zp), out_sinfo=R.Tensor((2, 4), dtype="int8")
+                Expected.quantize, (data, scale, zp), out_ty=R.Tensor((2, 4), dtype="int8")
             )
             return out
 
@@ -90,7 +90,7 @@ def test_quantize_fp16_to_uint8():
 
     @tvm.script.ir_module
     class Expected:
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def quantize(
             A: T.Buffer((T.int64(2), T.int64(4)), "float16"),
             B: T.Buffer((T.int64(2),), "float16"),
@@ -122,7 +122,7 @@ def test_quantize_fp16_to_uint8():
             zp: R.Tensor((2,), dtype="int8"),
         ) -> R.Tensor((2, 4), dtype="uint8"):
             out = R.call_tir(
-                Expected.quantize, (data, scale, zp), out_sinfo=R.Tensor((2, 4), dtype="uint8")
+                Expected.quantize, (data, scale, zp), out_ty=R.Tensor((2, 4), dtype="uint8")
             )
             return out
 
@@ -144,7 +144,7 @@ def test_quantize_fp32_to_int8_symbolic():
 
     @tvm.script.ir_module
     class Expected:
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def quantize(var_A: T.handle, var_B: T.handle, var_C: T.handle, var_quantized: T.handle):
             T.func_attr({"tirx.noalias": True})
             n = T.int64()
@@ -176,9 +176,7 @@ def test_quantize_fp32_to_int8_symbolic():
             zp: R.Tensor(("n",), dtype="int8"),
         ) -> R.Tensor((4, "n"), dtype="int8"):
             n = T.int64()
-            out = R.call_tir(
-                Expected.quantize, (data, scale, zp), out_sinfo=R.Tensor((4, n), "int8")
-            )
+            out = R.call_tir(Expected.quantize, (data, scale, zp), out_ty=R.Tensor((4, n), "int8"))
             return out
 
     mod = LegalizeOps()(Quantize)
@@ -197,7 +195,7 @@ def test_quantize_fp32_to_int8_scalar_param():
 
     @tvm.script.ir_module
     class Expected:
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def quantize(
             A: T.Buffer((T.int64(2), T.int64(4)), "float32"),
             quantized: T.Buffer((T.int64(2), T.int64(4)), "int8"),
@@ -222,7 +220,7 @@ def test_quantize_fp32_to_int8_scalar_param():
 
         @R.function
         def main(data: R.Tensor((2, 4), dtype="float32")) -> R.Tensor((2, 4), dtype="int8"):
-            out = R.call_tir(Expected.quantize, (data,), out_sinfo=R.Tensor((2, 4), dtype="int8"))
+            out = R.call_tir(Expected.quantize, (data,), out_ty=R.Tensor((2, 4), dtype="int8"))
             return out
 
     mod = LegalizeOps()(Quantize)
@@ -245,7 +243,7 @@ def test_quantize_fp32_to_int8_scalar_1d_param():
 
     @tvm.script.ir_module
     class Expected:
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def quantize(
             A: T.Buffer((T.int64(2), T.int64(4)), "float32"),
             B: T.Buffer((T.int64(2),), "float32"),
@@ -276,7 +274,7 @@ def test_quantize_fp32_to_int8_scalar_1d_param():
             out = R.call_tir(
                 cls.quantize,
                 (data, R.const([2.0, 1.0], "float32"), R.const([4, 5], "int8")),
-                out_sinfo=R.Tensor((2, 4), dtype="int8"),
+                out_ty=R.Tensor((2, 4), dtype="int8"),
             )
             return out
 
@@ -296,7 +294,7 @@ def test_quantize_fp16_to_int8_scalar_param():
 
     @tvm.script.ir_module
     class Expected:
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def quantize(
             A: T.Buffer((T.int64(2), T.int64(4)), "float16"),
             quantized: T.Buffer((T.int64(2), T.int64(4)), "int8"),
@@ -321,7 +319,7 @@ def test_quantize_fp16_to_int8_scalar_param():
 
         @R.function
         def main(data: R.Tensor((2, 4), dtype="float16")) -> R.Tensor((2, 4), dtype="int8"):
-            out = R.call_tir(Expected.quantize, (data,), out_sinfo=R.Tensor((2, 4), dtype="int8"))
+            out = R.call_tir(Expected.quantize, (data,), out_ty=R.Tensor((2, 4), dtype="int8"))
             return out
 
     mod = LegalizeOps()(Quantize)
@@ -342,7 +340,7 @@ def test_dequantize_int8_to_fp32():
 
     @tvm.script.ir_module
     class Expected:
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def dequantize(
             A: T.Buffer((T.int64(2), T.int64(4)), "int8"),
             B: T.Buffer((T.int64(2),), "float32"),
@@ -368,7 +366,7 @@ def test_dequantize_int8_to_fp32():
             zp: R.Tensor((2,), dtype="int8"),
         ) -> R.Tensor((2, 4), dtype="float32"):
             out = R.call_tir(
-                Expected.dequantize, (data, scale, zp), out_sinfo=R.Tensor((2, 4), dtype="float32")
+                Expected.dequantize, (data, scale, zp), out_ty=R.Tensor((2, 4), dtype="float32")
             )
             return out
 
@@ -388,7 +386,7 @@ def test_dequantize_int8_to_fp32_scalar_param():
 
     @tvm.script.ir_module
     class Expected:
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def dequantize(
             A: T.Buffer((T.int64(2), T.int64(4)), "int8"),
             dequantized: T.Buffer((T.int64(2), T.int64(4)), "float32"),
@@ -407,7 +405,7 @@ def test_dequantize_int8_to_fp32_scalar_param():
         @R.function
         def main(data: R.Tensor((2, 4), dtype="int8")) -> R.Tensor((2, 4), dtype="float32"):
             cls = Expected
-            out = R.call_tir(cls.dequantize, (data,), out_sinfo=R.Tensor((2, 4), dtype="float32"))
+            out = R.call_tir(cls.dequantize, (data,), out_ty=R.Tensor((2, 4), dtype="float32"))
             return out
 
     mod = LegalizeOps()(Dequantize)
@@ -428,7 +426,7 @@ def test_dequantize_int8_to_fp32_symbolic():
 
     @tvm.script.ir_module
     class Expected:
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def dequantize(
             var_A: T.handle, var_B: T.handle, var_C: T.handle, var_dequantized: T.handle
         ):
@@ -457,7 +455,7 @@ def test_dequantize_int8_to_fp32_symbolic():
         ) -> R.Tensor((2, "n"), dtype="float32"):
             n = T.int64()
             out = R.call_tir(
-                Expected.dequantize, (data, scale, zp), out_sinfo=R.Tensor((2, n), dtype="float32")
+                Expected.dequantize, (data, scale, zp), out_ty=R.Tensor((2, n), dtype="float32")
             )
             return out
 
@@ -479,7 +477,7 @@ def test_dequantize_int8_to_fp16():
 
     @tvm.script.ir_module
     class Expected:
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def dequantize(
             A: T.Buffer((T.int64(2), T.int64(4)), "int8"),
             B: T.Buffer((T.int64(2),), "float16"),
@@ -515,7 +513,7 @@ def test_dequantize_int8_to_fp16():
             zp: R.Tensor((2,), dtype="int8"),
         ) -> R.Tensor((2, 4), dtype="float16"):
             out = R.call_tir(
-                Expected.dequantize, (data, scale, zp), out_sinfo=R.Tensor((2, 4), dtype="float16")
+                Expected.dequantize, (data, scale, zp), out_ty=R.Tensor((2, 4), dtype="float16")
             )
             return out
 
@@ -535,7 +533,7 @@ def test_dequantize_int8_to_fp16_scalar_param():
 
     @tvm.script.ir_module
     class Expected:
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def dequantize(
             A: T.Buffer((T.int64(2), T.int64(4)), "int8"),
             dequantized: T.Buffer((T.int64(2), T.int64(4)), "float16"),
@@ -562,7 +560,7 @@ def test_dequantize_int8_to_fp16_scalar_param():
         @R.function
         def main(data: R.Tensor((2, 4), dtype="int8")) -> R.Tensor((2, 4), dtype="float16"):
             cls = Expected
-            out = R.call_tir(cls.dequantize, (data,), out_sinfo=R.Tensor((2, 4), dtype="float16"))
+            out = R.call_tir(cls.dequantize, (data,), out_ty=R.Tensor((2, 4), dtype="float16"))
             return out
 
     mod = LegalizeOps()(Dequantize)

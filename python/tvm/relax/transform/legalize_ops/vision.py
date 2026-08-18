@@ -17,9 +17,10 @@
 """Default legalization function for vision network related operators."""
 
 from tvm import relax, te, tirx, topi
+from tvm.ir import Call
 
 from ...block_builder import BlockBuilder
-from ...expr import Call, Expr, TupleGetItem
+from ...expr import Expr, TupleGetItem
 from .common import register_legalize
 
 
@@ -49,7 +50,7 @@ def _all_class_non_max_suppression(block_builder: BlockBuilder, call: Call) -> E
     score_threshold = call.args[4]
     output_format = call.attrs.output_format
 
-    scores_shape = scores.struct_info.shape
+    scores_shape = scores.ty.shape
     if len(scores_shape) == 3:
         _, _, num_boxes = scores_shape
     elif len(scores_shape) == 2:
@@ -152,6 +153,8 @@ def _non_max_suppression(block_builder: BlockBuilder, call: Call) -> Expr:
         id_index=call.attrs.id_index,
         return_indices=call.attrs.return_indices,
         invalid_to_bottom=call.attrs.invalid_to_bottom,
+        soft_nms_sigma=call.attrs.soft_nms_sigma,
+        score_threshold=call.attrs.score_threshold,
     )
 
 

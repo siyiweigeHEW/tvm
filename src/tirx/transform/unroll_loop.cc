@@ -23,6 +23,7 @@
  */
 // Unrolls the loop as in Halide pipeline.
 #include <tvm/arith/analyzer.h>
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/expr.h>
@@ -38,7 +39,7 @@
 namespace tvm {
 namespace tirx {
 
-struct UnrollLoopConfigNode : public AttrsNodeReflAdapter<UnrollLoopConfigNode> {
+struct UnrollLoopConfigNode : public ffi::Object {
   int auto_max_step;
   int auto_max_depth;
   int auto_max_extent;
@@ -63,12 +64,13 @@ struct UnrollLoopConfigNode : public AttrsNodeReflAdapter<UnrollLoopConfigNode> 
                 "Whether to always unroll local access", refl::DefaultValue(false));
   }
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tirx.transform.UnrollLoopConfig", UnrollLoopConfigNode,
-                                    BaseAttrsNode);
+                                    ffi::Object);
 };
 
-class UnrollLoopConfig : public Attrs {
+class UnrollLoopConfig : public ffi::ObjectRef {
  public:
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(UnrollLoopConfig, Attrs, UnrollLoopConfigNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(UnrollLoopConfig, ffi::ObjectRef,
+                                                UnrollLoopConfigNode);
 };
 
 TVM_FFI_STATIC_INIT_BLOCK() { UnrollLoopConfigNode::RegisterReflection(); }
@@ -101,13 +103,13 @@ class LoopUnroller : public StmtExprMutator {
 
   Stmt VisitStmt_(const AttrStmtNode* op) final {
     if (op->attr_key == "pragma_auto_unroll_max_step") {
-      int value = static_cast<int>(Downcast<Integer>(op->value)->value);
+      int value = static_cast<int>(op->value.as_or_throw<IntImm>()->value);
       std::swap(value, auto_max_step_);
       Stmt ret = this->VisitStmt(op->body);
       std::swap(value, auto_max_step_);
       return ret;
     } else if (op->attr_key == "pragma_unroll_explicit") {
-      bool explicit_unroll = Downcast<Integer>(op->value)->value;
+      bool explicit_unroll = op->value.as_or_throw<IntImm>()->value;
       std::swap(explicit_unroll, explicit_unroll_);
       Stmt ret = this->VisitStmt(op->body);
       std::swap(explicit_unroll, explicit_unroll_);
@@ -163,9 +165,9 @@ class LoopUnroller : public StmtExprMutator {
     }
   }
 
-  PrimExpr VisitExpr_(const BufferLoadNode* op) final {
+  Expr VisitExpr_(const BufferLoadNode* op) final {
     if (unroll_local_access_) {
-      auto storage_scope = runtime::StorageScope::Create(GetPtrStorageScope(op->buffer->data));
+      auto storage_scope = runtime::StorageScope::Create(op->buffer.scope());
       if (storage_scope.rank == runtime::StorageRank::kLocal ||
           storage_scope.rank == runtime::StorageRank::kWarp) {
         VarLocalAccessMarker marker(&var_touched_local_);
@@ -180,7 +182,7 @@ class LoopUnroller : public StmtExprMutator {
   Stmt VisitStmt_(const BufferStoreNode* op) final {
     ++step_count_;
     if (unroll_local_access_) {
-      auto storage_scope = runtime::StorageScope::Create(GetPtrStorageScope(op->buffer->data));
+      auto storage_scope = runtime::StorageScope::Create(op->buffer.scope());
       if (storage_scope.rank == runtime::StorageRank::kLocal ||
           storage_scope.rank == runtime::StorageRank::kWarp) {
         VarLocalAccessMarker marker(&var_touched_local_);
@@ -223,7 +225,7 @@ class LoopUnroller : public StmtExprMutator {
     ffi::Map<Var, PrimExpr> vmap;
     ffi::Array<Stmt> unrolled;
     for (int i = 0; i < value; ++i) {
-      vmap.Set(op->loop_var, op->min + make_const(op->loop_var.dtype(), i));
+      vmap.Set(op->loop_var, op->min + IntImm(op->loop_var.ty(), i));
       Stmt step = Substitute(body, vmap);
       unrolled.push_back(step);
     }
@@ -234,7 +236,7 @@ class LoopUnroller : public StmtExprMutator {
   // returns the extent of the loop if it's a constant integer, otherwise return -1
   int GetExtent(const ForNode* op) {
     // constant folding.
-    PrimExpr extent = analyzer_.Simplify(op->extent);
+    PrimExpr extent = analyzer_->Simplify(op->extent);
     const IntImmNode* v1 = extent.as<IntImmNode>();
     int value = -1;
     // integers that do not fit in int32_t are treated as symbolic,
@@ -282,8 +284,8 @@ Pass UnrollLoop() {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
     auto* n = f.CopyOnWrite();
     auto cfg = ctx->GetConfig<UnrollLoopConfig>("tirx.UnrollLoop");
-    if (!cfg.defined()) {
-      cfg = AttrsWithDefaultValues<UnrollLoopConfig>();
+    if (!cfg.has_value()) {
+      cfg = tvm::transform::PassConfigWithDefaults<UnrollLoopConfig>();
     }
     n->body = UnrollLoop(std::move(f->body), cfg.value());
     return f;

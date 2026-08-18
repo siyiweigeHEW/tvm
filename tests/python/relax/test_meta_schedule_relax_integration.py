@@ -25,8 +25,8 @@ import pytest
 import tvm
 import tvm.testing
 from tvm import relax
-from tvm.runtime import tensor as tvm_tensor
 from tvm.runtime import cpu as tvm_cpu
+from tvm.runtime import tensor as tvm_tensor
 from tvm.runtime.vm import VirtualMachine
 from tvm.s_tir import meta_schedule as ms
 from tvm.script import ir as I
@@ -89,6 +89,8 @@ def test_compile_relax_with_database():
     same keys (by running LegalizeOps + FuseOps + FuseTIR before applying the
     database), so the scheduled kernels are actually picked up.
     """
+    pytest.importorskip("cloudpickle")  # needed by meta_schedule popen workers
+
     target = tvm.target.Target({"kind": "llvm", "num-cores": 1})
 
     # Prepare the fused module whose TIR keys will populate the database.

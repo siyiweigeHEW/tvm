@@ -22,6 +22,7 @@
  * \brief Implementation of use-def analysis.
  */
 
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/relax/analysis.h>
 #include <tvm/relax/expr.h>
@@ -57,8 +58,9 @@ class UDChain : relax::ExprVisitor {
  private:
   ffi::Map<Var, Expr> bound_values;
   std::unordered_set<Var> forward_declarations;
-  std::unordered_map<Var, support::OrderedSet<Var, ObjectPtrHash, ObjectPtrEqual>> usage_map;
-  support::OrderedSet<Var, ObjectPtrHash, ObjectPtrEqual> outputs;
+  std::unordered_map<Var, support::OrderedSet<Var, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>>
+      usage_map;
+  support::OrderedSet<Var, ffi::ObjectPtrHash, ffi::ObjectPtrEqual> outputs;
 
   ffi::Optional<Var> cur_user_;
 
@@ -140,6 +142,7 @@ std::set<const VarNode*> GetUsedVars(const Expr& expr) {
   class UsedVars : public ExprVisitor {
    public:
     std::set<const VarNode*> used_vars;
+    void VisitExprDepTypeField(const Type&) final {}
     void VisitExpr_(const VarNode* op) override { used_vars.insert(op); }
   } visitor;
   visitor.VisitExpr(expr);

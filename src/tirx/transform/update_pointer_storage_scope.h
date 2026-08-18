@@ -38,8 +38,8 @@ class UpdatePointerStorageScope : public StmtExprMutator {
   explicit UpdatePointerStorageScope(
       const std::unordered_map<const VarNode*, ffi::String>& new_storage_scopes);
 
-  virtual PrimExpr VisitExpr_(const VarNode*);
-  virtual PrimExpr VisitExpr_(const BufferLoadNode*);
+  virtual Expr VisitExpr_(const VarNode*);
+  virtual Expr VisitExpr_(const BufferLoadNode*);
   virtual Stmt VisitStmt_(const AllocBufferNode*);
   virtual Stmt VisitStmt_(const DeclBufferNode*);
   virtual Stmt VisitStmt_(const BufferStoreNode*);
@@ -48,10 +48,9 @@ class UpdatePointerStorageScope : public StmtExprMutator {
   template <typename Node>
   Node UpdateBufferAccess(Node node);
 
-  Buffer GetUpdatedBuffer(Buffer buf);
+  BufferVar GetUpdatedBuffer(BufferVar buf);
 
   std::unordered_map<const VarNode*, Var> new_var_remap_;
-  std::unordered_map<const BufferNode*, Buffer> new_buffer_remap_;
 };
 
 }  // namespace tirx

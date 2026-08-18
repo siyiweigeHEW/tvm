@@ -15,7 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 """The core infra for nn.Module, which includes the following pieces:
-- Tensor, a wrapper on top of relax.Expr whose struct_info is a TensorStructInfo,
+- Tensor, a wrapper on top of relax.Expr whose ty is a TensorType,
   providing more convenient access shape and dtype information.
   Tensor is always symbolic and not bound to any concrete values.
 - Parameter, a special tensor which could be bound or not bound to concrete values.
@@ -45,11 +45,11 @@ from tvm.target import Target
 
 from .... import relax as rx
 from ...block_builder import BlockBuilder
-from ...struct_info import (
-    ObjectStructInfo,
-    ShapeStructInfo,
-    TensorStructInfo,
-    TupleStructInfo,
+from ...type import (
+    AnyType,
+    ShapeType,
+    TensorType,
+    TupleType,
 )
 from ._tensor_op import _TensorOp
 from .subroutine import SubroutineMixin
@@ -88,7 +88,7 @@ def set_default_dtype(dtype: str) -> None:
 
 
 class Tensor(_TensorOp):
-    """A wrapper on top of relax.Expr whose struct_info is a TensorStructInfo, providing more
+    """A wrapper on top of relax.Expr whose ty is a TensorType, providing more
     convenient access shape and dtype information. Tensor is always symbolc and not bound to any
     concrete values. Shape and dtype inference is done eagerly upon tensor creation, i.e. when
     operators are applied on tensors, the shape and dtype information is already available.
@@ -100,13 +100,13 @@ class Tensor(_TensorOp):
         """Private constructor. Tensor is never supposed to be constructed directly by users."""
 
         def _check_tensor(expr: rx.Expr) -> None:
-            assert expr.struct_info_ is not None
-            assert isinstance(expr.struct_info, TensorStructInfo)
-            assert expr.struct_info.ndim != -1
-            assert expr.struct_info.shape is not None
-            assert expr.struct_info.shape.struct_info_ is not None
-            assert isinstance(expr.struct_info.shape.struct_info, ShapeStructInfo)
-            assert expr.struct_info.shape.struct_info.values is not None
+            assert expr.ty is not None
+            assert isinstance(expr.ty, TensorType)
+            assert expr.ty.ndim != -1
+            assert expr.ty.shape is not None
+            assert expr.ty.shape.ty is not None
+            assert isinstance(expr.ty.shape.ty, ShapeType)
+            assert expr.ty.shape.ty.values is not None
 
         _check_tensor(_expr)
         self._expr = _expr
@@ -122,17 +122,17 @@ class Tensor(_TensorOp):
         return Tensor(_expr=rx.const(data, dtype=dtype))
 
     @staticmethod
-    def from_struct_info(struct_info: rx.TensorStructInfo, name: str = "tensor") -> "Tensor":
-        """Construct a nn.Tensor from a Relax TensorStructInfo.
+    def from_ty(ty: rx.TensorType, name: str = "tensor") -> "Tensor":
+        """Construct a nn.Tensor from a Relax TensorType.
 
-        TensorStructInfo is the Relax type-level description of a tensor, carrying its shape
+        TensorType is the Relax type-level description of a tensor, carrying its shape
         and dtype without holding actual data. This factory creates an unbound placeholder
         ``nn.Tensor`` that can be used as a symbolic input when tracing an ``nn.Module``.
 
         Parameters
         ----------
-        struct_info : rx.TensorStructInfo
-            The struct info describing the tensor's shape and dtype.
+        ty : rx.TensorType
+            The type describing the tensor's shape and dtype.
 
         name : str
             Name hint for the underlying Relax variable.
@@ -140,18 +140,18 @@ class Tensor(_TensorOp):
         Returns
         -------
         tensor : Tensor
-            A symbolic ``nn.Tensor`` backed by a ``relax.Var`` with the given struct info.
+            A symbolic ``nn.Tensor`` backed by a ``relax.Var`` with the given type.
         """
         return Tensor(
             _expr=rx.Var(
-                name_hint=name,
-                struct_info=struct_info,
+                name=name,
+                ty=ty,
             )
         )
 
     @staticmethod
     def placeholder(
-        shape: Sequence[int | str | tirx.PrimExpr],
+        shape: Sequence[int | str | tirx.Expr],
         dtype: str,
         name: str = "tensor",
     ) -> "Tensor":
@@ -172,14 +172,14 @@ class Tensor(_TensorOp):
                 expr = tirx.Var(expr, "int64")
                 new_shape.append(expr)
                 continue
-            if not isinstance(expr, tirx.PrimExpr):
+            if not tvm.ir.is_prim_expr(expr):
                 raise TypeError(f"Invalid shape: {shape}")
-            assert expr.dtype == "int64"
+            assert expr.ty == tvm.ir.PrimType("int64")
             new_shape.append(expr)
         return Tensor(
             _expr=rx.Var(
-                name_hint=name,
-                struct_info=TensorStructInfo(
+                name=name,
+                ty=TensorType(
                     shape=new_shape,  # type: ignore[arg-type]
                     dtype=dtype,
                 ),
@@ -187,24 +187,24 @@ class Tensor(_TensorOp):
         )
 
     @property
-    def shape(self) -> list[int | tirx.PrimExpr]:
+    def shape(self) -> list[int | tirx.Expr]:
         """Returns the shape of the tensor as a list of integers.
 
-        An integer can be a python int or tvm.tirx.PrimExpr, depending on whether the shape is
-        fully static, for example, [1, 2, tvm.tirx.Var("n")] is a valid shape where the last
-        dimension is dynamic while the first two dimensions are always static constants.
+        An integer can be a python int or tvm.tirx.Expr, depending on whether the shape is
+        fully static, for example, [1, 2, tvm.tirx.Var("n", "int64")] is a valid shape where
+        the last dimension is dynamic while the first two dimensions are always static constants.
 
         Returns
         -------
-        shape : List[Union[int, tirx.PrimExpr]]
+        shape : List[Union[int, tirx.Expr]]
             The shape of the tensor
         """
 
-        def _simplify(expr: tirx.PrimExpr):
+        def _simplify(expr: tirx.Expr):
             return expr.value if isinstance(expr, tirx.IntImm) else expr
 
-        shape_sinfo: ShapeStructInfo = self._expr.struct_info.shape.struct_info
-        return [_simplify(x) for x in shape_sinfo.values]
+        shape_ty: ShapeType = self._expr.ty.shape.ty
+        return [_simplify(x) for x in shape_ty.values]
 
     @property
     def ndim(self) -> int:
@@ -215,7 +215,7 @@ class Tensor(_TensorOp):
         ndim : int
             The number of dimensions of the tensor
         """
-        return self._expr.struct_info.ndim
+        return self._expr.ty.ndim
 
     @property
     def dtype(self) -> str:
@@ -226,7 +226,7 @@ class Tensor(_TensorOp):
         dtype : str
             The data type of the tensor
         """
-        return self._expr.struct_info.dtype
+        return self._expr.ty.dtype.dtype
 
     def __repr__(self) -> str:
         return f'Tensor({self.shape}, "{self.dtype}")'
@@ -243,7 +243,7 @@ class Parameter(Tensor):
 
     def __init__(
         self,
-        shape: Sequence[int | str | tirx.PrimExpr],
+        shape: Sequence[int | str | tirx.Expr],
         dtype: str | None = None,
     ) -> None:
         """Create a parameter with given shape and dtype. The parameter is not bound to any
@@ -251,7 +251,7 @@ class Parameter(Tensor):
 
         Parameters
         ----------
-        shape : Sequence[Union[int, str, tirx.PrimExpr]]
+        shape : Sequence[Union[int, str, tirx.Expr]]
             The shape of the parameter. If it is a string `name`, we create a symbolic shape
             `tvm.tirx.Var(name, "int64")`.
         dtype : Optional[str]
@@ -310,8 +310,8 @@ class Parameter(Tensor):
 
 
 class Object:
-    """A wrapper on top of relax.Expr whose struct_info is the base
-    ObjectStructInfo (rather than any its subclass). Object effectively
+    """A wrapper on top of relax.Expr whose ty is the base
+    AnyType, rather than a more specific subtype. Object effectively
     represents non-tensor frontend components such as KV caches.
     """
 
@@ -322,7 +322,7 @@ class Object:
         if not isinstance(_expr, rx.Var):
             _expr = BlockBuilder.current().emit(_expr, _name)
         self._expr = _expr
-        assert isinstance(self._expr.struct_info, ObjectStructInfo)
+        assert isinstance(self._expr.ty, AnyType)
 
 
 class Effect:
@@ -625,6 +625,65 @@ class ModuleDict(Module):
             module.to(dtype=dtype)
 
 
+class ParameterDict(Module):
+    """Holds parameters in a dict."""
+
+    def __init__(
+        self,
+        params: OrderedDict[str, Parameter] | dict[str, Parameter] | None = None,
+    ):
+        self.params: OrderedDict[str, Parameter] = OrderedDict()
+        if params is not None:
+            self.update(params)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.params)
+
+    def __getitem__(self, key: str) -> Parameter:
+        return self.params[key]
+
+    def __setitem__(self, key: str, param: Parameter) -> None:
+        if not isinstance(key, str):
+            raise TypeError(f"ParameterDict keys must be strings, but got {type(key).__name__}")
+        if not isinstance(param, Parameter):
+            raise TypeError(
+                f"ParameterDict values must be nn.Parameter, but got {type(param).__name__}"
+            )
+        self.params[key] = param
+
+    def __len__(self) -> int:
+        return len(self.params)
+
+    def keys(self) -> Iterator[str]:
+        return self.params.keys()
+
+    def values(self) -> Iterator[Parameter]:
+        return self.params.values()
+
+    def items(self) -> Iterator[tuple[str, Parameter]]:
+        return self.params.items()
+
+    def get(self, key: str, default: Parameter | None = None) -> Parameter | None:
+        return self.params.get(key, default)
+
+    def update(self, params: dict[str, Parameter]) -> None:
+        for key, param in params.items():
+            self[key] = param
+
+    def clear(self) -> None:
+        self.params.clear()
+
+    def pop(self, key: str) -> Parameter:
+        return self.params.pop(key)
+
+    def __contains__(self, key: str) -> bool:
+        return key in self.params
+
+    def to(self, dtype: str | None = None) -> None:  # pylint: disable=invalid-name
+        for param in self.params.values():
+            param.to(dtype=dtype)
+
+
 class ModuleList(Module):
     """Holds submodules in a list."""
 
@@ -658,6 +717,48 @@ class ModuleList(Module):
         return x
 
 
+class ParameterList(Module):
+    """Holds parameters in a list."""
+
+    def __init__(self, params: list[Parameter] | None = None):
+        self.params: list[Parameter] = []
+        if params is not None:
+            self.extend(params)
+
+    def __iter__(self) -> Iterator[Parameter]:
+        return iter(self.params)
+
+    def __getitem__(self, idx: int) -> Parameter:
+        return self.params[idx]
+
+    def __setitem__(self, idx: int, param: Parameter) -> None:
+        if not isinstance(param, Parameter):
+            raise TypeError(
+                f"ParameterList elements must be nn.Parameter, but got {type(param).__name__}"
+            )
+        self.params[idx] = param
+
+    def __len__(self) -> int:
+        return len(self.params)
+
+    def append(self, param: Parameter) -> None:
+        """Add a parameter to the end of the ParameterList"""
+        if not isinstance(param, Parameter):
+            raise TypeError(
+                f"ParameterList elements must be nn.Parameter, but got {type(param).__name__}"
+            )
+        self.params.append(param)
+
+    def extend(self, params: list[Parameter]) -> None:
+        """Add parameters to the end of the ParameterList"""
+        for param in params:
+            self.append(param)
+
+    def to(self, dtype: str | None = None) -> None:  # pylint: disable=invalid-name
+        for param in self.params:
+            param.to(dtype=dtype)
+
+
 def wrap_nested(expr: rx.Expr, name: str) -> Tensor | Sequence[Tensor]:
     """Wrap the given relax.Expr, emit it using the current BlockBuilder,
     and automatically handle nested cases if the expr represents a Tuple.
@@ -677,22 +778,32 @@ def wrap_nested(expr: rx.Expr, name: str) -> Tensor | Sequence[Tensor]:
     """
     if not isinstance(expr, rx.DataflowVar):
         expr = BlockBuilder.current().emit(expr, name)
-    if isinstance(expr.struct_info_, TensorStructInfo):
+    if isinstance(expr.ty, TensorType):
         return Tensor(_expr=expr)
-    if isinstance(expr.struct_info_, TupleStructInfo):
+    if isinstance(expr.ty, TupleType):
         return tuple(
             wrap_nested(  # type: ignore
                 rx.TupleGetItem(expr, i),
                 name=f"{name}.{i}",
             )
-            for i in range(len(expr.struct_info_.fields))
+            for i in range(len(expr.ty.fields))
         )
-    raise TypeError(f"Unsupported return type: {expr.struct_info_}")
+    raise TypeError(f"Unsupported return type: {expr.ty}")
 
 
 def _attribute_finder(root: Module, prefix: str, condition_yield: Callable[[Any], bool]):
     """Find attributes that satisfy the condition recursively"""
-    if isinstance(root, ModuleList):
+    if isinstance(root, ParameterList):
+        for i, param in enumerate(root):
+            if condition_yield(param):
+                yield prefix + f"{i}", param
+        return
+    elif isinstance(root, ParameterDict):
+        for name, param in root.items():
+            if condition_yield(param):
+                yield prefix + name, param
+        return
+    elif isinstance(root, ModuleList):
         for i, subitem in enumerate(root):
             yield from _attribute_finder(subitem, prefix + f"{i}.", condition_yield)
         return
@@ -703,6 +814,18 @@ def _attribute_finder(root: Module, prefix: str, condition_yield: Callable[[Any]
     for name, item in root.__dict__.items():
         if condition_yield(item):
             yield prefix + name, item
+        elif isinstance(item, ParameterList):
+            yield from _attribute_finder(
+                item,
+                prefix + name + ".",
+                condition_yield,
+            )
+        elif isinstance(item, ParameterDict):
+            yield from _attribute_finder(
+                item,
+                prefix + name + ".",
+                condition_yield,
+            )
         elif isinstance(item, ModuleList):
             yield from _attribute_finder(
                 item,

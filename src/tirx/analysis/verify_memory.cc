@@ -24,6 +24,7 @@
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/transform.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/target/target.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
@@ -68,7 +69,7 @@ class MemoryAccessVerifier final : protected StmtExprVisitor {
  protected:
   /// Visitor implementation
   //@{
-  void VisitExpr(const PrimExpr& n) final { StmtExprVisitor::VisitExpr(n); }
+  void VisitExpr(const Expr& n) final { StmtExprVisitor::VisitExpr(n); }
 
   void VisitStmt(const Stmt& n) final { StmtExprVisitor::VisitStmt(n); }
 
@@ -89,12 +90,12 @@ class MemoryAccessVerifier final : protected StmtExprVisitor {
   }
 
   void VisitExpr_(const BufferLoadNode* op) final {
-    HandleLoadStoreToVariable(op->buffer->data);
+    HandleLoadStoreToVariable(op->buffer.var());
     return StmtExprVisitor::VisitExpr_(op);
   }
 
   void VisitStmt_(const BufferStoreNode* op) final {
-    HandleLoadStoreToVariable(op->buffer->data);
+    HandleLoadStoreToVariable(op->buffer.var());
     return StmtExprVisitor::VisitStmt_(op);
   }
   //@}
@@ -102,8 +103,8 @@ class MemoryAccessVerifier final : protected StmtExprVisitor {
   /// Check if the value of a Variable comes from function argument.
   bool IsFromFunctionArgs(const VarNode* var) const {
     const VarNode* V = var;
-    for (auto kv : func_->buffer_map) {
-      if (V == kv.second->data.get()) return true;
+    for (const Var& param : func_->params) {
+      if (param->ty.as<BufferTypeNode>() && V == param.get()) return true;
     }
 
     while (true) {
@@ -159,9 +160,9 @@ class MemoryAccessVerifier final : protected StmtExprVisitor {
   bool in_thread_env_{false};
   std::vector<ffi::String> errs_;
   //@}
-  tirx::PrimFunc func_{nullptr};                       ///< Function to be verified.
-  int dev_type_{kDLCPU};                               ///< Device type
-  std::unordered_map<const VarNode*, PrimExpr> defs_;  ///< Variable definitions
+  tirx::PrimFunc func_{nullptr};                   ///< Function to be verified.
+  int dev_type_{kDLCPU};                           ///< Device type
+  std::unordered_map<const VarNode*, Expr> defs_;  ///< Variable definitions
 };
 }  // namespace
 
@@ -170,13 +171,13 @@ std::vector<ffi::String> VerifyMemory_(const PrimFunc& func) {
   auto target = func->GetAttr<Target>(tvm::attr::kTarget);
   // Skip verification for functions without a target attribute, as they are
   // typically host-only helper functions that do not have device-memory constraints.
-  if (!target.defined()) return {};
+  if (!target.has_value()) return {};
 
   VLOG(1) << "verifying memory for target '" << target.value()->str()
           << "' for primitive:" << std::endl
           << func;
 
-  if (func->GetAttr<Integer>(tvm::attr::kCallingConv, Integer(CallingConv::kDefault)) ==
+  if (func->GetAttr<CallingConv>(tvm::attr::kCallingConv, CallingConv::kDefault).value() ==
       CallingConv::kDefault) {
     MemoryAccessVerifier v(func, target.value()->GetTargetDeviceType());
     v.Run();

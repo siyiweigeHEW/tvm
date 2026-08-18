@@ -24,10 +24,12 @@
  */
 #include "./static_library.h"
 
+#include <tvm/ffi/cast.h>
+#include <tvm/ffi/extra/module.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/memory.h>
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/runtime/module.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/support/io.h>
 #include <tvm/support/serializer.h>
 
@@ -50,7 +52,7 @@ class StaticLibraryNode final : public ffi::ModuleObj {
   const char* kind() const final { return "static_library"; }
 
   ffi::Optional<ffi::Function> GetFunction(const ffi::String& name) final {
-    const ObjectPtr<Object>& sptr_to_self = ffi::GetObjectPtr<Object>(this);
+    const ffi::ObjectPtr<ffi::Object>& sptr_to_self = ffi::GetObjectPtr<ffi::Object>(this);
     if (name == "get_func_names") {
       return ffi::Function(
           [sptr_to_self, this](ffi::PackedArgs args, ffi::Any* rv) { *rv = func_names_; });

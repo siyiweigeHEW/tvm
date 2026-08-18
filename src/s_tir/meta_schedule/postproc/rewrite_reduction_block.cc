@@ -55,7 +55,7 @@ struct ReductionBlockFinder : private StmtVisitor {
   }
 
   void VisitStmt_(const SBlockRealizeNode* realize) final {
-    if (realize->block->init.defined() && AllReductionIterVarAreUnbound(realize)) {
+    if (realize->block->init.has_value() && AllReductionIterVarAreUnbound(realize)) {
       results_.push_back(realize->block.get());
     }
     StmtVisitor::VisitStmt_(realize);
@@ -125,7 +125,8 @@ class RewriteReductionBlockNode : public PostprocNode {
   bool Apply(const s_tir::Schedule& sch) final;
 
   Postproc Clone() const {
-    ObjectPtr<RewriteReductionBlockNode> n = ffi::make_object<RewriteReductionBlockNode>(*this);
+    ffi::ObjectPtr<RewriteReductionBlockNode> n =
+        ffi::make_object<RewriteReductionBlockNode>(*this);
     return Postproc(n);
   }
 
@@ -176,7 +177,7 @@ bool RewriteReductionBlockNode::Apply(const s_tir::Schedule& sch) {
 }
 
 Postproc Postproc::RewriteReductionBlock() {
-  ObjectPtr<RewriteReductionBlockNode> n = ffi::make_object<RewriteReductionBlockNode>();
+  ffi::ObjectPtr<RewriteReductionBlockNode> n = ffi::make_object<RewriteReductionBlockNode>();
   return Postproc(n);
 }
 

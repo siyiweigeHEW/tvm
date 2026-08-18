@@ -24,11 +24,10 @@ from numbers import Integral, Number
 from typing import Any
 
 import numpy as np  # type: ignore
-from tvm_ffi import register_global_func
+from tvm_ffi import Function, register_global_func
 
 import tvm
-from tvm.runtime import Device, Object, PackedFunc
-from tvm.runtime.profiling import Report
+from tvm.runtime import Device, Object
 
 from ..rpc.base import RPC_SESS_MASK
 
@@ -50,7 +49,6 @@ class VirtualMachine:
         rt_mod: tvm.runtime.Module | tvm.runtime.Executable,
         device: Device | list[Device],
         memory_cfg: str | dict[Device, str] | None = None,
-        profile: bool = False,
     ) -> None:
         """
         Construct a VirtualMachine wrapper object.
@@ -70,9 +68,6 @@ class VirtualMachine:
             allocator type. If memory_cfg is a dict, each device uses the allocator
             type specified in the dict, or pooled allocator if not specified in the
             dict.
-
-        profile : Optional[bool]
-            Whether or not to enable profiling.
         """
         if not isinstance(rt_mod, tvm.runtime.Module):
             if isinstance(rt_mod, tvm.runtime.Executable):
@@ -80,8 +75,7 @@ class VirtualMachine:
             else:
                 raise ValueError("Expect the rt_mod to be an runtime.Module")
 
-        load_exec = "vm_profiler_load_executable" if profile else "vm_load_executable"
-        self.module = rt_mod[load_exec]()
+        self.module = rt_mod["vm_load_executable"]()
         self._invoke_closure = self.module["invoke_closure"]
         self._save_function = self.module["save_function"]
         self._set_input = self.module["set_input"]
@@ -126,7 +120,7 @@ class VirtualMachine:
             init_args.append(alloc_type)
         self.module["vm_initialization"](*init_args)
 
-    def __getitem__(self, key: str) -> PackedFunc:
+    def __getitem__(self, key: str) -> Function:
         return self.module[key]
 
     def invoke_closure(self, closure: Object, *args: Any) -> Object:
@@ -157,10 +151,10 @@ class VirtualMachine:
     ) -> None:
         """
         Convenience function. Takes a function from the module and saves
-        a `PackedFunc` that, when called, will invoke the function with the given arguments.
-        The `PackedFunc` can be accessed from the module using `saved_name`.
+        a `Function` that, when called, will invoke the function with the given arguments.
+        The `Function` can be accessed from the module using `saved_name`.
         This is included to facilitate timing trials:
-        Invoking the returned `PackedFunc` will have less overhead from dictionary lookups
+        Invoking the returned `Function` will have less overhead from dictionary lookups
         than normally running through the VM.
 
         If the saved name is taken, it can be overridden, though it cannot override
@@ -178,7 +172,7 @@ class VirtualMachine:
             The name that the resulting closure should be saved under.
 
         include_return : bool
-            Whether the saved PackedFunc should return its output.
+            Whether the saved Function should return its output.
             If timing over RPC, it may not be desirable to send output
             between machines.
 
@@ -328,7 +322,7 @@ class VirtualMachine:
 
         return get_output_rec(func_name)
 
-    def set_instrument(self, instrument: tvm.runtime.PackedFunc) -> None:
+    def set_instrument(self, instrument: Function) -> None:
         """Set an instrumentation function.
 
         If instrument is present, the function will be called
@@ -338,7 +332,7 @@ class VirtualMachine:
         .. code:: python
 
             def instrument(
-                func: Union[VMClosure, PackedFunc],
+                func: Union[VMClosure, Function],
                 func_symbol: str,
                 before_run: bool,
                 ret_value: any,
@@ -359,7 +353,7 @@ class VirtualMachine:
 
         Parameters
         ----------
-        instrument: tvm.runtime.PackedFunc
+        instrument: tvm_ffi.Function
             A instrumentation function that get invoked every VM call instr.
 
         See Also
@@ -476,30 +470,6 @@ class VirtualMachine:
             repeats_to_cooldown=repeats_to_cooldown,
             f_preproc=f_preproc,
         )
-
-    def profile(self, func_name: str, *args):
-        """Profile a function call.
-
-        Parameters
-        ----------
-        func_name : str
-            The name of the function.
-
-        args: List of Tensor or other objects supported by PackedFunc.
-            The arguments to the function.
-
-        Returns
-        -------
-        report: tvm.runtime.profiling.Report
-            The formatted profiling result, showing per-op timing measurements.
-        """
-        cargs: list[Any] = []
-
-        for arg in args:
-            self._convert(arg, cargs)
-
-        report_json = self.module["profile"](func_name, *cargs)
-        return Report.from_json(report_json)
 
 
 @register_global_func("vm.builtin.debug_print")

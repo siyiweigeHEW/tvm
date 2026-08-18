@@ -21,6 +21,7 @@
  * \file src/relax/backend/vm/codegen_vm.cc
  * \brief A codegen to generate VM executable from a Relax IRModule.
  */
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/relax/exec_builder.h>
 #include <tvm/relax/expr_functor.h>
@@ -90,7 +91,7 @@ class CodeGenVM : public ExprFunctor<Instruction::Arg(const Expr&)> {
 
     ffi::Array<ffi::String> param_names;
     for (Var param : func->params) {
-      param_names.push_back(param->name_hint());
+      param_names.push_back(param->name);
     }
 
     builder_->EmitFunction(gsymbol.value(), func->params.size(), param_names);
@@ -136,22 +137,22 @@ class CodeGenVM : public ExprFunctor<Instruction::Arg(const Expr&)> {
   Instruction::Arg VisitExpr_(const CallNode* call_node) final {
     Call call = ffi::GetRef<Call>(call_node);
 
-    if (call_node->op == null_value_op_) {
+    if (call_node->op.same_as(null_value_op_)) {
       return Instruction::Arg::Register(Instruction::kVoidRegister);
     }
 
     // allocate dst register.
-    RegName dst_reg = HasVoidStructInfo(call) ? Instruction::kVoidRegister : NewRegister();
+    RegName dst_reg = HasVoidType(call) ? Instruction::kVoidRegister : NewRegister();
     if (call->op.as<OpNode>()) {
-      if (call_node->op == call_builtin_with_ctx_op_) {
+      if (call_node->op.same_as(call_builtin_with_ctx_op_)) {
         // TODO(relax-team) migrate most handling of op to
         // directly map to call_builtin_with_ctx before codegen and simplify vm codegen.
         EmitCallBuiltinWithCtx(call, dst_reg);
-      } else if (call_node->op == alloc_storage_op_) {
+      } else if (call_node->op.same_as(alloc_storage_op_)) {
         EmitAllocStorage(call, dst_reg);
-      } else if (call_node->op == alloc_tensor_op_) {
+      } else if (call_node->op.same_as(alloc_tensor_op_)) {
         EmitAllocTensor(call, dst_reg);
-      } else if (call_node->op == kill_object_op_) {
+      } else if (call_node->op.same_as(kill_object_op_)) {
         dst_reg = EmitKillObject(call);
       } else {
         // every "normal" operator is lowered to a global var in the IRModule. The Attrs for those
@@ -216,12 +217,16 @@ class CodeGenVM : public ExprFunctor<Instruction::Arg(const Expr&)> {
     return it->second;
   }
 
+  Instruction::Arg VisitExpr_(const DataflowVarNode* op) final {
+    return VisitExpr_(static_cast<const VarNode*>(op));
+  }
+
   Instruction::Arg VisitExpr_(const ConstantNode* op) final {
     auto arg = builder_->ConvertConstant(op->data);
 
-    if (auto tsinfo = op->struct_info_.as<TensorStructInfoNode>()) {
-      if (tsinfo->vdevice.defined()) {
-        VDevice vdev = tsinfo->vdevice.value();
+    if (auto tensor_ty = op->ty.as<TensorTypeNode>()) {
+      if (tensor_ty->vdevice.has_value()) {
+        VDevice vdev = tensor_ty->vdevice.value();
         builder_->SaveMemoryScope(arg, vdev->memory_scope);
       }
     }
@@ -241,17 +246,12 @@ class CodeGenVM : public ExprFunctor<Instruction::Arg(const Expr&)> {
     return builder_->ConvertConstant(ffi::Shape(shape));
   }
 
-  Instruction::Arg VisitExpr_(const PrimValueNode* op) final {
-    if (auto* int_imm = op->value.as<IntImmNode>()) {
-      return builder_->ConvertConstant(int_imm->value);
-    } else if (auto* float_imm = op->value.as<FloatImmNode>()) {
-      return builder_->ConvertConstant(float_imm->value);
-    } else {
-      TVM_FFI_THROW(InternalError)
-          << "PrimValue should only contain constant after  VMShapeLower, "
-          << "but received " << ffi::GetRef<Expr>(op) << " with type " << op->value->GetTypeKey();
-      TVM_FFI_UNREACHABLE();
-    }
+  Instruction::Arg VisitExpr_(const IntImmNode* op) final {
+    return builder_->ConvertConstant(op->value);
+  }
+
+  Instruction::Arg VisitExpr_(const FloatImmNode* op) final {
+    return builder_->ConvertConstant(op->value);
   }
 
   Instruction::Arg VisitExpr_(const StringImmNode* op) final {
@@ -352,12 +352,12 @@ class CodeGenVM : public ExprFunctor<Instruction::Arg(const Expr&)> {
       args.push_back(this->VisitExpr(call_node->args[i]));
     }
     int64_t vdevice_index = -1;
-    if (auto* prim_value_node = call_node->args[4].as<PrimValueNode>()) {
-      vdevice_index = prim_value_node->value.as<IntImmNode>()->value;
+    if (const auto* int_imm = call_node->args[4].as<IntImmNode>()) {
+      vdevice_index = int_imm->value;
     }
     auto vdevice = GetGlobalVDevice(ctx_mod_, vdevice_index);
 
-    if (vdevice.defined()) {
+    if (vdevice.has_value()) {
       args.push_back(this->VisitExpr(StringImm(vdevice.value()->memory_scope)));
     }
     builder_->EmitCall("vm.builtin.alloc_tensor", args, dst_reg);
@@ -380,7 +380,7 @@ class CodeGenVM : public ExprFunctor<Instruction::Arg(const Expr&)> {
     args.push_back(Instruction::Arg::Register(Instruction::kVMRegister));
 
     auto func = this->VisitExpr(call_node->args[0]);
-    auto tuple_arg = Downcast<Tuple>(call_node->args[1]);
+    auto tuple_arg = call_node->args[1].as_or_throw<Tuple>();
 
     // Handle args of the call
     for (Expr arg : tuple_arg->fields) {
@@ -461,34 +461,25 @@ TVM_FFI_STATIC_INIT_BLOCK() {
  * module(s).
  * \return The created module.
  */
-void LinkModules(ObjectPtr<VMExecutable> exec, const ffi::Map<ffi::String, runtime::Tensor>& params,
-                 const tvm::ffi::Module& lib, const ffi::Array<ffi::Module>& ext_libs) {
+void LinkModules(ffi::ObjectPtr<VMExecutable> exec,
+                 const ffi::Map<ffi::String, runtime::Tensor>& params, const tvm::ffi::Module& lib,
+                 const ffi::Array<ffi::Module>& ext_libs) {
   // query if we need const loader for ext_modules
   // Wrap all submodules in the initialization wrapper.
-  std::unordered_map<std::string, std::vector<std::string>> const_vars_by_symbol;
+  ffi::Map<ffi::String, ffi::Array<ffi::String>> const_vars_by_symbol;
   for (tvm::ffi::Module mod : ext_libs) {
     auto pf_sym = mod->GetFunction("get_symbol");
     auto pf_var = mod->GetFunction("get_const_vars");
-    std::vector<std::string> symbol_const_vars;
     if (pf_sym.has_value() && pf_var.has_value()) {
       ffi::String symbol = (*pf_sym)().cast<ffi::String>();
       ffi::Array<ffi::String> variables = (*pf_var)().cast<ffi::Array<ffi::String>>();
-      for (size_t i = 0; i < variables.size(); i++) {
-        symbol_const_vars.push_back(variables[i].operator std::string());
-      }
-      TVM_FFI_ICHECK_EQ(const_vars_by_symbol.count(symbol), 0U)
-          << "Found duplicated symbol: " << symbol;
-      const_vars_by_symbol[symbol] = symbol_const_vars;
+      TVM_FFI_ICHECK(!const_vars_by_symbol.count(symbol)) << "Found duplicated symbol: " << symbol;
+      const_vars_by_symbol.Set(symbol, variables);
     }
   }
   if (!const_vars_by_symbol.empty() || !params.empty()) {
     // need runtime const information, run link const loader
-    std::unordered_map<std::string, runtime::Tensor> const_var_tensor;
-    for (const auto& [name, param] : params) {
-      const_var_tensor[name] = param;
-    }
-    ffi::Module const_loader_mod =
-        runtime::ConstLoaderModuleCreate(const_var_tensor, const_vars_by_symbol);
+    ffi::Module const_loader_mod = runtime::ConstLoaderModuleCreate(params, const_vars_by_symbol);
     const_loader_mod->ImportModule(lib);
     for (const auto& it : ext_libs) {
       const_loader_mod->ImportModule(it);
@@ -509,8 +500,8 @@ void LinkModules(ObjectPtr<VMExecutable> exec, const ffi::Map<ffi::String, runti
 ffi::Module VMLink(ExecBuilder builder, Target target, ffi::Optional<ffi::Module> lib,
                    ffi::Array<ffi::Module> ext_libs,
                    ffi::Map<ffi::String, runtime::Tensor> params) {
-  ObjectPtr<VMExecutable> executable = builder->Get();
-  if (!lib.defined()) {
+  ffi::ObjectPtr<VMExecutable> executable = builder->Get();
+  if (!lib.has_value()) {
     lib = codegen::CSourceModuleCreate(";", "c", ffi::Array<ffi::String>{});
   }
   LinkModules(executable, params, lib.value(), ext_libs);

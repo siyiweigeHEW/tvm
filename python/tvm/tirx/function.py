@@ -32,7 +32,7 @@ from tvm.runtime import Object, Scriptable
 from ..runtime._tensor import Tensor
 from . import _ffi_api
 from .buffer import Buffer
-from .expr import PrimExpr, Var
+from .expr import Expr, Var
 
 
 @tvm_ffi.register_object("tirx.PrimFunc")
@@ -50,9 +50,6 @@ class PrimFunc(BaseFunc, Scriptable):
     ret_type: tvm.ir.Type
         The return type annotation of the function.
 
-    buffer_map : Map[tvm.tirx.Var, tvm.tirx.Buffer]
-        The buffer binding map.
-
     attrs: Optional[tvm.Attrs]
         Attributes of the function, can be None
 
@@ -60,27 +57,20 @@ class PrimFunc(BaseFunc, Scriptable):
         The location of this itervar in the source code.
     """
 
-    def __init__(
-        self,
-        params,
-        body,
-        ret_type=None,
-        buffer_map=None,
-        attrs=None,
-        span=None,
-    ):
+    def __init__(self, params, body, ret_type=None, attrs=None, span=None):
+        # Legacy compatibility: expand body-carrying leaf stmt wrappers
+        # (e.g. DeclBuffer/AllocBuffer forms) into SeqStmt form.
+        from .stmt import _normalize_legacy_stmt
+
+        body = _normalize_legacy_stmt(body)
+        if ret_type is None:
+            ret_type = tvm.ir.Type.missing()
         param_list = []
-        buffer_map = {} if buffer_map is None else buffer_map
         for x in params:
             x = tvm.runtime.convert(x) if not isinstance(x, Object) else x
-            if isinstance(x, Buffer):
-                var = Var(x.name, dtype="handle")
-                param_list.append(var)
-                buffer_map[var] = x
-            elif isinstance(x, Var):
-                param_list.append(x)
-            else:
+            if not isinstance(x, Var):
                 raise TypeError("params can only contain Var or Buffer")
+            param_list.append(x)
 
         if attrs is None:
             attrs = tvm.ir.make_node("ir.DictAttrs")
@@ -90,7 +80,6 @@ class PrimFunc(BaseFunc, Scriptable):
             param_list,
             body,
             ret_type,
-            buffer_map,
             attrs,
             span,
         )  # type: ignore
@@ -114,19 +103,18 @@ class PrimFunc(BaseFunc, Scriptable):
         return PrimFunc(
             self.params,
             new_body,
-            self.ret_type,
-            self.buffer_map,
-            self.attrs,
-            span,
+            ret_type=self.ret_type,
+            attrs=self.attrs,
+            span=span,
         )
 
-    def specialize(self, param_map: Mapping[Var, PrimExpr | Buffer]):
+    def specialize(self, param_map: Mapping[Var, Expr | Buffer]):
         """Specialize parameters of PrimFunc
 
         Parameters
         ----------
 
-        param_map : Mapping[Var, Union[PrimExpr, Buffer]]
+        param_map : Mapping[Var, Union[Expr, Buffer]]
             The mapping from function params to the instance
 
         Examples
@@ -135,7 +123,7 @@ class PrimFunc(BaseFunc, Scriptable):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def mem_copy(a: T.handle, b: T.handle, m: T.int32, n: T.int32) -> None:
                 A = T.match_buffer(a, (m, n), "float32")
                 B = T.match_buffer(b, (m, n), "float32")
@@ -158,7 +146,7 @@ class PrimFunc(BaseFunc, Scriptable):
 
         .. code-block:: python
 
-            @T.prim_func
+            @T.prim_func(s_tir=True)
             def mem_copy_16_16(a: T.handle, b: T.handle) -> None:
                 A = T.match_buffer(a, (16, 16), "float32")
                 B = T.match_buffer(b, (16, 16), "float32")
@@ -238,7 +226,7 @@ class IndexMap(Object):
     ----------
     initial_indices : List[Var]
         Variables representing the indices prior to remapping.
-    final_indices : List[PrimExpr]
+    final_indices : List[Expr]
         Expressions defining the indices after remapping.
     inverse_index_map : Union[Callable, Optional[IndexMap]]
         The optional pre-defined inverse index map.
@@ -249,12 +237,7 @@ class IndexMap(Object):
     """
 
     initial_indices: list[Var]
-    final_indices: list[PrimExpr]
-
-    # Sentinel value used to indicate which groups of pre-flattening axes
-    # should be used to post-flattening axes axes.  See
-    # Stage.transform_layout for more details.
-    AXIS_SEPARATOR = "axis_separator"
+    final_indices: list[Expr]
 
     def __init__(self, initial_indices, final_indices, inverse_index_map):
         if isinstance(inverse_index_map, Callable):
@@ -279,9 +262,9 @@ class IndexMap(Object):
 
             The function to map from source indices to target indices.
             The function should accept `tirx.Var` parameters and return
-            a either a `tirx.PrimExpr`, or a list of `tirx.PrimExpr`.
-            Returning a `tirx.PrimExpr` is equivalent to returning a
-            list of length 1 containing that `tirx.PrimExpr`.
+            a either a `tirx.Expr`, or a list of `tirx.Expr`.
+            Returning a `tirx.Expr` is equivalent to returning a
+            list of length 1 containing that `tirx.Expr`.
 
         ndim: Optional[int]
 
@@ -298,74 +281,14 @@ class IndexMap(Object):
             It is the user's responsibility to ensure the correctness of the pre-defined inverse
             index map.
 
-        Returns
-        -------
-        index_map: IndexMap
-
-            Returns an IndexMap representing the `mapping_function`.
-
-        """
-        index_map, axis_separators = IndexMap.from_func_with_separators(
-            mapping_function,
-            ndim,
-            inverse_index_map,
-            index_dtype=index_dtype,
-        )
-        assert not axis_separators, (
-            "The mapping_function provided to IndexMap.from_func "
-            "may not return IndexMap.AXIS_SEPARATOR.  "
-            "If required, please use IndexMap.from_func_with_separators instead."
-        )
-        return index_map
-
-    @staticmethod
-    def from_func_with_separators(
-        mapping_function: Callable,
-        ndim: int | None = None,
-        inverse_index_map: Callable | Optional["IndexMap"] = None,
-        *,
-        index_dtype: str = "int64",
-    ):
-        """Create an index map from a function
-
-        Parameters
-        ----------
-        mapping_function : Callable
-
-            The function to map from source indices to target indices.
-            The function should accept tirx.Var parameters and return
-            either a `tirx.PrimExpr` or a list.  Each element of the
-            returned list should be either a `tirx.PrimExpr` or the
-            object `IndexMap.AXIS_SEPARATOR`.  Returning a
-            `tirx.PrimExpr` is equivalent to returning a list of length
-            1 containing that `tirx.PrimExpr`.
-
-        ndim: Optional[int]
-
-            The dimensionality of the buffer to which this
-            transformation should be applied.  If mapping_function uses
-            variadic argument `*args`, ndim must be specified.  If
-            mapping_function does not use variadic arguments, ndim is
-            optional.
-
-        inverse_index_map : Union[Callable, Optional[IndexMap]]
-            The optional pre-defined inverse index map.
-            When this is defined, IndexMap::Inverse will return the pre-defined inverse index map.
-            Otherwise, the inverse index map will be computed on the fly.
-            It is the user's responsibility to ensure the correctness of the pre-defined inverse
-            index map.
-
         index_dtype : str
             The default index dtype to use for input iters in the mapping function.
 
         Returns
         -------
-        ret: Tuple[IndexMap, List[int]]
+        index_map: IndexMap
 
-            Returns a tuple whose first element is an IndexMap
-            representing the `mapping_function`, and whose second index
-            is a list of indices at which `IndexMap.AXIS_SEPARATOR`
-            occurred.
+            Returns an IndexMap representing the `mapping_function`.
 
         """
         params = inspect.signature(mapping_function).parameters
@@ -404,32 +327,32 @@ class IndexMap(Object):
         initial_indices = args + list(kwargs.values())
 
         final_indices = []
-        axis_separators = []
 
-        try:
-            iter(mapping)
-            is_iterable = True
-        except TypeError:
+        if tvm.ir.is_prim_expr(mapping):
             is_iterable = False
+        else:
+            try:
+                iter(mapping)
+                is_iterable = True
+            except TypeError:
+                is_iterable = False
 
         if is_iterable:
             for val in mapping:
-                if isinstance(val, tvm.ir.PrimExpr):
+                if tvm.ir.is_prim_expr(val):
                     final_indices.append(val)
-                elif val is IndexMap.AXIS_SEPARATOR:
-                    axis_separators.append(len(final_indices))
                 else:
                     raise TypeError(
-                        "Expected mapping function to return list of "
-                        "either tvm.ir.PrimExpr or IndexMap.AXIS_SEPARATOR.  "
+                        "Expected mapping function to return tvm.ir.Expr "
+                        "or a list of tvm.ir.Expr.  "
                         f"Instead received {val} of type {type(val)}."
                     )
         else:
             final_indices.append(mapping)
 
-        return IndexMap(initial_indices, final_indices, inverse_index_map), axis_separators
+        return IndexMap(initial_indices, final_indices, inverse_index_map)
 
-    def is_equivalent_to(self, other_map: "IndexMap") -> bool:
+    def is_equivalent_to(self, other_map: "IndexMap", analyzer=None) -> bool:
         """Return if the index maps are equivalent.
 
         Parameters
@@ -437,6 +360,13 @@ class IndexMap(Object):
         other_map: IndexMap
 
             The IndexMap to which the comparison should be made.
+
+        analyzer : Optional[tvm.arith.Analyzer]
+
+            The analyzer to use while comparing the mapped indices.  When
+            provided, its accumulated bindings and constraints are reused so
+            that maps that are only equivalent under those bindings can be
+            proven equal.
 
         Returns
         -------
@@ -450,44 +380,49 @@ class IndexMap(Object):
         if len(self.final_indices) != len(other_map.final_indices):
             return False
 
-        analyzer = tvm.arith.Analyzer()
+        if analyzer is None:
+            analyzer = tvm.arith.Analyzer()
 
-        mapped_other_final_indices = other_map.map_indices(self.initial_indices)
+        mapped_other_final_indices = other_map.map_indices(self.initial_indices, analyzer=analyzer)
         for self_index, other_index in zip(self.final_indices, mapped_other_final_indices):
             if not analyzer.can_prove_equal(self_index, other_index):
                 return False
 
         return True
 
-    def map_indices(self, indices: list[PrimExpr]) -> list[PrimExpr]:
+    def map_indices(self, indices: list[Expr], analyzer=None) -> list[Expr]:
         """Apply the index map to a set of indices
 
         Parameters
         ----------
-        indices : List[PrimExpr]
+        indices : List[Expr]
             The indices to be mapped
+        analyzer : Optional[tvm.arith.Analyzer]
+            The analyzer to use while simplifying mapped indices.
 
         Returns
         -------
-        result : List[PrimExpr]
+        result : List[Expr]
             The mapped indices
         """
-        return _ffi_api.IndexMapMapIndices(self, indices)
+        return _ffi_api.IndexMapMapIndices(self, indices, analyzer)
 
-    def map_shape(self, shape: list[PrimExpr]) -> list[PrimExpr]:
+    def map_shape(self, shape: list[Expr], analyzer=None) -> list[Expr]:
         """Apply the index map to a buffer shape
 
         Parameters
         ----------
-        shape : List[PrimExpr]
+        shape : List[Expr]
             The buffer shape to be mapped
+        analyzer : Optional[tvm.arith.Analyzer]
+            The analyzer to use while simplifying mapped shape expressions.
 
         Returns
         -------
-        result : List[PrimExpr]
+        result : List[Expr]
             The mapped shape
         """
-        return _ffi_api.IndexMapMapShape(self, shape)
+        return _ffi_api.IndexMapMapShape(self, shape, analyzer)
 
     def map_tensor(self, arr_src: Tensor) -> Tensor:
         """Apply thie index map to transform the layout of the input Tensor
@@ -504,18 +439,20 @@ class IndexMap(Object):
         """
         return _ffi_api.IndexMapMapTensor(self, arr_src)
 
-    def inverse(self, shape: list[Range | PrimExpr]) -> "IndexMap":
+    def inverse(self, shape: list[Range | Expr], analyzer=None) -> "IndexMap":
         """Return the inverse of the map
 
         Throws an error if the function is not bijective.
 
         Parameters
         ----------
-        shape: List[Union[Range,PrimExpr]]
+        shape: List[Union[Range,Expr]]
 
             The region over which the inverse should be determined.
             Used for validating that the mapping is bijective over
             this range.
+        analyzer : Optional[tvm.arith.Analyzer]
+            The analyzer to use while deriving and validating the inverse.
 
         Returns
         -------
@@ -525,23 +462,27 @@ class IndexMap(Object):
         """
 
         shape = [dim if isinstance(dim, Range) else Range(0, dim) for dim in shape]
-        return _ffi_api.IndexMapInverse(self, shape)
+        return _ffi_api.IndexMapInverse(self, shape, analyzer)
 
-    def non_surjective_inverse(self, shape: list[Range | PrimExpr]) -> tuple["IndexMap", PrimExpr]:
+    def non_surjective_inverse(
+        self, shape: list[Range | Expr], analyzer=None
+    ) -> tuple["IndexMap", Expr]:
         """Return the inverse of the map
 
         Can be applied to transformations that introduce padding.
 
         Parameters
         ----------
-        shape: List[Union[Range,PrimExpr]]
+        shape: List[Union[Range,Expr]]
 
             The region over which the inverse should be determined.
             Used for determining the predicate.
+        analyzer : Optional[tvm.arith.Analyzer]
+            The analyzer to use while deriving the inverse and padding predicate.
 
         Returns
         -------
-        result : Tuple[IndexMap, PrimExpr]
+        result : Tuple[IndexMap, Expr]
 
             The inverse, and a predicate for which the inverse maps to
             a valid index in the input range.
@@ -558,4 +499,4 @@ class IndexMap(Object):
         """
 
         shape = [dim if isinstance(dim, Range) else Range(0, dim) for dim in shape]
-        return _ffi_api.IndexMapNonSurjectiveInverse(self, shape)
+        return _ffi_api.IndexMapNonSurjectiveInverse(self, shape, analyzer)

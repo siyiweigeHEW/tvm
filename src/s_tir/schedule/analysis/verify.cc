@@ -16,6 +16,8 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+#include <tvm/ffi/cast.h>
+
 #include "../utils.h"
 
 namespace tvm {
@@ -73,7 +75,7 @@ class SRefTreeVerifier : public StmtVisitor {
         << (sref->parent ? ffi::Optional<Stmt>(ffi::GetRef<Stmt>(sref->parent->stmt))
                          : ffi::Optional<Stmt>(std::nullopt));
     ancestors_.push_back(sref.operator->());
-    if (block->init.defined()) {
+    if (block->init.has_value()) {
       ++init_block_depth_;
       VisitStmt(block->init.value());
       --init_block_depth_;

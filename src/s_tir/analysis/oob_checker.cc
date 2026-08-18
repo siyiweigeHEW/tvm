@@ -32,9 +32,9 @@ namespace s_tir {
 using namespace tvm::tirx;
 namespace transform {
 struct OOBLocation {
-  Buffer buf;
+  BufferVar buf;
   size_t dimension;
-  ObjectRef index;
+  ffi::ObjectRef index;
   arith::IntSet index_bounds;
   arith::IntSet shape_bounds;
 };
@@ -47,7 +47,7 @@ class OOBError : public s_tir::ScheduleError {
   ffi::String DetailRenderTemplate() const final {
     std::stringstream s;
     for (const auto& oob : locations_) {
-      s << "Out of bounds memory access on buffer " << oob.buf->name << " dimension "
+      s << "Out of bounds memory access on buffer " << oob.buf.name() << " dimension "
         << oob.dimension << ".";
       s << " index " << oob.index << " with bounds [" << oob.index_bounds.min() << ", "
         << oob.index_bounds.max() << "] is outside the range [0, " << oob.shape_bounds.min()
@@ -57,8 +57,8 @@ class OOBError : public s_tir::ScheduleError {
     return s.str();
   }
   IRModule mod() const final { return mod_; }
-  ffi::Array<ObjectRef> LocationsOfInterest() const final {
-    std::vector<ObjectRef> locs;
+  ffi::Array<ffi::ObjectRef> LocationsOfInterest() const final {
+    std::vector<ffi::ObjectRef> locs;
     for (auto loc : locations_) {
       locs.push_back(loc.index);
     }
@@ -89,8 +89,8 @@ class OOBCheckerVisitor final : public arith::IRVisitorWithAnalyzer {
 
   template <class T>
   void CheckBounds(const T* node, size_t i) {
-    auto ind_bounds = analyzer_.int_set(node->indices[i]);
-    auto shape_bounds = analyzer_.int_set(node->buffer->shape[i]);
+    auto ind_bounds = analyzer_->int_set(node->indices[i]);
+    auto shape_bounds = analyzer_->int_set(node->buffer->shape[i]);
     // We would expect that
     // `analyzer_.CanProve(node->indices[i] < 0 || node->indices[i] >= node->buffer->shape[i])`
     // would be the way to check if any out of bounds access occurs here, but `CanProve` checks if
@@ -102,8 +102,8 @@ class OOBCheckerVisitor final : public arith::IRVisitorWithAnalyzer {
     // has the problem that some valid access patterns maybe be valid but not provably valid. We
     // prefer that this analysis is conservative and only shows errors that are provable. This leads
     // us to the following check: are the bounds of the index outside the bounds of the shape.
-    if (analyzer_.CanProve(ind_bounds.max() >= shape_bounds.min()) ||
-        analyzer_.CanProve(ind_bounds.min() < 0)) {
+    if (analyzer_->CanProve(ind_bounds.max() >= shape_bounds.min()) ||
+        analyzer_->CanProve(ind_bounds.min() < 0)) {
       errors.push_back({node->buffer, i, node->indices[i], ind_bounds, shape_bounds});
     }
   }

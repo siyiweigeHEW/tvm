@@ -33,7 +33,7 @@
 #include <unordered_map>
 
 #include "../../../arith/ir_visitor_with_analyzer.h"
-#include "../../../runtime/texture.h"
+#include "../../../backend/opencl/runtime/texture.h"
 #include "../../../runtime/thread_storage_scope.h"
 
 namespace tvm {
@@ -48,17 +48,18 @@ using runtime::IsTextureStorage;
 
 class TextureLoweringBase : public StmtExprMutator {
  public:
-  explicit TextureLoweringBase(const ffi::Map<Var, Buffer>& extern_buffer_map,
-                               IRVisitorWithAnalyzer* bound_analyzer)
+  explicit TextureLoweringBase(const ffi::Array<Var>& params, IRVisitorWithAnalyzer* bound_analyzer)
       : bound_analyzer_{bound_analyzer} {
-    for (auto kv : extern_buffer_map) {
-      extern_buf_.insert(kv.second);
+    for (const Var& param : params) {
+      if (auto buffer = param.as<BufferVar>()) {
+        extern_buf_.insert(buffer.value());
+      }
     }
   }
 
   inline PrimExpr SimplifyOffset(const ffi::Array<PrimExpr>& shape,
                                  const ffi::Array<PrimExpr>& index) const {
-    PrimExpr base = make_const(DataType::Int(32), 0);
+    PrimExpr base = IntImm::Int32(0);
     TVM_FFI_ICHECK_EQ(shape.size(), index.size());
     if (index.size() > 0) {
       PrimExpr offset = index[0];
@@ -71,14 +72,10 @@ class TextureLoweringBase : public StmtExprMutator {
   }
 
  protected:
-  std::string GetStorageScope(const Buffer& buffer) {
-    auto* ptr = buffer->data->type_annotation.as<PointerTypeNode>();
-    TVM_FFI_ICHECK(ptr) << "Buffer Var's type annotation must be of PointerType";
-    return ptr->storage_scope;
-  }
+  std::string GetStorageScope(const BufferVar& buffer) { return buffer->storage_scope; }
 
   // Set of all external input and output buffers
-  std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual> extern_buf_;
+  std::unordered_set<BufferVar, ffi::ObjectPtrHash, ffi::ObjectPtrEqual> extern_buf_;
   // Bound analzer
   IRVisitorWithAnalyzer* bound_analyzer_;
 };
@@ -88,9 +85,8 @@ class TextureLoweringBase : public StmtExprMutator {
 class TextureFlattener : public TextureLoweringBase {
  public:
   using StmtExprMutator::VisitStmt_;
-  explicit TextureFlattener(const ffi::Map<Var, Buffer>& extern_buffer_map,
-                            IRVisitorWithAnalyzer* bound_analyzer)
-      : TextureLoweringBase(extern_buffer_map, bound_analyzer) {}
+  explicit TextureFlattener(const ffi::Array<Var>& params, IRVisitorWithAnalyzer* bound_analyzer)
+      : TextureLoweringBase(params, bound_analyzer) {}
 
   Stmt VisitStmt_(const BufferStoreNode* op) final {
     Stmt stmt = StmtExprMutator::VisitStmt_(op);
@@ -98,23 +94,23 @@ class TextureFlattener : public TextureLoweringBase {
     std::string storage_scope = GetStorageScope(op->buffer);
     // Lower to two dimensional access
     if (IsTextureStorage(storage_scope)) {
-      ffi::Array<PrimExpr> args = GetTextureAccessArgs(op, op->buffer);
+      ffi::Array<Expr> args = GetTextureAccessArgs(op, op->buffer);
       args.push_back(op->value);
-      stmt = Evaluate(Call(args[0]->dtype, builtin::texture2d_store(), args));
+      stmt = Evaluate(Call(args[0]->ty, builtin::texture2d_store(), args));
     }
 
     return stmt;
   }
 
-  PrimExpr VisitExpr_(const BufferLoadNode* op) final {
-    PrimExpr expr = StmtExprMutator::VisitExpr_(op);
+  Expr VisitExpr_(const BufferLoadNode* op) final {
+    PrimExpr expr = StmtExprMutator::VisitExpr_(op).as_or_throw<PrimExpr>();
     op = expr.as<BufferLoadNode>();
     // Lower to two dimensional access
     std::string storage_scope = GetStorageScope(op->buffer);
     if (IsTextureStorage(storage_scope)) {
-      ffi::Array<PrimExpr> args = GetTextureAccessArgs(op, op->buffer);
+      ffi::Array<Expr> args = GetTextureAccessArgs(op, op->buffer);
       args.push_back(op->indices.back());
-      expr = Call(op->buffer->dtype, builtin::texture2d_load(), args);
+      expr = Call(op->buffer->dtype, builtin::texture2d_load(), args).as_or_throw<PrimExpr>();
     }
 
     return expr;
@@ -122,12 +118,12 @@ class TextureFlattener : public TextureLoweringBase {
 
  protected:
   template <typename T>
-  ffi::Array<PrimExpr> GetTextureAccessArgs(const T* op, const Buffer& buffer) {
-    ffi::Array<PrimExpr> args;
-    if (let_binding_.count(op->buffer->data)) {
-      args.push_back(let_binding_[op->buffer->data]);
+  ffi::Array<Expr> GetTextureAccessArgs(const T* op, const BufferVar& buffer) {
+    ffi::Array<Expr> args;
+    if (let_binding_.count(op->buffer.var())) {
+      args.push_back(let_binding_[op->buffer.var()]);
     } else {
-      args.push_back(buffer->data);
+      args.push_back(buffer.data());
     }
     ffi::Array<PrimExpr> row_dims, row_indices, col_dims, col_indices, depth_dims, depth_indices;
     size_t axis = DefaultTextureLayoutSeparator(op->buffer->shape.size(), GetStorageScope(buffer));
@@ -147,7 +143,7 @@ class TextureFlattener : public TextureLoweringBase {
     PrimExpr col_offset = SimplifyOffset(col_dims, col_indices);
     PrimExpr depth_offset = SimplifyOffset(depth_dims, depth_indices);
     PrimExpr channel_size = IntImm(
-        DataType::Int(32, 1), *tirx::as_const_int(buffer->shape.back()) * buffer->dtype.bits());
+        PrimType::Int(32, 1), *tirx::as_const_int(buffer->shape.back()) * buffer->dtype.bits());
     args.push_back(row_offset);
     args.push_back(col_offset);
     args.push_back(depth_offset);
@@ -163,7 +159,7 @@ PrimFunc TextureFlattenHandler(PrimFunc func) {
   auto fptr = func.CopyOnWrite();
   IRVisitorWithAnalyzer bound_analyzer;
   bound_analyzer(fptr->body);
-  fptr->body = TextureFlattener(fptr->buffer_map, &bound_analyzer)(std::move(fptr->body));
+  fptr->body = TextureFlattener(fptr->params, &bound_analyzer)(std::move(fptr->body));
   return func;
 }
 

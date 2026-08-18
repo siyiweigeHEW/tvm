@@ -22,7 +22,7 @@ from tvm.script import tirx as T
 
 def test_lift_tx_beyond_local():
     # fmt: off
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def before(a: T.handle, b: T.handle, c: T.handle):
         n = T.int32()
         A = T.match_buffer(a, (32, 1, 128))
@@ -64,7 +64,7 @@ def test_lift_tx_beyond_local():
                             with T.sblock("NT_matmul_cross_thread"):
                                 T.reads(in_thread_D_local[0])
                                 T.writes(cross_thread_D_local[0])
-                                T.attr(T.comm_reducer(lambda x0, y0: x0 + y0, [T.float32(0)]), "reduce_scope", T.reinterpret("handle", T.uint64(0)))
+                                T.attr(T.comm_reducer(lambda x0, y0: x0 + y0, [T.float32(0)]), "reduce_scope", T.int32(0))
                                 T.tvm_thread_allreduce(T.uint32(1), in_thread_D_local[0], T.bool(True), cross_thread_D_local[0], ax0_fused)
                             with T.sblock("NT_matmul_write_back"):
                                 T.where(ax0_fused == 0)
@@ -77,7 +77,7 @@ def test_lift_tx_beyond_local():
                     T.writes(C[ax0_ax1_fused // n, 0, ax0_ax1_fused % n])
                     C[ax0_ax1_fused // n, 0, ax0_ax1_fused % n] = D_local[ax0_ax1_fused // n, 0, ax0_ax1_fused % n] * T.float32(0.088397790055248615)
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def expected(A: T.Buffer((32, 1, 128), "float32"), b: T.handle, c: T.handle):
         n = T.int32()
         B = T.match_buffer(b, (32, n, 128))
@@ -118,7 +118,7 @@ def test_lift_tx_beyond_local():
                             with T.sblock("NT_matmul_cross_thread"):
                                 T.reads(in_thread_D_local[0])
                                 T.writes(cross_thread_D_local[0])
-                                T.attr(T.comm_reducer(lambda x0, y0: x0 + y0, [T.float32(0)]), "reduce_scope", T.reinterpret("handle", T.uint64(0)))
+                                T.attr(T.comm_reducer(lambda x0, y0: x0 + y0, [T.float32(0)]), "reduce_scope", T.int32(0))
                                 T.tvm_thread_allreduce(T.uint32(1), in_thread_D_local[0], T.bool(True), cross_thread_D_local[0], threadIdx_x)
                             with T.sblock("NT_matmul_write_back"):
                                 T.where(threadIdx_x == 0)

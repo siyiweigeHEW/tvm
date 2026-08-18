@@ -31,7 +31,6 @@
 #include <tvm/runtime/base.h>
 #include <tvm/runtime/c_backend_api.h>
 #include <tvm/runtime/device_api.h>
-#include <tvm/runtime/module.h>
 
 #include <algorithm>
 #include <array>
@@ -133,7 +132,7 @@ void* DeviceAPI::AllocDataSpace(Device dev, int ndim, const int64_t* shape, DLDa
     temp.shape = const_cast<int64_t*>(shape);
     temp.strides = nullptr;
     temp.byte_offset = 0;
-    size_t size = GetDataSize(temp);
+    size_t size = ffi::GetDataSize(temp);
     size_t alignment = GetDataAlignment(temp.dtype);
     return AllocDataSpace(dev, size, alignment, dtype);
   }
@@ -144,8 +143,8 @@ void* DeviceAPI::AllocDataSpace(Device dev, int ndim, const int64_t* shape, DLDa
 
 void DeviceAPI::CopyDataFromTo(DLTensor* from, DLTensor* to, TVMStreamHandle stream) {
   // by default, we can always redirect to the flat memory copy operation.
-  size_t nbytes = GetDataSize(*from);
-  TVM_FFI_ICHECK_EQ(nbytes, GetDataSize(*to));
+  size_t nbytes = ffi::GetDataSize(*from);
+  TVM_FFI_ICHECK_EQ(nbytes, ffi::GetDataSize(*to));
 
   TVM_FFI_ICHECK(ffi::IsContiguous(*from) && ffi::IsContiguous(*to))
       << "CopyDataFromTo only support contiguous array for now";
@@ -242,10 +241,6 @@ TVM_FFI_STATIC_INIT_BLOCK() {
 
 using namespace tvm::runtime;
 
-int TVMBackendGetFuncFromEnv(void* mod_node, const char* func_name, TVMFFIObjectHandle* func) {
-  return TVMFFIEnvModLookupFromImports(mod_node, func_name, func);
-}
-
 void* TVMBackendAllocWorkspace(int device_type, int device_id, uint64_t size, int dtype_code_hint,
                                int dtype_bits_hint) {
   DLDevice dev;
@@ -265,13 +260,5 @@ int TVMBackendFreeWorkspace(int device_type, int device_id, void* ptr) {
   dev.device_type = static_cast<DLDeviceType>(device_type);
   dev.device_id = device_id;
   DeviceAPIManager::Get(dev)->FreeWorkspace(dev, ptr);
-  return 0;
-}
-
-int TVMBackendRunOnce(void** handle, int (*f)(void*), void* cdata, int nbytes) {
-  if (*handle == nullptr) {
-    *handle = reinterpret_cast<void*>(1);
-    return (*f)(cdata);
-  }
   return 0;
 }

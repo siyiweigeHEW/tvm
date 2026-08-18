@@ -71,9 +71,10 @@ RelaxModule.show()
 
 @I.ir_module
 class RelaxModuleWithTIR:
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def relu(x: T.handle, y: T.handle):
-        n, m = T.int64(), T.int64()
+        n = T.int64()
+        m = T.int64()
         X = T.match_buffer(x, (n, m), "float32")
         Y = T.match_buffer(y, (n, m), "float32")
         for i, j in T.grid(n, m):
@@ -121,7 +122,7 @@ RelaxModuleWithTIR.show()
 #   .. code-block:: python
 #
 #     lv: R.Tensor((784, 128), dtype="float32") = R.permute_dims(w0, axes=None)
-#     lv1: R.Tensor((n, 128), dtype="float32") = R.matmul(data, lv, out_dtype="void")
+#     lv1: R.Tensor((n, 128), dtype="float32") = R.matmul(data, lv)
 #     lv0: R.Tensor((n, 128), dtype="float32") = R.add(lv1, b0)
 #
 
@@ -163,9 +164,11 @@ mod.show()
 # Tensor Expression(TE), TensorIR functions or other TVM packed functions.
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def tir_linear(x: T.handle, w: T.handle, b: T.handle, z: T.handle):
-    M, N, K = T.int64(), T.int64(), T.int64()
+    M = T.int64()
+    N = T.int64()
+    K = T.int64()
     X = T.match_buffer(x, (M, K), "float32")
     W = T.match_buffer(w, (N, K), "float32")
     B = T.match_buffer(b, (N,), "float32")
@@ -251,7 +254,7 @@ with bb.function("forward", [x, fc1_weight, fc1_bias, fc2_weight, fc2_bias]):
             relax.call_dps_packed(
                 "env.linear",
                 [x, fc1_weight, fc1_bias],
-                out_sinfo=relax.TensorStructInfo((n, 128), "float32"),
+                out_ty=relax.TensorType((n, 128), "float32"),
             )
         )
         lv1 = bb.emit_te(topi.nn.relu, lv0)
@@ -260,7 +263,7 @@ with bb.function("forward", [x, fc1_weight, fc1_bias, fc2_weight, fc2_bias]):
             relax.call_tir(
                 tir_gv,
                 [lv1, fc2_weight, fc2_bias],
-                out_sinfo=relax.TensorStructInfo((n, 10), "float32"),
+                out_ty=relax.TensorType((n, 10), "float32"),
             )
         )
         bb.emit_output(gv)

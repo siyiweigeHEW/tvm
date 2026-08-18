@@ -17,6 +17,7 @@
  * under the License.
  */
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/s_tir/stmt.h>
 
 #include "../utils.h"
@@ -92,7 +93,7 @@ class StrideExtractor : public ExprVisitor {
   }
 
   const Var& var_;
-  std::unordered_map<const PrimExprNode*, int64_t> strides_;
+  std::unordered_map<const ExprNode*, int64_t> strides_;
 };
 
 struct ParsedAnnotation {
@@ -221,7 +222,7 @@ void AdjustParallelVectorize(const Schedule& sch, const SBlockRV& block_rv,
       const auto* var = loop_sref->StmtAs<ForNode>();
       arith::Analyzer analyzer;
       for (int i = access->region.size() - 1; i >= 0; i--) {
-        PrimExpr idx = analyzer.Simplify(Substitute(access->region[i]->min, binding_map));
+        PrimExpr idx = analyzer->Simplify(Substitute(access->region[i]->min, binding_map));
         int64_t coef = StrideExtractor::Extract(idx, var->loop_var);
         if (coef != 0) {
           stride = coef * buffer_stride;
@@ -379,7 +380,7 @@ void RewriteFuseSplitParallelVectorize(const Schedule& sch, ffi::Array<LoopRV>* 
                                        int vec_len) {
   size_t n_loops = loop_rvs->size();
   LoopRV fused = sch->Fuse({loop_rvs->begin(), loop_rvs->end()});
-  ffi::Array<LoopRV> split = sch->Split(fused, {std::nullopt, Integer(vec_len)});
+  ffi::Array<LoopRV> split = sch->Split(fused, {std::nullopt, IntImm::Int32(vec_len)});
   TVM_FFI_ICHECK_EQ(split.size(), 2);
   const LoopRV& outer = split[0];
   const LoopRV& inner = split[1];
@@ -417,9 +418,8 @@ void RewriteUnroll(const Schedule& sch, int unroll_explicit, int max_step, const
     return;
   }
 
-  sch->Annotate(loop, tirx::attr::pragma_auto_unroll_max_step, IntImm(DataType::Int(32), max_step));
-  sch->Annotate(loop, tirx::attr::pragma_unroll_explicit,
-                IntImm(DataType::Int(32), unroll_explicit));
+  sch->Annotate(loop, tirx::attr::pragma_auto_unroll_max_step, IntImm::Int32(max_step));
+  sch->Annotate(loop, tirx::attr::pragma_unroll_explicit, IntImm::Int32(unroll_explicit));
 }
 
 }  // namespace s_tir
@@ -476,7 +476,7 @@ class RewriteParallelVectorizeUnrollNode : public PostprocNode {
   }
 
   Postproc Clone() const {
-    ObjectPtr<RewriteParallelVectorizeUnrollNode> n =
+    ffi::ObjectPtr<RewriteParallelVectorizeUnrollNode> n =
         ffi::make_object<RewriteParallelVectorizeUnrollNode>(*this);
     return Postproc(n);
   }
@@ -491,7 +491,7 @@ class RewriteParallelVectorizeUnrollNode : public PostprocNode {
 };
 
 Postproc Postproc::RewriteParallelVectorizeUnroll() {
-  ObjectPtr<RewriteParallelVectorizeUnrollNode> n =
+  ffi::ObjectPtr<RewriteParallelVectorizeUnrollNode> n =
       ffi::make_object<RewriteParallelVectorizeUnrollNode>();
   return Postproc(n);
 }

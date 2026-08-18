@@ -21,8 +21,10 @@
  * \file tvm/tirx/stmt.cc
  */
 #include <tvm/arith/analyzer.h>
+#include <tvm/ffi/dtype.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/op.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/op_attr_types.h>
 #include <tvm/tirx/stmt.h>
@@ -46,24 +48,22 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   IfThenElseNode::RegisterReflection();
   ForNode::RegisterReflection();
   WhileNode::RegisterReflection();
+  ReturnNode::RegisterReflection();
+  BreakNode::RegisterReflection();
+  ContinueNode::RegisterReflection();
   BufferRegionNode::RegisterReflection();
   MatchBufferRegionNode::RegisterReflection();
   SBlockNode::RegisterReflection();
   SBlockRealizeNode::RegisterReflection();
+  ScopeIdDefStmtNode::RegisterReflection();
 }
 
 // Bind
-Bind::Bind(Var var, PrimExpr value, Span span) {
+Bind::Bind(Var var, Expr value, Span span) {
   TVM_FFI_ICHECK(value.defined());
-  auto vdtype = value.dtype();
-  // It is still valid to bind a pointer type var to a value that is of type handle.
-  if (var->type_annotation.as<PointerTypeNode>()) {
-    TVM_FFI_ICHECK(vdtype.is_handle());
-  } else {
-    TVM_FFI_ICHECK_EQ(value.dtype(), var.dtype());
-  }
+  TVM_FFI_ICHECK(ffi::StructuralEqual()(value->ty, var->ty));
 
-  ObjectPtr<BindNode> node = ffi::make_object<BindNode>();
+  ffi::ObjectPtr<BindNode> node = ffi::make_object<BindNode>();
   node->var = std::move(var);
   node->value = std::move(value);
   node->span = std::move(span);
@@ -73,7 +73,7 @@ Bind::Bind(Var var, PrimExpr value, Span span) {
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tirx.Bind",
-                        [](Var var, PrimExpr value, Span span) { return Bind(var, value, span); });
+                        [](Var var, Expr value, Span span) { return Bind(var, value, span); });
 }
 
 // AttrStmt
@@ -91,11 +91,6 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tirx.AttrStmt",
                         [](Any node, ffi::String attr_key, PrimExpr value, Stmt body, Span span) {
-                          // when node is a POD data type like int or bool, first convert to
-                          // primexpr.
-                          if (node.type_index() < ffi::TypeIndex::kTVMFFISmallStr) {
-                            return AttrStmt(node.cast<PrimExpr>(), attr_key, value, body, span);
-                          }
                           return AttrStmt(node, attr_key, value, body, span);
                         });
 }
@@ -104,12 +99,13 @@ TVM_FFI_STATIC_INIT_BLOCK() {
 AssertStmt::AssertStmt(PrimExpr condition, StringImm error_kind,
                        ffi::Array<StringImm> message_parts, Span span) {
   TVM_FFI_ICHECK(condition.defined());
-  TVM_FFI_ICHECK(condition.dtype().is_predicate_dtype())
+  PrimType condition_ty = condition.ty();
+  TVM_FFI_ICHECK(condition_ty.MatchesCode(DLDataTypeCode::kDLBool))
       << "AssertStmt should have boolean condition, "
-      << "but received " << condition << " with dtype " << condition.dtype();
+      << "but received " << condition << " with dtype " << condition_ty;
   TVM_FFI_ICHECK(error_kind.defined());
 
-  ObjectPtr<AssertStmtNode> node = ffi::make_object<AssertStmtNode>();
+  ffi::ObjectPtr<AssertStmtNode> node = ffi::make_object<AssertStmtNode>();
   node->condition = std::move(condition);
   node->error_kind = std::move(error_kind);
   node->message_parts = std::move(message_parts);
@@ -125,8 +121,23 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   });
 }
 
+namespace {
+/*!
+ * \brief Whether an integer literal can be represented exactly by `ty`.
+ * \note Mirrors the range checks performed by the IntImm constructor.
+ */
+bool IntImmValueFits(int64_t value, const PrimType& ty) {
+  int bits = ty.bits();
+  if (ty.MatchesCode(DLDataTypeCode::kDLUInt)) {
+    return value >= 0 && (bits >= 64 || value < (int64_t{1} << bits));
+  }
+  if (bits >= 64) return true;
+  return value >= -(int64_t{1} << (bits - 1)) && value < (int64_t{1} << (bits - 1));
+}
+}  // namespace
+
 // For
-For::For(Var loop_var, PrimExpr min, PrimExpr extent, ForKind kind, Stmt body,
+For::For(PrimVar loop_var, PrimExpr min, PrimExpr extent, ForKind kind, Stmt body,
          ffi::Optional<IterVar> thread_binding, ffi::Map<ffi::String, Any> annotations,
          ffi::Optional<PrimExpr> step, Span span) {
   TVM_FFI_ICHECK(loop_var.defined());
@@ -135,8 +146,9 @@ For::For(Var loop_var, PrimExpr min, PrimExpr extent, ForKind kind, Stmt body,
   TVM_FFI_ICHECK(body.defined());
 
   auto require_scalar_int_dtype = [&](PrimExpr expr, const char* field_name) {
-    auto dtype = expr.dtype();
-    TVM_FFI_ICHECK(dtype.is_scalar() && (dtype.is_int() || dtype.is_uint()))
+    PrimType dtype = expr.ty();
+    TVM_FFI_ICHECK(dtype.IsScalar() &&
+                   (dtype.MatchesCode(DLDataTypeCode::kDLUInt, DLDataTypeCode::kDLInt)))
         << "TIR For nodes require a scalar integer as the " << field_name << ", but received "
         << expr << " with dtype " << dtype;
   };
@@ -144,35 +156,39 @@ For::For(Var loop_var, PrimExpr min, PrimExpr extent, ForKind kind, Stmt body,
   require_scalar_int_dtype(min, "min");
   require_scalar_int_dtype(extent, "extent");
 
-  // When extent, min or step is an IntImm but has narrower dtype than loop_var
-  // we directly promote them without raising errors.
-  auto try_promote_imm_dtype = [&](const PrimExpr& e) {
-    TVM_FFI_ICHECK(e.dtype().bits() <= loop_var.dtype().bits())
-        << " Loop variable's dtype (" << loop_var.dtype()
-        << ") is narrower than that of `min` or `extent` (" << e.dtype() << ")";
-    const IntImmNode* a = e.as<IntImmNode>();
-    if (a && e.dtype().bits() < loop_var.dtype().bits()) {
-      return make_const(loop_var.dtype(), a->value);
-    } else {
-      return e;
+  // When extent, min or step is an IntImm whose dtype differs from loop_var's
+  // (narrower bits and/or a different signedness code), we directly promote it
+  // to the loop var's dtype as long as the value stays representable.
+  auto try_promote_imm_dtype = [&](const PrimExpr& e) -> PrimExpr {
+    PrimType e_ty = e.ty();
+    PrimType loop_var_ty = loop_var.ty();
+    if (e_ty == loop_var_ty) return e;
+    if (const IntImmNode* a = e.as<IntImmNode>()) {
+      TVM_FFI_ICHECK(IntImmValueFits(a->value, loop_var_ty))
+          << "Literal value " << a->value << " is not representable in the loop variable's dtype ("
+          << loop_var_ty << ")";
+      return IntImm(loop_var_ty, a->value);
     }
+    TVM_FFI_ICHECK(e_ty.bits() <= loop_var_ty.bits())
+        << " Loop variable's dtype (" << loop_var_ty
+        << ") is narrower than that of `min` or `extent` (" << e_ty << ")";
+    return e;
   };
 
   min = try_promote_imm_dtype(min);
   extent = try_promote_imm_dtype(extent);
 
-  TVM_FFI_ICHECK(loop_var.dtype() == min.dtype()) << loop_var.dtype() << " vs " << min.dtype();
-  TVM_FFI_ICHECK(loop_var.dtype() == extent.dtype())
-      << loop_var.dtype() << " vs " << extent.dtype();
+  TVM_FFI_ICHECK(loop_var.ty() == min.ty()) << loop_var.ty() << " vs " << min.ty();
+  TVM_FFI_ICHECK(loop_var.ty() == extent.ty()) << loop_var.ty() << " vs " << extent.ty();
 
   if (step.has_value()) {
     require_scalar_int_dtype(*step, "step");
     step = try_promote_imm_dtype(*step);
-    TVM_FFI_ICHECK(loop_var.dtype() == (*step).dtype())
-        << loop_var.dtype() << " vs " << (*step).dtype();
+    TVM_FFI_ICHECK(loop_var.ty() == step.value().ty())
+        << loop_var.ty() << " vs " << step.value().ty();
   }
 
-  ObjectPtr<ForNode> node = ffi::make_object<ForNode>();
+  ffi::ObjectPtr<ForNode> node = ffi::make_object<ForNode>();
   node->loop_var = std::move(loop_var);
   node->min = std::move(min);
   node->extent = std::move(extent);
@@ -189,7 +205,7 @@ bool ForNode::HasTrivialStep() const { return !step.has_value() || is_one(*step)
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tirx.For", [](Var loop_var, PrimExpr min, PrimExpr extent, int kind,
+  refl::GlobalDef().def("tirx.For", [](PrimVar loop_var, PrimExpr min, PrimExpr extent, int kind,
                                        Stmt body, ffi::Optional<IterVar> thread_binding,
                                        ffi::Optional<ffi::Map<ffi::String, Any>> annotations,
                                        ffi::Optional<PrimExpr> step, Span span) {
@@ -222,10 +238,10 @@ std::ostream& operator<<(std::ostream& out, ForKind type) {  // NOLINT(*)
 // While
 While::While(PrimExpr condition, Stmt body, Span span) {
   TVM_FFI_ICHECK(condition.defined());
-  TVM_FFI_ICHECK(condition.dtype().is_scalar());
+  TVM_FFI_ICHECK(condition.ty().IsScalar());
   TVM_FFI_ICHECK(body.defined());
 
-  ObjectPtr<WhileNode> node = ffi::make_object<WhileNode>();
+  ffi::ObjectPtr<WhileNode> node = ffi::make_object<WhileNode>();
   node->condition = std::move(condition);
   node->body = std::move(body);
   node->span = std::move(span);
@@ -239,23 +255,77 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   });
 }
 
-// DeclBuffer
-DeclBuffer::DeclBuffer(Buffer buffer, Span span) {
-  ObjectPtr<DeclBufferNode> node = ffi::make_object<DeclBufferNode>();
-  node->buffer = std::move(buffer);
+// Return
+Return::Return(Expr value, Span span) {
+  TVM_FFI_ICHECK(value.defined());
+
+  ffi::ObjectPtr<ReturnNode> node = ffi::make_object<ReturnNode>();
+  node->value = std::move(value);
   node->span = std::move(span);
   data_ = std::move(node);
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tirx.DeclBuffer",
-                        [](Buffer buffer, Span span) { return DeclBuffer(buffer, span); });
+  refl::GlobalDef().def("tirx.Return", [](Expr value, Span span) { return Return(value, span); });
+}
+
+// Break
+Break::Break(Span span) {
+  ffi::ObjectPtr<BreakNode> node = ffi::make_object<BreakNode>();
+  node->span = std::move(span);
+  data_ = std::move(node);
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tirx.Break", [](Span span) { return Break(span); });
+}
+
+// Continue
+Continue::Continue(Span span) {
+  ffi::ObjectPtr<ContinueNode> node = ffi::make_object<ContinueNode>();
+  node->span = std::move(span);
+  data_ = std::move(node);
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tirx.Continue", [](Span span) { return Continue(span); });
+}
+
+// DeclBuffer
+DeclBuffer::DeclBuffer(BufferVar buffer, Expr data, Span span) {
+  // Enforce storage scope rules for DeclBuffer.
+  std::string scope = static_cast<std::string>(buffer.scope());
+  if (scope.empty()) {
+    scope = "global";
+  }
+  if (scope == "tmem") {
+    TVM_FFI_ICHECK_EQ(buffer->allocated_addr.size(), 1U)
+        << "ValueError: For `tmem` scope, DeclBuffer requires exactly one `allocated_addr` "
+           "PrimExpr";
+  } else if (scope == "global" || scope == "shared" || scope == "shared.dyn" || scope == "local") {
+    TVM_FFI_ICHECK(buffer->allocated_addr.empty())
+        << "ValueError: For `" << scope << "` scope, DeclBuffer does not accept `allocated_addr`";
+  }
+  ffi::ObjectPtr<DeclBufferNode> node = ffi::make_object<DeclBufferNode>();
+  node->buffer = std::move(buffer);
+  node->data = std::move(data);
+  node->span = std::move(span);
+  data_ = std::move(node);
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tirx.DeclBuffer", [](BufferVar buffer, Expr data, Span span) {
+    return DeclBuffer(buffer, data, span);
+  });
 }
 
 // AllocBuffer
-AllocBuffer::AllocBuffer(Buffer buffer, ffi::Map<ffi::String, Any> annotations, Span span) {
-  ObjectPtr<AllocBufferNode> node = ffi::make_object<AllocBufferNode>();
+AllocBuffer::AllocBuffer(BufferVar buffer, ffi::Map<ffi::String, Any> annotations, Span span) {
+  ffi::ObjectPtr<AllocBufferNode> node = ffi::make_object<AllocBufferNode>();
   node->buffer = std::move(buffer);
   node->annotations = std::move(annotations);
   node->span = std::move(span);
@@ -266,7 +336,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def(
       "tirx.AllocBuffer",
-      [](Buffer buffer, ffi::Optional<ffi::Map<ffi::String, Any>> annotations, Span span) {
+      [](BufferVar buffer, ffi::Optional<ffi::Map<ffi::String, Any>> annotations, Span span) {
         return AllocBuffer(buffer, annotations.value_or(ffi::Map<ffi::String, Any>()), span);
       });
 }
@@ -311,7 +381,7 @@ IfThenElse::IfThenElse(PrimExpr condition, Stmt then_case, ffi::Optional<Stmt> e
   TVM_FFI_ICHECK(condition.defined());
   TVM_FFI_ICHECK(then_case.defined());
   // else_case may be null.
-  ObjectPtr<IfThenElseNode> node = ffi::make_object<IfThenElseNode>();
+  ffi::ObjectPtr<IfThenElseNode> node = ffi::make_object<IfThenElseNode>();
   node->condition = std::move(condition);
   node->then_case = std::move(then_case);
   node->else_case = std::move(else_case);
@@ -328,10 +398,13 @@ TVM_FFI_STATIC_INIT_BLOCK() {
 }
 
 // Evaluate
-Evaluate::Evaluate(PrimExpr value, Span span) {
+Evaluate::Evaluate(Expr value, Span span) {
   TVM_FFI_ICHECK(value.defined());
+  TVM_FFI_ICHECK(!(value->IsInstance<VarNode>() && value->ty.as<BufferTypeNode>()))
+      << "A buffer variable cannot be used as a scalar Evaluate value; "
+      << "use buffer.data to evaluate its physical pointer";
 
-  ObjectPtr<EvaluateNode> node = ffi::make_object<EvaluateNode>();
+  ffi::ObjectPtr<EvaluateNode> node = ffi::make_object<EvaluateNode>();
   node->value = std::move(value);
   node->span = std::move(span);
   data_ = std::move(node);
@@ -340,31 +413,37 @@ Evaluate::Evaluate(PrimExpr value, Span span) {
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tirx.Evaluate",
-                        [](PrimExpr value, Span span) { return Evaluate(value, span); });
+                        [](Expr value, Span span) { return Evaluate(value, span); });
 }
 
 // BufferStore
-BufferStore::BufferStore(Buffer buffer, PrimExpr value, ffi::Array<PrimExpr> indices,
+TVM_FFI_INLINE int GetLanesOrVScaleFactor(const PrimType& ty) {
+  return ty.IsScalableVector() ? ty.VScaleFactor() : ty.lanes();
+}
+
+BufferStore::BufferStore(BufferVar buffer, PrimExpr value, ffi::Array<PrimExpr> indices,
                          ffi::Optional<PrimExpr> predicate, Span span) {
   TVM_FFI_ICHECK_EQ(buffer->shape.size(), indices.size())
-      << "Buffer " << buffer->name << " is " << buffer->shape.size()
+      << "BufferVar " << buffer.name() << " is " << buffer->shape.size()
       << "-dimensional, cannot be indexed with the " << indices.size()
       << "-dimensional indices provided.";
 
   for (int i = 0; i < static_cast<int>(indices.size()) - 1; i++) {
-    TVM_FFI_ICHECK(indices[i].dtype().is_scalar())
+    TVM_FFI_ICHECK(indices[i].ty().IsScalar())
         << "Only the last index of a buffer access may be a vector type.";
   }
 
-  bool is_index_scalable = indices.empty() ? false : indices.back().dtype().is_scalable_vector();
-  bool is_buffer_dtype_scalable = buffer->dtype.is_scalable_vector();
-  bool is_value_dtype_scalable = value.dtype().is_scalable_vector();
+  bool is_index_scalable = indices.empty() ? false : indices.back().ty().IsScalableVector();
+  int16_t buffer_encoded_lanes = static_cast<int16_t>(buffer->dtype->dtype.lanes);
+  bool is_buffer_dtype_scalable = buffer_encoded_lanes < -1;
+  PrimType value_ty = value.ty();
+  bool is_value_dtype_scalable = value_ty.IsScalableVector();
 
   TVM_FFI_ICHECK(!(is_index_scalable && is_buffer_dtype_scalable))
       << "Index dtype and buffer dtype can't both be scalable.";
 
-  if (predicate.defined()) {
-    bool is_predicate_dtype_scalable = predicate.value().dtype().is_scalable_vector();
+  if (predicate.has_value()) {
+    bool is_predicate_dtype_scalable = predicate.value().ty().IsScalableVector();
     TVM_FFI_ICHECK_EQ(is_value_dtype_scalable, is_predicate_dtype_scalable)
         << "Predicate mask dtype and value dtype must both be scalable.";
   }
@@ -373,44 +452,46 @@ BufferStore::BufferStore(Buffer buffer, PrimExpr value, ffi::Array<PrimExpr> ind
     TVM_FFI_ICHECK(is_value_dtype_scalable) << "Can't store non-scalable data into scalable buffer";
   }
 
-  int index_lanes = indices.empty() ? 1 : indices.back().dtype().get_lanes_or_vscale_factor();
-  int buffer_lanes = buffer->dtype.get_lanes_or_vscale_factor();
-  int value_dtype_lanes = value.dtype().get_lanes_or_vscale_factor();
+  int index_lanes = indices.empty() ? 1 : GetLanesOrVScaleFactor(indices.back().ty());
+  int buffer_lanes = is_buffer_dtype_scalable ? -buffer_encoded_lanes : buffer_encoded_lanes;
+  int value_dtype_lanes = GetLanesOrVScaleFactor(value_ty);
 
   TVM_FFI_ICHECK_EQ(index_lanes * buffer_lanes, value_dtype_lanes)
       << "Cannot store value with " << value_dtype_lanes << ", expected value with "
       << index_lanes * buffer_lanes << " (" << index_lanes << " index lanes * " << buffer_lanes
       << " buffer element lanes)";
 
-  if (predicate.defined()) {
-    DataType predicate_dtype = predicate.value().dtype();
-    int predicate_dtype_lanes = predicate_dtype.get_lanes_or_vscale_factor();
+  if (predicate.has_value()) {
+    PrimType predicate_ty = predicate.value().ty();
+    int predicate_dtype_lanes = GetLanesOrVScaleFactor(predicate_ty);
     TVM_FFI_ICHECK_EQ(value_dtype_lanes, predicate_dtype_lanes)
         << "Got a predicate mask with " << predicate_dtype_lanes
         << " lanes, but trying to store a value with " << value_dtype_lanes
         << " lanes. The number of lanes must match.";
 
-    DataType predicate_element_dtype = predicate_dtype.element_of();
-    TVM_FFI_ICHECK(predicate_element_dtype.is_predicate_dtype())
-        << "Predicate mask elements must be boolean values, but got " << predicate_element_dtype
-        << ".";
+    PrimType predicate_element_ty = predicate_ty.WithLanes(1);
+    TVM_FFI_ICHECK(predicate_element_ty.MatchesCode(DLDataTypeCode::kDLBool) ||
+                   predicate_element_ty.MatchesElementType(DLDataTypeCode::kDLUInt, 1))
+        << "Predicate mask elements must be boolean values, but got "
+        << ffi::DLDataTypeToString(predicate_element_ty->dtype) << ".";
   }
 
-  runtime::DataType buffer_dtype;
+  PrimType buffer_dtype = PrimType::Void();
   if (is_index_scalable || is_buffer_dtype_scalable) {
-    buffer_dtype = buffer->dtype.with_scalable_vscale_factor(buffer_lanes * index_lanes);
+    buffer_dtype = PrimType::ScalableVector(buffer->dtype.code(), buffer->dtype.bits(),
+                                            buffer_lanes * index_lanes);
   } else {
-    buffer_dtype = buffer->dtype.with_lanes(buffer_lanes * index_lanes);
+    buffer_dtype = buffer->dtype.WithLanes(buffer_lanes * index_lanes);
   }
-  if (buffer_dtype != value.dtype()) {
+  if (buffer_dtype != value_ty) {
     TVM_FFI_THROW(TypeError) << "dtype mismatch on BufferStore: "                 //
                              << "buffer's dtype is `" << buffer->dtype            //
                              << "`, the lanes of indexing are: `" << index_lanes  //
-                             << "`, the scalability is: `" << buffer_dtype.is_scalable_vector()
-                             << "`, but RHS's dtype is `" << value.dtype() << "`";
+                             << "`, the scalability is: `" << buffer_dtype.IsScalableVector()
+                             << "`, but RHS's dtype is `" << value_ty << "`";
   }
 
-  ObjectPtr<BufferStoreNode> node = ffi::make_object<BufferStoreNode>();
+  ffi::ObjectPtr<BufferStoreNode> node = ffi::make_object<BufferStoreNode>();
   node->buffer = std::move(buffer);
   node->value = std::move(value);
   node->indices = std::move(indices);
@@ -422,7 +503,7 @@ BufferStore::BufferStore(Buffer buffer, PrimExpr value, ffi::Array<PrimExpr> ind
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tirx.BufferStore",
-                        [](Buffer buffer, PrimExpr value, ffi::Array<PrimExpr> indices,
+                        [](BufferVar buffer, PrimExpr value, ffi::Array<PrimExpr> indices,
                            ffi::Optional<PrimExpr> predicate, Span span) {
                           return BufferStore(buffer, value, indices, predicate, span);
                         });
@@ -437,7 +518,7 @@ PrimExpr BufferRegionNode::ToPrimExpr() const {
     if (tvm::tirx::is_one(r->extent)) {
       indices.push_back(r->min);
     } else if (r->extent.as<IntImmNode>()) {
-      indices.push_back(tirx::Ramp(r->min, tvm::tirx::make_const(r->min->dtype, 1), r->extent));
+      indices.push_back(tirx::Ramp(r->min, IntImm(r->min.ty(), 1), r->extent));
     } else {
       TVM_FFI_THROW(ValueError) << "Cannot convert to BufferLoad: "
                                 << ffi::GetRef<BufferRegion>(this);
@@ -446,17 +527,17 @@ PrimExpr BufferRegionNode::ToPrimExpr() const {
   return tirx::BufferLoad(this->buffer, indices);
 }
 
-BufferRegion::BufferRegion(Buffer buffer, ffi::Array<Range> region) {
+BufferRegion::BufferRegion(BufferVar buffer, ffi::Array<Range> region) {
   TVM_FFI_ICHECK_EQ(buffer->shape.size(), region.size())
       << "The dimension between " << buffer << " and region " << region
       << " mismatched, the buffer is " << buffer;
-  ObjectPtr<BufferRegionNode> node = ffi::make_object<BufferRegionNode>();
+  ffi::ObjectPtr<BufferRegionNode> node = ffi::make_object<BufferRegionNode>();
   node->buffer = std::move(buffer);
   node->region = std::move(region);
   data_ = std::move(node);
 }
 
-BufferRegion BufferRegion::FullRegion(Buffer buffer) {
+BufferRegion BufferRegion::FullRegion(BufferVar buffer) {
   ffi::Array<Range> region;
   for (PrimExpr extent : buffer->shape) {
     region.push_back(Range::FromMinExtent(0, extent));
@@ -464,14 +545,14 @@ BufferRegion BufferRegion::FullRegion(Buffer buffer) {
   return BufferRegion(buffer, region);
 }
 
-BufferRegion BufferRegion::FromPoint(Buffer buffer, ffi::Array<PrimExpr> indices) {
+BufferRegion BufferRegion::FromPoint(BufferVar buffer, ffi::Array<PrimExpr> indices) {
   ffi::Array<Range> region;
   for (const PrimExpr& index : indices) {
     if (const RampNode* ramp_index = index.as<RampNode>()) {
       region.push_back(
           Range::FromMinExtent(ramp_index->base, ramp_index->stride * ramp_index->lanes));
     } else {
-      region.push_back(Range::FromMinExtent(index, make_const(index.dtype(), 1)));
+      region.push_back(Range::FromMinExtent(index, MakeConst(index.ty(), 1)));
     }
   }
   return BufferRegion(buffer, region);
@@ -479,14 +560,14 @@ BufferRegion BufferRegion::FromPoint(Buffer buffer, ffi::Array<PrimExpr> indices
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tirx.BufferRegion", [](Buffer buffer, ffi::Array<Range> region) {
+  refl::GlobalDef().def("tirx.BufferRegion", [](BufferVar buffer, ffi::Array<Range> region) {
     return BufferRegion(buffer, region);
   });
 }
 
 // MatchBufferRegion
-MatchBufferRegion::MatchBufferRegion(Buffer buffer, BufferRegion source) {
-  const Buffer& source_buffer = source->buffer;
+MatchBufferRegion::MatchBufferRegion(BufferVar buffer, BufferRegion source) {
+  const BufferVar& source_buffer = source->buffer;
   arith::Analyzer analyzer;
   // Check scope and dtype
   TVM_FFI_ICHECK_EQ(buffer.scope(), source_buffer.scope())
@@ -502,26 +583,22 @@ MatchBufferRegion::MatchBufferRegion(Buffer buffer, BufferRegion source) {
       << " required alignment=" << buffer->data_alignment
       << ", provided alignment=" << source_buffer->data_alignment;
 
-  // Check BufferType. AutoBroadcast is not allowed for now.
-  TVM_FFI_ICHECK(buffer->buffer_type == BufferType::kDefault &&
-                 source_buffer->buffer_type == BufferType::kDefault)
-      << "AutoBroadcast is not allowed in MatchBuffer";
-
   // Validate shape
   TVM_FFI_ICHECK(source->region.size() >= buffer->shape.size())
-      << "Dimension of source Region expected to be larger or equal than target buffer shape, but "
+      << "Dimension of source ffi::Array<Range> expected to be larger or equal than target buffer "
+         "shape, but "
          "got "
       << source->region.size() << " vs. " << buffer->shape.size();
   size_t offset = source->region.size() - buffer->shape.size();
   for (size_t i = 0; i < offset; ++i) {
-    TVM_FFI_ICHECK(analyzer.CanProve(source->region[i]->extent == 1))
+    TVM_FFI_ICHECK(analyzer->CanProve(source->region[i]->extent == 1))
         << "The higher dimension should be 1, but got " << source->region[i]->extent << ".";
   }
   for (size_t i = 0; i < buffer->shape.size(); ++i) {
     const Range& source_range = source->region[i + offset];
     const PrimExpr& buffer_shape = buffer->shape[i];
-    if (!buffer_shape->IsInstance<VarNode>()) {
-      TVM_FFI_ICHECK(analyzer.CanProve(source_range->extent == buffer_shape))
+    if (!buffer_shape.as<PrimVar>()) {
+      TVM_FFI_ICHECK(analyzer->CanProve(source_range->extent == buffer_shape))
           << "The dimension mismatched between source region and target buffer shape, got "
           << source_range->extent << " vs. " << buffer_shape << ".";
     }
@@ -529,7 +606,7 @@ MatchBufferRegion::MatchBufferRegion(Buffer buffer, BufferRegion source) {
   // Note that we do not check elem_offset and strides in this function
 
   // Construction
-  ObjectPtr<MatchBufferRegionNode> node = ffi::make_object<MatchBufferRegionNode>();
+  ffi::ObjectPtr<MatchBufferRegionNode> node = ffi::make_object<MatchBufferRegionNode>();
   node->buffer = std::move(buffer);
   node->source = std::move(source);
   data_ = std::move(node);
@@ -537,7 +614,7 @@ MatchBufferRegion::MatchBufferRegion(Buffer buffer, BufferRegion source) {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tirx.MatchBufferRegion", [](Buffer buffer, BufferRegion source) {
+  refl::GlobalDef().def("tirx.MatchBufferRegion", [](BufferVar buffer, BufferRegion source) {
     return MatchBufferRegion(buffer, source);
   });
 }
@@ -545,10 +622,10 @@ TVM_FFI_STATIC_INIT_BLOCK() {
 // Block
 SBlock::SBlock(ffi::Array<IterVar> iter_vars, ffi::Array<BufferRegion> reads,
                ffi::Array<BufferRegion> writes, ffi::String name_hint, Stmt body,
-               ffi::Optional<Stmt> init, ffi::Array<Buffer> alloc_buffers,
+               ffi::Optional<Stmt> init, ffi::Array<BufferVar> alloc_buffers,
                ffi::Array<MatchBufferRegion> match_buffers, ffi::Map<ffi::String, Any> annotations,
                Span span) {
-  ObjectPtr<SBlockNode> node = ffi::make_object<SBlockNode>();
+  ffi::ObjectPtr<SBlockNode> node = ffi::make_object<SBlockNode>();
   node->iter_vars = std::move(iter_vars);
   node->reads = std::move(reads);
   node->writes = std::move(writes);
@@ -562,12 +639,27 @@ SBlock::SBlock(ffi::Array<IterVar> iter_vars, ffi::Array<BufferRegion> reads,
   data_ = std::move(node);
 }
 
+SBlock::SBlock(ffi::String name_hint, Stmt body, ffi::Array<BufferVar> alloc_buffers, Span span) {
+  ffi::ObjectPtr<SBlockNode> node = ffi::make_object<SBlockNode>();
+  node->iter_vars = {};
+  node->reads = {};
+  node->writes = {};
+  node->name_hint = std::move(name_hint);
+  node->body = std::move(body);
+  node->init = std::nullopt;
+  node->alloc_buffers = std::move(alloc_buffers);
+  node->match_buffers = {};
+  node->annotations = {};
+  node->span = std::move(span);
+  data_ = std::move(node);
+}
+
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tirx.SBlock",
                         [](ffi::Array<IterVar> iter_vars, ffi::Array<BufferRegion> reads,
                            ffi::Array<BufferRegion> writes, ffi::String name_hint, Stmt body,
-                           ffi::Optional<Stmt> init, ffi::Array<Buffer> alloc_buffers,
+                           ffi::Optional<Stmt> init, ffi::Array<BufferVar> alloc_buffers,
                            ffi::Array<MatchBufferRegion> match_buffers,
                            ffi::Map<ffi::String, Any> annotations, Span span) {
                           return SBlock(iter_vars, reads, writes, name_hint, body, init,
@@ -575,14 +667,30 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                         });
 }
 
+// ScopeIdDefStmt
+ScopeIdDefStmt::ScopeIdDefStmt(ScopeIdDef def, Span span) {
+  TVM_FFI_ICHECK(def.defined());
+  ffi::ObjectPtr<ScopeIdDefStmtNode> node = ffi::make_object<ScopeIdDefStmtNode>();
+  node->def = std::move(def);
+  node->span = std::move(span);
+  data_ = std::move(node);
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tirx.ScopeIdDefStmt",
+                        [](ScopeIdDef def, Span span) { return ScopeIdDefStmt(def, span); });
+}
+
 // BlockRealize
 SBlockRealize::SBlockRealize(ffi::Array<PrimExpr> values, PrimExpr predicate, SBlock block,
                              Span span) {
   TVM_FFI_CHECK_EQ(block->iter_vars.size(), values.size(), ValueError)
       << "BlockRealize needs to have the same number of iter_vars and binding values";
-  TVM_FFI_CHECK(predicate.dtype().is_bool() || predicate.dtype() == DataType::UInt(1), TypeError)
+  PrimType predicate_ty = predicate.ty();
+  TVM_FFI_CHECK(predicate_ty.MatchesCode(DLDataTypeCode::kDLBool), TypeError)
       << "Expect Block.predicate to be a bool expression";
-  ObjectPtr<SBlockRealizeNode> node = ffi::make_object<SBlockRealizeNode>();
+  ffi::ObjectPtr<SBlockRealizeNode> node = ffi::make_object<SBlockRealizeNode>();
   node->iter_values = std::move(values);
   node->predicate = std::move(predicate);
   node->block = std::move(block);
@@ -598,15 +706,15 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   });
 }
 
-PrimExpr TypeAnnotation(DataType dtype, Span span) {
-  static auto op = Op::Get("tirx.type_annotation");
-  return tirx::Call(dtype, op, {}, span);
+PrimExpr TypeAnnotation(PrimType dtype, Span span) {
+  static const Op& type_annotation_op = Op::Get("tirx.type_annotation");
+  return Call(dtype, type_annotation_op, {}, {}, {}, span).as_or_throw<PrimExpr>();
 }
 
-TVM_TIR_REGISTER_OP("type_annotation")
-    .set_attr<TCallEffectKind>("TCallEffectKind", Integer(CallEffectKind::kPure))
+TVM_TIRX_REGISTER_OP("type_annotation")
+    .set_attr<TCallEffectKind>("TCallEffectKind", static_cast<int64_t>(CallEffectKind::kPure))
     .set_attr<TScriptDtypePrintLocation>("TScriptDtypePrintLocation",
-                                         Integer(ScriptDtypePrintLocation::kFirst));
+                                         static_cast<int64_t>(ScriptDtypePrintLocation::kFirst));
 
 }  // namespace tirx
 }  // namespace tvm

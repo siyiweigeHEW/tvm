@@ -43,13 +43,11 @@ Postproc PyPostprocNode::Clone() const {
 Postproc Postproc::PyPostproc(
     PyPostprocNode::FInitializeWithTuneContext f_initialize_with_tune_context,  //
     PyPostprocNode::FApply f_apply,                                             //
-    PyPostprocNode::FClone f_clone,                                             //
-    PyPostprocNode::FAsString f_as_string) {
-  ObjectPtr<PyPostprocNode> n = ffi::make_object<PyPostprocNode>();
+    PyPostprocNode::FClone f_clone) {
+  ffi::ObjectPtr<PyPostprocNode> n = ffi::make_object<PyPostprocNode>();
   n->f_initialize_with_tune_context = std::move(f_initialize_with_tune_context);
   n->f_apply = std::move(f_apply);
   n->f_clone = std::move(f_clone);
-  n->f_as_string = std::move(f_as_string);
   return Postproc(n);
 }
 
@@ -111,14 +109,7 @@ ffi::Array<Postproc> Postproc::DefaultHexagon() {
   };
 }
 
-TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
-    .set_dispatch<PyPostprocNode>([](const ObjectRef& n, ReprPrinter* p) {
-      const auto* self = n.as<PyPostprocNode>();
-      TVM_FFI_ICHECK(self);
-      PyPostprocNode::FAsString f_as_string = (*self).f_as_string;
-      TVM_FFI_ICHECK(f_as_string != nullptr) << "PyPostproc's AsString method not implemented!";
-      p->stream << f_as_string();
-    });
+// Pattern A (RM): auto-default repr from reflection.
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   PostprocNode::RegisterReflection();

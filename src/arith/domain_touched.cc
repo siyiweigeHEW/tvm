@@ -23,6 +23,7 @@
  */
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/te/tensor.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -63,11 +64,11 @@ class BufferTouchedDomain final : public IRVisitorWithAnalyzer {
  public:
   BufferTouchedDomain(const Stmt& stmt) { operator()(stmt); }
 
-  std::unordered_map<const BufferNode*, BufferDomainAccess>& GetAccessedBufferRegions() {
+  std::unordered_map<const VarNode*, BufferDomainAccess>& GetAccessedBufferRegions() {
     return buffer_access_map_;
   }
 
-  Region FindUnion(const Buffer& buffer, bool consider_loads, bool consider_stores) {
+  Region FindUnion(const BufferVar& buffer, bool consider_loads, bool consider_stores) {
     Region ret;
     auto kv = buffer_access_map_.find(buffer.get());
     if (kv == buffer_access_map_.end()) {
@@ -124,25 +125,27 @@ class BufferTouchedDomain final : public IRVisitorWithAnalyzer {
       if (args[i].as<RampNode>()) {
         (*bounds)[i].emplace_back(IntSet::Vector(args[i]));
       } else {
-        (*bounds)[i].emplace_back(analyzer_.int_set(args[i]));
+        (*bounds)[i].emplace_back(analyzer_->int_set(args[i]));
       }
     }
   }
 
-  std::unordered_map<const BufferNode*, BufferDomainAccess> buffer_access_map_;
+  std::unordered_map<const VarNode*, BufferDomainAccess> buffer_access_map_;
 };
 
-Region DomainTouched(const Stmt& stmt, const Buffer& buffer, bool consider_loads,
+Region DomainTouched(const Stmt& stmt, const BufferVar& buffer, bool consider_loads,
                      bool consider_stores) {
   return BufferTouchedDomain(stmt).FindUnion(buffer, consider_loads, consider_stores);
 }
 
-ffi::Map<Buffer, ffi::Array<ObjectRef>> DomainTouchedAccessMap(const PrimFunc& func) {
+ffi::Map<BufferVar, ffi::Array<ffi::ObjectRef>> DomainTouchedAccessMap(const PrimFunc& func) {
   auto buffer_access_map = BufferTouchedDomain(func->body).GetAccessedBufferRegions();
-  ffi::Map<Buffer, ffi::Array<ObjectRef>> ret;
-  auto& buffer_map = func->buffer_map;
+  ffi::Map<BufferVar, ffi::Array<ffi::ObjectRef>> ret;
   for (auto& var : func->params) {
-    auto& buffer = buffer_map[var];
+    if (!var->ty.as<BufferTypeNode>()) {
+      continue;
+    }
+    BufferVar buffer(var);
     auto& access = buffer_access_map[buffer.get()];
     ffi::Array<ffi::Array<IntSet>> loads, stores, combined;
     for (std::vector<IntSet>& touch : std::get<LoadAccess>(access).set) {
@@ -155,7 +158,7 @@ ffi::Map<Buffer, ffi::Array<ObjectRef>> DomainTouchedAccessMap(const PrimFunc& f
       combined.push_back(ffi::Array<IntSet>(touch));
     }
 
-    ffi::Array<ObjectRef> fields;
+    ffi::Array<ffi::ObjectRef> fields;
     fields.push_back(loads);
     fields.push_back(stores);
     fields.push_back(combined);

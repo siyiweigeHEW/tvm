@@ -31,7 +31,7 @@ def verify(input, expected):
 
 
 def test_maxpool2d_scope_folding():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Input:
         I.module_global_infos(
             {
@@ -42,7 +42,7 @@ def test_maxpool2d_scope_folding():
             }
         )
 
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def max_pool2d_opencl(
             gv: T.Buffer((T.int64(2), T.int64(1), T.int64(26), T.int64(26), T.int64(4)), "float32"),
             pool_max: T.Buffer(
@@ -83,7 +83,7 @@ def test_maxpool2d_scope_folding():
                         ],
                     )
 
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def te_layout_transform(
             x: T.Buffer((T.int64(2), T.int64(4), T.int64(26), T.int64(26)), "float32"),
             te_layout_transform: T.Buffer(
@@ -104,7 +104,7 @@ def test_maxpool2d_scope_folding():
                         v_self, v_i0 // T.int64(4), v_i1, v_i2, v_i0 % T.int64(4)
                     ] = x[v_self, v_i0, v_i1, v_i2]
 
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def te_layout_transform2(
             lv2: T.Buffer(
                 (T.int64(2), T.int64(1), T.int64(13), T.int64(13), T.int64(4)), "float32"
@@ -134,14 +134,14 @@ def test_maxpool2d_scope_folding():
                 lv = R.call_tir(
                     cls.te_layout_transform,
                     (x,),
-                    out_sinfo=R.Tensor(
+                    out_ty=R.Tensor(
                         (2, 1, 26, 26, 4), dtype="float32", vdevice="opencl:0:global.texture-weight"
                     ),
                 )
                 lv2 = R.call_tir(
                     cls.max_pool2d_opencl,
                     (lv,),
-                    out_sinfo=R.Tensor(
+                    out_ty=R.Tensor(
                         (2, 1, 13, 13, 4), dtype="float32", vdevice="opencl:0:global.texture-weight"
                     ),
                 )
@@ -151,12 +151,12 @@ def test_maxpool2d_scope_folding():
                 gv2 = R.call_tir(
                     cls.te_layout_transform2,
                     (lv5,),
-                    out_sinfo=R.Tensor((2, 4, 13, 13), dtype="float32", vdevice="opencl:1:global"),
+                    out_ty=R.Tensor((2, 4, 13, 13), dtype="float32", vdevice="opencl:1:global"),
                 )
                 R.output(gv2)
             return gv2
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Expected:
         I.module_global_infos(
             {
@@ -167,7 +167,7 @@ def test_maxpool2d_scope_folding():
             }
         )
 
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def max_pool2d_opencl(
             gv: T.Buffer((T.int64(2), T.int64(1), T.int64(26), T.int64(26), T.int64(4)), "float32"),
             pool_max: T.Buffer(
@@ -208,7 +208,7 @@ def test_maxpool2d_scope_folding():
                         ],
                     )
 
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def te_layout_transform(
             x: T.Buffer((T.int64(2), T.int64(4), T.int64(26), T.int64(26)), "float32"),
             te_layout_transform: T.Buffer(
@@ -229,7 +229,7 @@ def test_maxpool2d_scope_folding():
                         v_self, v_i0 // T.int64(4), v_i1, v_i2, v_i0 % T.int64(4)
                     ] = x[v_self, v_i0, v_i1, v_i2]
 
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def te_layout_transform2(
             lv2: T.Buffer(
                 (T.int64(2), T.int64(1), T.int64(13), T.int64(13), T.int64(4)), "float32"
@@ -259,21 +259,19 @@ def test_maxpool2d_scope_folding():
                 lv = R.call_tir(
                     cls.te_layout_transform,
                     (x,),
-                    out_sinfo=R.Tensor(
+                    out_ty=R.Tensor(
                         (2, 1, 26, 26, 4), dtype="float32", vdevice="opencl:0:global.texture-weight"
                     ),
                 )
                 lv5 = R.call_tir(
                     cls.max_pool2d_opencl,
                     (lv,),
-                    out_sinfo=R.Tensor(
-                        (2, 1, 13, 13, 4), dtype="float32", vdevice="opencl:1:global"
-                    ),
+                    out_ty=R.Tensor((2, 1, 13, 13, 4), dtype="float32", vdevice="opencl:1:global"),
                 )
                 gv2 = R.call_tir(
                     cls.te_layout_transform2,
                     (lv5,),
-                    out_sinfo=R.Tensor((2, 4, 13, 13), dtype="float32", vdevice="opencl:1:global"),
+                    out_ty=R.Tensor((2, 4, 13, 13), dtype="float32", vdevice="opencl:1:global"),
                 )
                 R.output(gv2)
             return gv2

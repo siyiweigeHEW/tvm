@@ -22,12 +22,13 @@
  * \brief Threadpool for multi-threading runtime.
  */
 #include <tvm/ffi/container/array.h>
+#include <tvm/ffi/error.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/base.h>
 #include <tvm/runtime/c_backend_api.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/runtime/threading_backend.h>
+
+#include "threading_backend.h"
 #if TVM_THREADPOOL_USE_OPENMP
 #include <omp.h>
 #endif
@@ -467,8 +468,8 @@ void ResetThreadPool() { tvm::runtime::ThreadPool::ThreadLocal()->Reset(); }
  * \param cpus cpus A list of CPUs is used to set the 'cpu affinity' for the worker threads.
  *
  */
-TVM_DLL void Configure(tvm::runtime::threading::ThreadGroup::AffinityMode mode, int nthreads,
-                       std::vector<unsigned int> cpus) {
+TVM_RUNTIME_DLL void Configure(tvm::runtime::threading::ThreadGroup::AffinityMode mode,
+                               int nthreads, std::vector<unsigned int> cpus) {
   tvm::runtime::threading::SetMaxConcurrency(cpus.size());
 #if !TVM_THREADPOOL_USE_OPENMP
   tvm::runtime::ThreadPool::ThreadLocal()->UpdateWorkerConfiguration(mode, nthreads, cpus);

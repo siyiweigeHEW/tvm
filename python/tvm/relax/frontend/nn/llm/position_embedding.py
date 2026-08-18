@@ -57,7 +57,7 @@ def rope_freq_default(s: tirx.Var, d: tirx.Var, d_range: int, theta: float, dtyp
     sin_freq : Tensor
         The sine of the inverse frequency.
 
-    var_map: Dict[tirx.Var, tirx.PrimExpr]
+    var_map: Dict[tirx.Var, tirx.Expr]
         The common expression map.
     """
     freq = s / tirx.power(theta, d * 2 % d_range / tirx.const(d_range, "float32"))
@@ -192,7 +192,7 @@ def yarn_find_correction_dim(
     num_rotations: int,
     d: tirx.Var,
     max_position_embeddings: int,
-    inv_theta_log_scale: float | tirx.PrimExpr | None = None,
+    inv_theta_log_scale: float | tirx.Expr | None = None,
 ):
     """Inverse dim formula to find dim based on number of rotations"""
     return (
@@ -205,7 +205,7 @@ def yarn_find_correction_range(
     high_rot: int,
     d: tirx.Var,
     max_position_embeddings: int,
-    inv_theta_log_scale: float | tirx.PrimExpr | None = None,
+    inv_theta_log_scale: float | tirx.Expr | None = None,
 ):
     """Find the correction range based on the number of rotations"""
     low = yarn_find_correction_dim(
@@ -221,13 +221,13 @@ def rope_freq_yarn(
     s: tirx.Var,
     d: tirx.Var,
     d_range: int,
-    theta: float | tirx.PrimExpr,
+    theta: float | tirx.Expr,
     dtype: str,
     original_max_position_embeddings: int,
     scaling_factor: float,
     beta_fast: int,
     beta_slow: int,
-    inv_theta_log_scale: float | tirx.PrimExpr | None = None,
+    inv_theta_log_scale: float | tirx.Expr | None = None,
 ):  # pylint: disable=too-many-arguments, too-many-locals
     """Compute the inverse frequency of RoPE for yarn RoPE scaling."""
 
@@ -390,7 +390,7 @@ def llama_rope(  # pylint: disable=too-many-arguments
             expr = tirx.Let(var, value, expr)
         return expr
 
-    @T.prim_func(private=True)
+    @T.prim_func(private=True, s_tir=True)
     def fused_rope(  # pylint: disable=too-many-locals
         var_qkv: T.handle,
         var_q: T.handle,
@@ -522,14 +522,14 @@ def llama_rope_with_position_map(  # pylint: disable=too-many-arguments
             expr = tirx.Let(var, value, expr)
         return expr
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def fused_rope(  # pylint: disable=too-many-locals
         var_qkv: T.handle,
         var_position_map: T.handle,
         var_q: T.handle,
         var_k: T.handle,
         var_v: T.handle,
-        apply_rope: T.int32,
+        apply_rope: T.int64,
     ):
         T.func_attr(
             {
@@ -564,7 +564,7 @@ def llama_rope_with_position_map(  # pylint: disable=too-many-arguments
                 else:
                     v[s, h - (num_q_heads + num_kv_heads), d] = qkv[s, h, d]
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def fused_rope_longrope_scaling(  # pylint: disable=too-many-locals
         var_qkv: T.handle,
         var_position_map: T.handle,
@@ -749,7 +749,7 @@ def llama4_rope_with_position_map(  # pylint: disable=too-many-arguments
             expr = tirx.Let(var, value, expr)
         return expr
 
-    @T.prim_func(private=True)
+    @T.prim_func(private=True, s_tir=True)
     def fused_rope(  # pylint: disable=too-many-locals
         var_qkv: T.handle,
         var_position_map: T.handle,
@@ -791,7 +791,7 @@ def llama4_rope_with_position_map(  # pylint: disable=too-many-arguments
                 else:
                     v[s, h - (num_q_heads + num_kv_heads), d] = qkv[s, h, d]
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def fused_rope_longrope_scaling(  # pylint: disable=too-many-locals
         var_qkv: T.handle,
         var_position_map: T.handle,

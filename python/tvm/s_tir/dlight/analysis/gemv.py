@@ -16,7 +16,9 @@
 # under the License.
 """Analysis for GEMV."""
 
-from tvm import arith, ir, s_tir, tirx
+import tvm_ffi
+
+from tvm import arith, s_tir, tirx
 
 from .common_analysis import (
     SBlockInfo,
@@ -26,7 +28,7 @@ from .common_analysis import (
 )
 
 
-def get_reduction_expr(block: tirx.SBlock) -> tirx.PrimExpr | None:
+def get_reduction_expr(block: tirx.SBlock) -> tirx.Expr | None:
     """Extracts the reduction expression from a TIR block.
 
     This function checks whether the given TIR block follows a reduction pattern
@@ -39,7 +41,7 @@ def get_reduction_expr(block: tirx.SBlock) -> tirx.PrimExpr | None:
 
     Returns:
     -------
-    Optional[tirx.PrimExpr]
+    Optional[tirx.Expr]
         The reduction expression (`Y`) if detected, otherwise None.
     """
 
@@ -48,7 +50,7 @@ def get_reduction_expr(block: tirx.SBlock) -> tirx.PrimExpr | None:
         return None
     if not isinstance(buffer_store.value, tirx.Add):
         return None
-    if not ir.structural_equal(
+    if not tvm_ffi.structural_equal(
         buffer_store.value.a,
         tirx.BufferLoad(buffer_store.buffer, block.body.indices),
         map_free_vars=True,
@@ -124,6 +126,10 @@ def normalize(
     ):
         return None
     iter_to_info = {i.var: i for i in block_info.iters}
+    if not access.args or any(
+        split_expr.source.source not in iter_to_info for split_expr in access.args
+    ):
+        return None
     batch_loops, s_loops, r_loops, c_loops = [], [], [], []
     inner_axis = access.args[-1].source.source
     is_inner_reduction = iter_to_info[inner_axis].kind == "R"

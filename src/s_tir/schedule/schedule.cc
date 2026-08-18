@@ -70,14 +70,14 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def("s_tir.schedule.SBlockRV", []() { return SBlockRV(); })
       .def("s_tir.schedule.LoopRV", []() { return LoopRV(); })
       .def("s_tir.schedule.ConcreteSchedule",
-           [](IRModule mod, support::LinearCongruentialEngine::TRandState seed, int debug_mask,
+           [](IRModule mod, LinearCongruentialEngine::TRandState seed, int debug_mask,
               int error_render_level, bool enable_check) -> Schedule {
              return Schedule::Concrete(mod, debug_mask, seed,
                                        static_cast<ScheduleErrorRenderLevel>(error_render_level),
                                        enable_check);
            })
       .def("s_tir.schedule.TracedSchedule",
-           [](IRModule mod, support::LinearCongruentialEngine::TRandState seed, int debug_mask,
+           [](IRModule mod, LinearCongruentialEngine::TRandState seed, int debug_mask,
               int error_render_level, bool enable_check) -> Schedule {
              return Schedule::Traced(mod, seed, debug_mask,
                                      static_cast<ScheduleErrorRenderLevel>(error_render_level),
@@ -91,7 +91,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()
       .def("s_tir.schedule.ScheduleGet",
-           [](Schedule self, ObjectRef obj) -> ObjectRef {
+           [](Schedule self, ffi::ObjectRef obj) -> ffi::ObjectRef {
              if (auto loop_rv = obj.as<LoopRV>()) {
                return self->Get(loop_rv.value());
              }
@@ -107,7 +107,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
              throw;
            })
       .def("s_tir.schedule.ScheduleGetSRef",
-           [](Schedule self, ObjectRef obj) -> ffi::Optional<ObjectRef> {
+           [](Schedule self, ffi::ObjectRef obj) -> ffi::Optional<ffi::ObjectRef> {
              if (auto loop_rv = obj.as<LoopRV>()) {
                return self->GetSRef(loop_rv.value());
              }
@@ -120,7 +120,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
              TVM_FFI_THROW(TypeError) << "Invalid type: " << obj->GetTypeKey();
              throw;
            })
-      .def("s_tir.schedule.ScheduleRemoveRV", [](Schedule self, ObjectRef obj) -> void {
+      .def("s_tir.schedule.ScheduleRemoveRV", [](Schedule self, ffi::ObjectRef obj) -> void {
         if (auto loop_rv = obj.as<LoopRV>()) {
           return self->RemoveRV(loop_rv.value());
         }
@@ -153,7 +153,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def_method("s_tir.schedule.ScheduleGetSBlock", &ScheduleNode::GetSBlock)
       .def_method("s_tir.schedule.ScheduleGetLoops", &ScheduleNode::GetLoops)
       .def("s_tir.schedule.ScheduleGetChildBlocks",
-           [](Schedule self, ObjectRef rv) {
+           [](Schedule self, ffi::ObjectRef rv) {
              if (auto block_rv = rv.as<SBlockRV>()) {
                return self->GetChildBlocks(block_rv.value());
              }
@@ -179,7 +179,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def_method("s_tir.schedule.ScheduleLoopPartition", &ScheduleNode::LoopPartition)
       .def_method("s_tir.schedule.ScheduleReorder", &ScheduleNode::Reorder)
       .def_method("s_tir.schedule.ScheduleReorderBlockIterVar", &ScheduleNode::ReorderBlockIterVar)
-      .def("s_tir.schedule.ScheduleAddUnitLoop", [](Schedule self, ObjectRef rv) -> LoopRV {
+      .def("s_tir.schedule.ScheduleAddUnitLoop", [](Schedule self, ffi::ObjectRef rv) -> LoopRV {
         if (auto loop_rv = rv.as<LoopRV>()) {
           return self->AddUnitLoop(loop_rv.value());
         } else if (auto block_rv = rv.as<SBlockRV>()) {
@@ -256,7 +256,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()
       .def("s_tir.schedule.ScheduleBlockize",
-           [](Schedule self, ObjectRef target, bool preserve_unit_iters) {
+           [](Schedule self, ffi::ObjectRef target, bool preserve_unit_iters) {
              if (auto loop_rv = target.as<LoopRV>()) {
                return self->Blockize(loop_rv.value(), preserve_unit_iters);
              } else if (auto blocks = target.as<ffi::Array<SBlockRV>>()) {
@@ -265,7 +265,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
              TVM_FFI_THROW(InternalError) << "Unsupported target type: " << target->GetTypeKey();
            })
       .def("s_tir.schedule.ScheduleTensorize",
-           [](Schedule self, ObjectRef rv, ffi::String intrin, bool preserve_unit_iters) {
+           [](Schedule self, ffi::ObjectRef rv, ffi::String intrin, bool preserve_unit_iters) {
              if (auto block_rv = rv.as<SBlockRV>()) {
                self->Tensorize(block_rv.value(), intrin, preserve_unit_iters);
              } else if (auto loop_rv = rv.as<LoopRV>()) {
@@ -283,7 +283,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()
       .def("s_tir.schedule.ScheduleAnnotate",
-           [](Schedule self, ObjectRef rv, const ffi::String& ann_key, const Any& ann_val) {
+           [](Schedule self, ffi::ObjectRef rv, const ffi::String& ann_key, const Any& ann_val) {
              if (auto block_rv = rv.as<SBlockRV>()) {
                return self->Annotate(block_rv.value(), ann_key, ann_val);
              }
@@ -296,7 +296,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
              throw;
            })
       .def("s_tir.schedule.ScheduleUnannotate",
-           [](Schedule self, ObjectRef rv, const ffi::String& ann_key) {
+           [](Schedule self, ffi::ObjectRef rv, const ffi::String& ann_key) {
              if (auto block_rv = rv.as<SBlockRV>()) {
                return self->Unannotate(block_rv.value(), ann_key);
              }
@@ -323,14 +323,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                                           index_map, pad_value, assume_injective_transform);
            })
       .def_method("s_tir.schedule.ScheduleTransformBlockLayout",
-                  &ScheduleNode::TransformBlockLayout)
-      .def("s_tir.schedule.ScheduleSetAxisSeparator",
-           [](Schedule self, const SBlockRV& block_rv, int buffer_index, int buffer_index_type,
-              const ffi::Array<IntImm>& axis_separators) {
-             return self->SetAxisSeparator(block_rv, buffer_index,
-                                           static_cast<BufferIndexType>(buffer_index_type),
-                                           axis_separators);
-           });
+                  &ScheduleNode::TransformBlockLayout);
 }
 
 /******** (FFI) Padding decomposition ********/

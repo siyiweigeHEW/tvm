@@ -26,7 +26,8 @@
 #include "cache_index_helpers.h"
 
 #include <tvm/arith/analyzer.h>  // For the arith::Analyzer::Simplify() method simplifying terms
-#include <tvm/tirx/analysis.h>   // For the ExprDeepEqual analysis
+#include <tvm/ffi/cast.h>
+#include <tvm/tirx/analysis.h>  // For the ExprDeepEqual analysis
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/expr_functor.h>
 #include <tvm/tirx/stmt.h>
@@ -149,7 +150,7 @@ ComputationTable ComputationsDoneBy::GetComputationsDoneBy(
     const PrimExpr& expr, std::function<bool(const PrimExpr&)> is_eligible_computation,
     std::function<bool(const PrimExpr&)> can_contain_computations) {
   if (expr.as<IntImmNode>() != nullptr || expr.as<FloatImmNode>() != nullptr ||
-      expr.as<StringImmNode>() != nullptr || expr.as<VarNode>() != nullptr) {
+      expr.as<StringImmNode>() != nullptr || expr.as<PrimVar>()) {
     return {};
   }
 
@@ -195,9 +196,15 @@ ComputationsDoneBy::ComputationsDoneBy(
 /*!
  * \brief The method which overrides the generic dispatcher of StmtExprVisitor for expressions
  */
-void ComputationsDoneBy::VisitExpr(const PrimExpr& expr) {
+void ComputationsDoneBy::VisitExpr(const Expr& expr_value) {
+  auto opt_expr = expr_value.as<PrimExpr>();
+  if (!opt_expr) {
+    StmtExprVisitor::VisitExpr(expr_value);
+    return;
+  }
+  PrimExpr expr = opt_expr.value();
   if (expr.as<IntImmNode>() != nullptr || expr.as<FloatImmNode>() != nullptr ||
-      expr.as<StringImmNode>() != nullptr || expr.as<VarNode>() != nullptr) {
+      expr.as<StringImmNode>() != nullptr || expr.as<PrimVar>()) {
     return;
   }
 
@@ -356,7 +363,8 @@ DirectSubexpr::DirectSubexpr(std::function<bool(const PrimExpr&)> is_eligible_co
 /*!
  * \brief The method which overrides the generic dispatcher of ExprVisitor
  */
-void DirectSubexpr::VisitExpr(const PrimExpr& expr) {
+void DirectSubexpr::VisitExpr(const Expr& expr_value) {
+  PrimExpr expr = expr_value.as_or_throw<PrimExpr>();
   if (entered_) {
     if (is_eligible_computation_(expr)) {
       direct_subexpr_.push_back(expr);
@@ -392,7 +400,7 @@ bool EqualTerms(const PrimExpr& a, const PrimExpr& b) {
 PrimExpr NormalizeTerm(const PrimExpr& expr, bool do_normalization) {
   if (do_normalization) {
     arith::Analyzer analyzer;
-    return analyzer.Simplify(expr);
+    return analyzer->Simplify(expr);
   } else {
     return expr;
   }

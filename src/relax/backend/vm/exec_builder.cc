@@ -41,7 +41,7 @@ ExecBuilder ExecBuilderNode::Create() {
 
 VMExecutable* ExecBuilderNode::exec() const { return exec_.get(); }
 
-ObjectPtr<VMExecutable> ExecBuilderNode::Get() {
+ffi::ObjectPtr<VMExecutable> ExecBuilderNode::Get() {
   this->Formalize();
   this->CheckExecutable();
   return exec_;
@@ -105,7 +105,7 @@ void ExecBuilderNode::EmitFunction(const std::string& func_name, int64_t num_inp
   TVM_FFI_ICHECK_EQ(vmfunc.name, func_name);
   TVM_FFI_ICHECK_EQ(vmfunc.num_args, -2) << "Function " << func_name << " already defined";
   vmfunc.num_args = num_inputs;
-  if (param_names.defined()) {
+  if (param_names.has_value()) {
     TVM_FFI_ICHECK_EQ(num_inputs, param_names.value().size())
         << "Function " << func_name << " defined with " << num_inputs << " arguments, "
         << "but the list of parameter names has " << param_names.value().size() << " names ("
@@ -381,7 +381,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
           "relax.ExecBuilderF",
           [](ExecBuilder builder, ffi::String value) { return builder->GetFunction(value).data(); })
       .def("relax.ExecBuilderGet", [](ExecBuilder builder) {
-        ObjectPtr<VMExecutable> p_exec = builder->Get();
+        ffi::ObjectPtr<VMExecutable> p_exec = builder->Get();
         return ffi::Module(p_exec);
       });
 }

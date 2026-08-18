@@ -24,8 +24,7 @@ import numpy as np
 
 import tvm
 from tvm import te
-from tvm.s_tir import bijective_layout, layout
-from tvm.tirx import SizeVar
+from tvm.s_tir import sbijective_layout, slayout
 
 from . import cpp, tag
 
@@ -188,13 +187,13 @@ def get_const_tuple(in_tuple):
     """
     if isinstance(in_tuple, te.tensor.Tensor):
         raise TypeError(
-            f"get_const_tuple expects a tuple-like shape (e.g., tensor.shape), "
-            f"but got a te.Tensor. Did you mean get_const_tuple(tensor.shape)?"
+            "get_const_tuple expects a tuple-like shape (e.g., tensor.shape), "
+            "but got a te.Tensor. Did you mean get_const_tuple(tensor.shape)?"
         )
     ret = []
     ana = None
     for elem in in_tuple:
-        if isinstance(elem, tvm.tirx.Var):
+        if tvm.ir.is_prim_var(elem):
             ret.append(elem)
         elif not isinstance(elem, tvm.tirx.IntImm | int):
             ana = tvm.arith.Analyzer() if ana is None else ana
@@ -276,7 +275,7 @@ def simplify(expr):
             name="simplify_output",
             tag="simplify",
         )
-    elif isinstance(expr, tvm.tirx.PrimExpr):
+    elif tvm.ir.is_prim_expr(expr):
         return tvm.arith.Analyzer().simplify(expr)
     else:
         return expr
@@ -427,13 +426,13 @@ def get_shape(src_shape, src_layout, dst_layout):
         return get_const_tuple(src_shape)
 
     if isinstance(src_layout, str):
-        src_layout = layout(src_layout)
+        src_layout = slayout(src_layout)
     if isinstance(dst_layout, str):
-        dst_layout = layout(dst_layout)
+        dst_layout = slayout(dst_layout)
 
     assert len(src_layout) == len(dst_layout), f"Incompatible layout {src_layout} vs {dst_layout}"
 
-    layout_mapping = bijective_layout(src_layout, dst_layout)
+    layout_mapping = sbijective_layout(src_layout, dst_layout)
     dst_indices = layout_mapping.forward_index(tvm.runtime.convert(list(range(len(src_layout)))))
 
     return get_const_tuple(tuple([src_shape[i.value] for i in dst_indices]))
@@ -542,4 +541,4 @@ def is_target(names):
 
 def is_dynamic_shape(shape):
     """Checks if any part of a shape is dynamic"""
-    return any([isinstance(x, SizeVar) for x in shape])
+    return any(tvm.ir.is_prim_var(x) for x in shape)

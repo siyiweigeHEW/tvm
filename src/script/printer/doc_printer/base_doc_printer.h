@@ -67,7 +67,7 @@ class DocPrinter {
    * \brief Append a doc to the final content
    *
    * \param doc  Doc to be printed
-   * \param path_to_underline  Object path to be underlined
+   * \param path_to_underline  ffi::Object path to be underlined
    *
    * \sa GetString
    */
@@ -82,6 +82,12 @@ class DocPrinter {
    * \sa Append
    */
   ffi::String GetString() const;
+
+  /*!
+   * \brief Return the visible source path selected for each requested
+   *        underline path.
+   */
+  ffi::Array<ffi::Optional<AccessPath>> GetVisiblePaths() const;
 
  protected:
   /*!
@@ -98,6 +104,11 @@ class DocPrinter {
    * \brief Virtual method to print a LiteralDoc
    */
   virtual void PrintTypedDoc(const LiteralDoc& doc) = 0;
+
+  /*!
+   * \brief Virtual method to print an ExprStringDoc
+   */
+  virtual void PrintTypedDoc(const ExprStringDoc& doc) = 0;
 
   /*!
    * \brief Virtual method to print an IdDoc
@@ -170,6 +181,16 @@ class DocPrinter {
   virtual void PrintTypedDoc(const WhileDoc& doc) = 0;
 
   /*!
+   * \brief Virtual method to print a BreakDoc
+   */
+  virtual void PrintTypedDoc(const BreakDoc& doc) = 0;
+
+  /*!
+   * \brief Virtual method to print a ContinueDoc
+   */
+  virtual void PrintTypedDoc(const ContinueDoc& doc) = 0;
+
+  /*!
    * \brief Virtual method to print a ForDoc
    */
   virtual void PrintTypedDoc(const ForDoc& doc) = 0;
@@ -213,6 +234,11 @@ class DocPrinter {
    * \brief Virtual method to print a DocStringDoc
    */
   virtual void PrintTypedDoc(const DocStringDoc& doc) = 0;
+
+  /*!
+   * \brief Virtual method to print a OpCallDoc
+   */
+  virtual void PrintTypedDoc(const OpCallDoc& doc) = 0;
 
   /*!
    * \brief Increase the indent level of any content to be
@@ -277,6 +303,9 @@ class DocPrinter {
 
   /*! \brief Path length of the objects that are current candidates for underlining. */
   std::vector<int> current_max_path_depth_;
+
+  /*! \brief Visible path selected by the current best underline candidate. */
+  std::vector<ffi::Optional<AccessPath>> current_visible_paths_;
 
   /*! \brief Spans that we have already committed to underline. */
   std::vector<ByteSpan> underlines_;

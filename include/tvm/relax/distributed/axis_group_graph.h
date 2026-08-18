@@ -21,7 +21,7 @@
 #define TVM_RELAX_DISTRIBUTED_AXIS_GROUP_GRAPH_H_
 
 #include <tvm/arith/iter_affine_map.h>
-#include <tvm/relax/distributed/struct_info.h>
+#include <tvm/relax/distributed/type.h>
 #include <tvm/relax/expr.h>
 #include <tvm/tirx/function.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -40,11 +40,11 @@ namespace tirx {
 // (var, axis)
 using TIRVarAxis = std::pair<Var, int>;
 // (buffer, axis)
-using BufferAxis = std::pair<Buffer, int>;
+using BufferAxis = std::pair<BufferVar, int>;
 class BufferAxisHash {
  public:
   size_t operator()(const BufferAxis& buffer_axis) const {
-    size_t const h1(ObjectPtrHash()(buffer_axis.first));
+    size_t const h1(ffi::ObjectPtrHash()(buffer_axis.first));
     size_t const h2(std::hash<int>()(buffer_axis.second));
     return h1 ^ (h2 << 1);
   }
@@ -59,7 +59,7 @@ class BufferAxisHash {
  * \return The iter var whose extent to be changed
  */
 Var GetShardingVarFromIndex(PrimExpr index, ffi::Map<Var, Range> var_range,
-                            arith::Analyzer* analyzer);
+                            const arith::Analyzer& analyzer);
 
 /*!
  * \brief Construct an axis group graph from a PrimFunc. Two buffer axis are connected if they
@@ -70,15 +70,19 @@ class BufferAxisGraphExtractor : public StmtExprVisitor {
   static std::vector<std::vector<TIRVarAxis>> GetTIRVarAxisGraph(const PrimFunc& prim_func) {
     BufferAxisGraphExtractor extractor;
     extractor(prim_func->body);
-    ffi::Map<Buffer, Var> inverse_buffer_map;
-    for (const auto& pr : prim_func->buffer_map) {
-      inverse_buffer_map.Set(pr.second, pr.first);
+    ffi::Map<BufferVar, Var> inverse_buffer_map;
+    for (const Var& param : prim_func->params) {
+      if (param->ty.as<BufferTypeNode>()) {
+        inverse_buffer_map.Set(BufferVar(param), param);
+      }
     }
     std::vector<std::vector<TIRVarAxis>> tir_var_axis_group_list;
     std::unordered_set<BufferAxis, BufferAxisHash> visited;
-    for (const auto& pr : prim_func->buffer_map) {
-      Var param = pr.first;
-      Buffer buffer = pr.second;
+    for (const Var& param : prim_func->params) {
+      if (!param->ty.as<BufferTypeNode>()) {
+        continue;
+      }
+      BufferVar buffer(param);
       for (int i = 0; i < static_cast<int>(buffer->shape.size()); i++) {
         if (extractor.buffer_axis_graph_.count({buffer, i})) {
           std::vector<BufferAxis> buffer_axis_group;
@@ -125,15 +129,16 @@ class BufferAxisGraphExtractor : public StmtExprVisitor {
   }
 
   bool Match(PrimExpr a, PrimExpr buffer_shape_a, PrimExpr b, PrimExpr buffer_shape_b,
-             arith::Analyzer* analyzer) {
-    if (b.as<VarNode>()) {
+             const arith::Analyzer& analyzer) {
+    if (b.as<PrimVar>()) {
       std::swap(a, b);
       std::swap(buffer_shape_a, buffer_shape_b);
     }
-    if (!a.as<VarNode>()) {
+    auto prim_var = a.as<PrimVar>();
+    if (!prim_var) {
       return false;
     }
-    Var var = Downcast<Var>(a);
+    Var var = *prim_var;
     analyzer->Bind(iter_var_range_);
     b = analyzer->Simplify(b);
     // index var `a` must access whole range of a specific buffer dimension
@@ -162,18 +167,18 @@ class BufferAxisGraphExtractor : public StmtExprVisitor {
     }
     arith::Analyzer analyzer;
     for (const auto& access_pr : buffer_access_indices_) {
-      Buffer buffer = access_pr.first;
+      BufferVar buffer = access_pr.first;
       ffi::Array<PrimExpr> indices = access_pr.second;
       for (int i = 0; i < static_cast<int>(indices.size()); i++) {
         for (const auto& another_access_pr : buffer_access_indices_) {
           if (another_access_pr.first.same_as(buffer)) {
             continue;
           }
-          Buffer another_buffer = another_access_pr.first;
+          BufferVar another_buffer = another_access_pr.first;
           ffi::Array<PrimExpr> another_indices = another_access_pr.second;
           for (int j = 0; j < static_cast<int>(another_indices.size()); j++) {
             if (Match(indices[i], buffer->shape[i], another_indices[j], another_buffer->shape[j],
-                      &analyzer)) {
+                      analyzer)) {
               JoinBufferAxis({buffer, i}, {another_buffer, j});
             }
           }
@@ -193,7 +198,7 @@ class BufferAxisGraphExtractor : public StmtExprVisitor {
     buffer_axis_graph_[axis2].push_back(axis1);
   }
 
-  std::vector<std::pair<Buffer, ffi::Array<PrimExpr>>> buffer_access_indices_;
+  std::vector<std::pair<BufferVar, ffi::Array<PrimExpr>>> buffer_access_indices_;
   std::unordered_map<BufferAxis, std::vector<BufferAxis>, BufferAxisHash> buffer_axis_graph_;
   ffi::Map<Var, Range> iter_var_range_;
   std::string func_name;

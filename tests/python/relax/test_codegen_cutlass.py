@@ -20,6 +20,10 @@ import pytest
 
 import tvm
 import tvm.testing
+from tvm.testing import env
+
+pytest.importorskip("scipy")  # tvm.topi.testing imports scipy
+
 import tvm.topi.testing
 from tvm import relax
 from tvm.contrib.cutlass.build import is_shape_valid_for_cutlass_matmul
@@ -80,7 +84,9 @@ class Conv2dx2:
         return conv2
 
 
-pytestmark = tvm.testing.requires_cutlass.marks()
+pytestmark = [
+    pytest.mark.skipif(not env.build_flag_enabled("USE_CUTLASS"), reason="need cutlass"),
+]
 
 
 def build_and_run(mod, inputs_np, target, legalize=True, cuda_graph=False):
@@ -92,17 +98,20 @@ def build_and_run(mod, inputs_np, target, legalize=True, cuda_graph=False):
     ):
         ex = tvm.compile(mod, target)
 
-    dev = tvm.device(target, 0)
-    vm = relax.VirtualMachine(ex, dev)
-    f = vm["main"]
-    inputs = [tvm.runtime.tensor(inp, dev) for inp in inputs_np]
+    def run_and_check():
+        dev = tvm.device_from_target(target, 0)
+        vm = relax.VirtualMachine(ex, dev)
+        f = vm["main"]
+        inputs = [tvm.runtime.tensor(inp, dev) for inp in inputs_np]
 
-    # For cuda graph, run the compiled function twice to make sure that we can launch the cached
-    # graph on the second run.
-    if cuda_graph:
-        f(*inputs)
+        # For cuda graph, run the compiled function twice to make sure that we can launch the
+        # cached graph on the second run.
+        if cuda_graph:
+            f(*inputs)
 
-    return f(*inputs).numpy()
+        return f(*inputs).numpy()
+
+    return tvm.testing.run_with_gpu_lock(run_and_check)
 
 
 def build_cutlass(mod, assert_all_bindings_fused=True, num_final_bindings=1):
@@ -542,7 +551,7 @@ def test_cutlass_partition_matmul_tuple_return_blocked():
                 #     R.func_attr({"Composite": "cutlass.matmul_transposed", "Primitive": True})
                 #     with R.dataflow():
                 #         gv: R.Tensor((4, 4), dtype="float32") = R.permute_dims(y, axes=None)
-                #         gv1: R.Tensor((4, 4), dtype="float32") = R.matmul(x, gv, out_dtype="void")
+                #         gv1: R.Tensor((4, 4), dtype="float32") = R.matmul(x, gv)
                 #         R.output(gv, gv1)
                 #     return (gv, gv1)  # Cannot get `gv` if dispatch to cutlass kernel.
                 lv2 = R.matmul(x, lv1)
@@ -1136,7 +1145,7 @@ def test_layer_norm(data_shape, dtype, axes):
 
 
 def test_attention_rewrite_fp16():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
         @R.function
         def main(
@@ -1169,7 +1178,7 @@ def test_attention_rewrite_fp16():
                 R.output(lv14)
             return lv14
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Expected:
         @R.function
         def fused_relax_nn_attention_bias_cutlass1(
@@ -1255,9 +1264,9 @@ def split_transform_deploy_mod(mod):
 
 
 def test_fp16A_int4B_gemm():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def decode(
             A: T.Buffer((T.int64(64), T.int64(64)), "int8"),
             B: T.Buffer((T.int64(128),), "float16"),
@@ -1290,7 +1299,7 @@ def test_fp16A_int4B_gemm():
                         * B[v_j]
                     )
 
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def encode(
             A: T.Buffer((T.int64(128), T.int64(64)), "float16"),
             w_gathered: T.Buffer((T.int64(64), T.int64(64)), "int8"),
@@ -1370,7 +1379,7 @@ def test_fp16A_int4B_gemm():
                 lv = R.call_tir(
                     cls.encode,
                     (y,),
-                    out_sinfo=[R.Tensor((64, 64), dtype="int8"), R.Tensor((128,), dtype="float16")],
+                    out_ty=[R.Tensor((64, 64), dtype="int8"), R.Tensor((128,), dtype="float16")],
                 )
                 lv1 = lv[0]
                 lv2 = R.call_pure_packed(
@@ -1378,11 +1387,11 @@ def test_fp16A_int4B_gemm():
                     lv1,
                     80,
                     True,
-                    sinfo_args=(R.Tensor((64, 64), dtype="int8"),),
+                    ty_args=(R.Tensor((64, 64), dtype="int8"),),
                 )
                 lv3: R.Tensor((128,), dtype="float16") = lv[1]
                 lv6 = R.call_tir(
-                    cls.decode, (lv2, lv3), out_sinfo=R.Tensor((64, 128), dtype="float16")
+                    cls.decode, (lv2, lv3), out_ty=R.Tensor((64, 128), dtype="float16")
                 )
                 lv1_1: R.Tensor((64, 128), dtype="float16") = R.matmul(x, lv6, out_dtype="float16")
                 lv2_1: R.Tensor((64, 128), dtype="float16") = R.add(lv1_1, bias)
@@ -1401,7 +1410,7 @@ def test_fp16A_int4B_gemm():
                 lv = R.call_tir(
                     cls.encode,
                     (y,),
-                    out_sinfo=[R.Tensor((64, 64), dtype="int8"), R.Tensor((128,), dtype="float16")],
+                    out_ty=[R.Tensor((64, 64), dtype="int8"), R.Tensor((128,), dtype="float16")],
                 )
                 lv1 = lv[0]
                 lv2 = R.call_pure_packed(
@@ -1409,11 +1418,11 @@ def test_fp16A_int4B_gemm():
                     lv1,
                     80,
                     True,
-                    sinfo_args=(R.Tensor((64, 64), dtype="int8"),),
+                    ty_args=(R.Tensor((64, 64), dtype="int8"),),
                 )
                 lv3: R.Tensor((128,), dtype="float16") = lv[1]
                 lv6 = R.call_tir(
-                    cls.decode, (lv2, lv3), out_sinfo=R.Tensor((64, 128), dtype="float16")
+                    cls.decode, (lv2, lv3), out_ty=R.Tensor((64, 128), dtype="float16")
                 )
                 lv1_1: R.Tensor((64, 128), dtype="float32") = R.matmul(x, lv6, out_dtype="float32")
                 cast: R.Tensor((64, 128), dtype="float16") = R.astype(lv1_1, dtype="float16")
@@ -1434,7 +1443,7 @@ def test_fp16A_int4B_gemm():
                 lv = R.call_tir(
                     cls.encode,
                     (y,),
-                    out_sinfo=[R.Tensor((64, 64), dtype="int8"), R.Tensor((128,), dtype="float16")],
+                    out_ty=[R.Tensor((64, 64), dtype="int8"), R.Tensor((128,), dtype="float16")],
                 )
                 lv1 = lv[0]
                 lv2 = R.call_pure_packed(
@@ -1442,11 +1451,11 @@ def test_fp16A_int4B_gemm():
                     lv1,
                     80,
                     True,
-                    sinfo_args=(R.Tensor((64, 64), dtype="int8"),),
+                    ty_args=(R.Tensor((64, 64), dtype="int8"),),
                 )
                 lv3: R.Tensor((128,), dtype="float16") = lv[1]
                 lv6 = R.call_tir(
-                    cls.decode, (lv2, lv3), out_sinfo=R.Tensor((64, 128), dtype="float16")
+                    cls.decode, (lv2, lv3), out_ty=R.Tensor((64, 128), dtype="float16")
                 )
                 lv1_1: R.Tensor((64, 128), dtype="float16") = R.matmul(x, lv6, out_dtype="float16")
                 lv2_1: R.Tensor((64, 128), dtype="float16") = R.add(lv1_1, bias)
@@ -1485,36 +1494,36 @@ def test_fp16A_int4B_gemm():
         (tvm.runtime.tensor(y), tvm.runtime.tensor(bias))
     )
 
-    dev = tvm.device("cuda", 0)
-    ex = tvm.compile(mod_deploy, target="cuda")
-    vm = relax.vm.VirtualMachine(ex, dev)
+    ex_cuda = tvm.compile(mod_deploy, target="cuda")
 
-    x_nd = tvm.runtime.tensor(x, dev)
-    residual_nd = tvm.runtime.tensor(residual, dev)
-    params = [packed_weight.copyto(dev), scales.copyto(dev), bias_trans.copyto(dev)]
+    def run_and_check():
+        dev = tvm.cuda(0)
+        vm = relax.vm.VirtualMachine(ex_cuda, dev)
+        x_nd = tvm.runtime.tensor(x, dev)
+        residual_nd = tvm.runtime.tensor(residual, dev)
+        params = [packed_weight.copyto(dev), scales.copyto(dev), bias_trans.copyto(dev)]
 
-    for f_name in ["main_bias", "main_cast_bias", "main_residual"]:
-        with_residual = "residual" in f_name
+        for f_name in ["main_bias", "main_cast_bias", "main_residual"]:
+            with_residual = "residual" in f_name
 
-        if with_residual:
-            inp = [x_nd, residual_nd] + params
-        else:
-            inp = [x_nd] + params
+            if with_residual:
+                inp = [x_nd, residual_nd] + params
+            else:
+                inp = [x_nd] + params
 
-        out = vm[f_name](*inp).numpy()
+            out = vm[f_name](*inp).numpy()
+            ref = np.dot(x, y.transpose()) + bias
+            if with_residual:
+                ref += residual
+            tvm.testing.assert_allclose(out, ref, rtol=1e-2, atol=1e-2)
 
-        ref = np.dot(x, y.transpose()) + bias
-
-        if with_residual:
-            ref += residual
-
-        tvm.testing.assert_allclose(out, ref, rtol=1e-2, atol=1e-2)
+    tvm.testing.run_with_gpu_lock(run_and_check)
 
 
 def test_fp16A_int8B_gemm():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def decode(
             A: T.Buffer((T.int64(64), T.int64(64)), "int8"),
             B: T.Buffer((T.int64(64),), "float16"),
@@ -1529,7 +1538,7 @@ def test_fp16A_int8B_gemm():
                     T.writes(decode_1[v_i, v_j])
                     decode_1[v_i, v_j] = T.Cast("float16", A[v_i, v_j]) * B[v_j]
 
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def encode(
             A: T.Buffer((T.int64(64), T.int64(64)), "float16"),
             w_gathered: T.Buffer((T.int64(64), T.int64(64)), "int8"),
@@ -1589,7 +1598,7 @@ def test_fp16A_int8B_gemm():
                 lv = R.call_tir(
                     cls.encode,
                     (y,),
-                    out_sinfo=[R.Tensor((64, 64), dtype="int8"), R.Tensor((64,), dtype="float16")],
+                    out_ty=[R.Tensor((64, 64), dtype="int8"), R.Tensor((64,), dtype="float16")],
                 )
                 lv1: R.Tensor((64, 64), dtype="int8") = lv[0]
                 lv2: R.Tensor((64, 64), dtype="int8") = R.call_pure_packed(
@@ -1597,14 +1606,12 @@ def test_fp16A_int8B_gemm():
                     lv1,
                     R.prim_value(80),
                     R.prim_value(0),
-                    sinfo_args=(R.Tensor((64, 64), dtype="int8"),),
+                    ty_args=(R.Tensor((64, 64), dtype="int8"),),
                 )
                 lv3: R.Tensor((64,), dtype="float16") = lv[1]
                 lv4: R.Tensor((64, 64), dtype="int8") = R.builtin.stop_lift_params(lv2)
                 lv5: R.Tensor((64,), dtype="float16") = R.builtin.stop_lift_params(lv3)
-                lv6 = R.call_tir(
-                    cls.decode, (lv4, lv5), out_sinfo=R.Tensor((64, 64), dtype="float16")
-                )
+                lv6 = R.call_tir(cls.decode, (lv4, lv5), out_ty=R.Tensor((64, 64), dtype="float16"))
                 lv1_1: R.Tensor((64, 64), dtype="float16") = R.matmul(x, lv6, out_dtype="float16")
                 lv2_1: R.Tensor((64, 128), dtype="float16") = R.add(lv1_1, bias)
                 lv2_2: R.Tensor((64, 128), dtype="float16") = R.nn.gelu(lv2_1)
@@ -1638,13 +1645,7 @@ def test_fp16A_int8B_gemm():
         (tvm.runtime.tensor(y), tvm.runtime.tensor(bias))
     )
 
-    dev = tvm.device("cuda", 0)
-    ex = tvm.compile(mod_deploy, target="cuda")
-    vm = relax.vm.VirtualMachine(ex, dev)
-
-    x_nd = tvm.runtime.tensor(x, dev)
-    inp = [x_nd, packed_weight.copyto(dev), scales.copyto(dev), bias_trans.copyto(dev)]
-    out = vm["main"](*inp).numpy()
+    ex_cuda = tvm.compile(mod_deploy, target="cuda")
 
     def gelu_fp16(x):
         erf_inp = x * (0.5**0.5)
@@ -1653,14 +1654,22 @@ def test_fp16A_int8B_gemm():
         erf_out = erf(erf_inp.astype("float32")).astype("float16")
         return x * 0.5 * (1.0 + erf_out)
 
-    ref = gelu_fp16(np.dot(x, y.transpose()) + bias)
-    tvm.testing.assert_allclose(out, ref, rtol=1e-2, atol=1e-2)
+    def run_and_check():
+        dev = tvm.cuda(0)
+        vm = relax.vm.VirtualMachine(ex_cuda, dev)
+        x_nd = tvm.runtime.tensor(x, dev)
+        inp = [x_nd, packed_weight.copyto(dev), scales.copyto(dev), bias_trans.copyto(dev)]
+        out = vm["main"](*inp).numpy()
+        ref = gelu_fp16(np.dot(x, y.transpose()) + bias)
+        tvm.testing.assert_allclose(out, ref, rtol=1e-2, atol=1e-2)
+
+    tvm.testing.run_with_gpu_lock(run_and_check)
 
 
 def test_rms_norm():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def rms_norm(
             A: T.Buffer((T.int64(1), T.int64(1), T.int64(4096)), "float16"),
             B: T.Buffer((T.int64(4096),), "float16"),
@@ -1704,7 +1713,7 @@ def test_rms_norm():
             cls = Module
             with R.dataflow():
                 lv = R.call_tir(
-                    cls.rms_norm, (input, weight), out_sinfo=R.Tensor((1, 1, 4096), dtype="float16")
+                    cls.rms_norm, (input, weight), out_ty=R.Tensor((1, 1, 4096), dtype="float16")
                 )
                 R.output(lv)
             return lv
@@ -1791,9 +1800,9 @@ def test_conv2d_cuda_graph():
 
 
 def test_fp16A_int8B_gemm_batched():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def decode(
             A: T.Buffer((T.int64(64), T.int64(64)), "int8"),
             B: T.Buffer((T.int64(64),), "float16"),
@@ -1808,7 +1817,7 @@ def test_fp16A_int8B_gemm_batched():
                     T.writes(decode_1[v_i, v_j])
                     decode_1[v_i, v_j] = T.Cast("float16", A[v_i, v_j]) * B[v_j]
 
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def encode(
             A: T.Buffer((T.int64(64), T.int64(64)), "float16"),
             w_gathered: T.Buffer((T.int64(64), T.int64(64)), "int8"),
@@ -1868,7 +1877,7 @@ def test_fp16A_int8B_gemm_batched():
                 lv = R.call_tir(
                     cls.encode,
                     (y,),
-                    out_sinfo=[R.Tensor((64, 64), dtype="int8"), R.Tensor((64,), dtype="float16")],
+                    out_ty=[R.Tensor((64, 64), dtype="int8"), R.Tensor((64,), dtype="float16")],
                 )
                 lv1: R.Tensor((64, 64), dtype="int8") = lv[0]
                 lv2: R.Tensor((64, 64), dtype="int8") = R.call_pure_packed(
@@ -1876,14 +1885,12 @@ def test_fp16A_int8B_gemm_batched():
                     lv1,
                     R.prim_value(80),
                     R.prim_value(0),
-                    sinfo_args=(R.Tensor((64, 64), dtype="int8"),),
+                    ty_args=(R.Tensor((64, 64), dtype="int8"),),
                 )
                 lv3: R.Tensor((64,), dtype="float16") = lv[1]
                 lv4: R.Tensor((64, 64), dtype="int8") = R.builtin.stop_lift_params(lv2)
                 lv5: R.Tensor((64,), dtype="float16") = R.builtin.stop_lift_params(lv3)
-                lv6 = R.call_tir(
-                    cls.decode, (lv4, lv5), out_sinfo=R.Tensor((64, 64), dtype="float16")
-                )
+                lv6 = R.call_tir(cls.decode, (lv4, lv5), out_ty=R.Tensor((64, 64), dtype="float16"))
                 lv1_1: R.Tensor((b, 64, 64), dtype="float16") = R.matmul(
                     x, lv6, out_dtype="float16"
                 )
@@ -1912,21 +1919,24 @@ def test_fp16A_int8B_gemm_batched():
 
     packed_weight, scales = vm[transform_func_name]((tvm.runtime.tensor(y),))
 
-    dev = tvm.device("cuda", 0)
-    ex = tvm.compile(mod_deploy, target="cuda")
-    vm = relax.vm.VirtualMachine(ex, dev)
+    ex_cuda = tvm.compile(mod_deploy, target="cuda")
 
-    x_nd = tvm.runtime.tensor(x, dev)
-    inp = [x_nd, packed_weight.copyto(dev), scales.copyto(dev)]
-    out = vm["main"](*inp).numpy()
-    ref = np.dot(x, y.transpose())
-    tvm.testing.assert_allclose(out, ref, rtol=1e-2, atol=1e-2)
+    def run_and_check():
+        dev = tvm.cuda(0)
+        vm = relax.vm.VirtualMachine(ex_cuda, dev)
+        x_nd = tvm.runtime.tensor(x, dev)
+        inp = [x_nd, packed_weight.copyto(dev), scales.copyto(dev)]
+        out = vm["main"](*inp).numpy()
+        ref = np.dot(x, y.transpose())
+        tvm.testing.assert_allclose(out, ref, rtol=1e-2, atol=1e-2)
+
+    tvm.testing.run_with_gpu_lock(run_and_check)
 
 
 def test_fp16A_int8B_gemm_batched_finegrained():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def decode(
             A: T.Buffer((T.int64(128), T.int64(128)), "int8"),
             B: T.Buffer((T.int64(2), T.int64(128)), "float16"),
@@ -1940,7 +1950,7 @@ def test_fp16A_int8B_gemm_batched_finegrained():
                     T.writes(decode_1[v_i, v_j])
                     decode_1[v_i, v_j] = T.Cast("float16", A[v_i, v_j]) * B[v_i // T.int64(64), v_j]
 
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def encode(
             A: T.Buffer((T.int64(128), T.int64(128)), "float16"),
             w_gathered: T.Buffer((T.int64(128), T.int64(128)), "int8"),
@@ -2020,7 +2030,7 @@ def test_fp16A_int8B_gemm_batched_finegrained():
                 lv = R.call_tir(
                     cls.encode,
                     (y,),
-                    out_sinfo=[
+                    out_ty=[
                         R.Tensor((128, 128), dtype="int8"),
                         R.Tensor((2, 128), dtype="float16"),
                     ],
@@ -2031,13 +2041,13 @@ def test_fp16A_int8B_gemm_batched_finegrained():
                     lv1,
                     R.prim_value(80),
                     R.prim_value(0),
-                    sinfo_args=(R.Tensor((128, 128), dtype="int8"),),
+                    ty_args=(R.Tensor((128, 128), dtype="int8"),),
                 )
                 lv3: R.Tensor((2, 128), dtype="float16") = lv[1]
                 lv4: R.Tensor((128, 128), dtype="int8") = R.builtin.stop_lift_params(lv2)
                 lv5: R.Tensor((2, 128), dtype="float16") = R.builtin.stop_lift_params(lv3)
                 lv6 = R.call_tir(
-                    cls.decode, (lv4, lv5), out_sinfo=R.Tensor((128, 128), dtype="float16")
+                    cls.decode, (lv4, lv5), out_ty=R.Tensor((128, 128), dtype="float16")
                 )
                 lv1_1: R.Tensor((b, 128, 128), dtype="float16") = R.matmul(
                     x, lv6, out_dtype="float16"
@@ -2067,19 +2077,22 @@ def test_fp16A_int8B_gemm_batched_finegrained():
 
     packed_weight, scales = vm[transform_func_name]((tvm.runtime.tensor(y),))
 
-    dev = tvm.device("cuda", 0)
-    ex = tvm.compile(mod_deploy, target="cuda")
-    vm = relax.vm.VirtualMachine(ex, dev)
+    ex_cuda = tvm.compile(mod_deploy, target="cuda")
 
-    x_nd = tvm.runtime.tensor(x, dev)
-    inp = [x_nd, packed_weight.copyto(dev), scales.copyto(dev)]
-    out = vm["main"](*inp).numpy()
-    ref = np.dot(x, y.transpose())
-    tvm.testing.assert_allclose(out, ref, rtol=1e-2, atol=1e-2)
+    def run_and_check():
+        dev = tvm.cuda(0)
+        vm = relax.vm.VirtualMachine(ex_cuda, dev)
+        x_nd = tvm.runtime.tensor(x, dev)
+        inp = [x_nd, packed_weight.copyto(dev), scales.copyto(dev)]
+        out = vm["main"](*inp).numpy()
+        ref = np.dot(x, y.transpose())
+        tvm.testing.assert_allclose(out, ref, rtol=1e-2, atol=1e-2)
+
+    tvm.testing.run_with_gpu_lock(run_and_check)
 
 
 def test_attention_rewrite_multi_query():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
         @R.function
         def main(
@@ -2199,7 +2212,7 @@ def _test_batched_var_len_attention(
 
 
 def test_batched_var_len_attention():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
         I.module_global_infos(
             {
@@ -2225,7 +2238,7 @@ def test_batched_var_len_attention():
                 # TODO(masahi): Workaround for the broken Relax cumsum op on GPU.
                 # https://github.com/apache/tvm/issues/15851
                 cumsum = R.call_dps_packed(
-                    "tvm.contrib.thrust.sum_scan", seq_lens, out_sinfo=seq_lens.struct_info
+                    "tvm.contrib.thrust.sum_scan", seq_lens, out_ty=seq_lens.ty
                 )
                 max_seqlen_q = R.to_vdevice(R.max(seq_lens), "llvm:0")
                 seqstart_q = R.concat([R.zeros((1,), "int32"), cumsum])
@@ -2252,7 +2265,7 @@ def test_batched_var_len_attention():
 
 
 def test_batched_var_len_multi_query_attention():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
         I.module_global_infos(
             {
@@ -2278,7 +2291,7 @@ def test_batched_var_len_multi_query_attention():
                 # TODO(masahi): Workaround for the broken Relax cumsum op on GPU.
                 # https://github.com/apache/tvm/issues/15851
                 cumsum = R.call_dps_packed(
-                    "tvm.contrib.thrust.sum_scan", seq_lens, out_sinfo=seq_lens.struct_info
+                    "tvm.contrib.thrust.sum_scan", seq_lens, out_ty=seq_lens.ty
                 )
                 max_seqlen_q = R.to_vdevice(R.max(seq_lens), "llvm:0")
                 seqstart_q = R.concat([R.zeros((1,), "int32"), cumsum])
@@ -2347,7 +2360,7 @@ def test_sliding_window():
 
 
 def test_batched_var_len_sliding_window():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Module:
         I.module_global_infos(
             {
@@ -2373,7 +2386,7 @@ def test_batched_var_len_sliding_window():
                 # TODO(masahi): Workaround for the broken Relax cumsum op on GPU.
                 # https://github.com/apache/tvm/issues/15851
                 cumsum = R.call_dps_packed(
-                    "tvm.contrib.thrust.sum_scan", seq_lens, out_sinfo=seq_lens.struct_info
+                    "tvm.contrib.thrust.sum_scan", seq_lens, out_ty=seq_lens.ty
                 )
                 max_seqlen_q = R.to_vdevice(R.max(seq_lens), "llvm:0")
                 seqstart_q = R.concat([R.zeros((1,), "int32"), cumsum])

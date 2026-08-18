@@ -16,8 +16,11 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/s_tir/transform.h>
+
+#include <sstream>
 
 #include "./utils.h"
 
@@ -67,7 +70,7 @@ inline tirx::PrimFunc FindEntryFunc(const IRModule& mod) {
 }
 /******** ArgInfo ********/
 
-ArgInfo ArgInfo::FromJSON(const ObjectRef& json_obj) {
+ArgInfo ArgInfo::FromJSON(const ffi::ObjectRef& json_obj) {
   // The JSON object is always an array whose first element is a tag. For example:
   // `['TENSOR', 'float32', [1, 224, 224, 3]]
   // Step 1. Extract the tag
@@ -93,10 +96,9 @@ ffi::Array<ArgInfo> ArgInfo::FromPrimFunc(const tirx::PrimFunc& func) {
   ffi::Array<ArgInfo> result;
   result.reserve(func->params.size());
   for (const tirx::Var& arg : func->params) {
-    if (ffi::Optional<tirx::Buffer> _buffer = func->buffer_map.Get(arg)) {
-      tirx::Buffer buffer = _buffer.value();
-      result.push_back(TensorInfo(/*dtype=*/buffer->dtype,
-                                  /*shape=*/AsVector<PrimExpr, int64_t>(buffer->shape)));
+    if (auto buffer = arg.as<tirx::BufferVar>()) {
+      result.push_back(TensorInfo(/*dtype=*/buffer.value()->dtype->dtype,
+                                  /*shape=*/AsVector<PrimExpr, int64_t>(buffer.value()->shape)));
     } else {
       TVM_FFI_THROW(ValueError) << "Unsupported argument type: " << arg;
     }
@@ -114,51 +116,60 @@ ffi::Array<ArgInfo> ArgInfo::FromEntryFunc(const IRModule& mod, bool remove_prep
 
 /******** TensorInfo ********/
 
-TensorInfo::TensorInfo(runtime::DataType dtype, ffi::Shape shape) {
-  ObjectPtr<TensorInfoNode> n = ffi::make_object<TensorInfoNode>();
+TensorInfo::TensorInfo(DLDataType dtype, ffi::Shape shape) {
+  ffi::ObjectPtr<TensorInfoNode> n = ffi::make_object<TensorInfoNode>();
   n->dtype = dtype;
   n->shape = shape;
   this->data_ = std::move(n);
 }
 
-ObjectRef TensorInfoNode::AsJSON() const {
+ffi::ObjectRef TensorInfoNode::AsJSON() const {
   static ffi::String tag = "TENSOR";
-  ffi::String dtype = DLDataTypeToString(this->dtype);
-  ffi::Array<Integer> shape = support::AsArray(this->shape);
+  ffi::String dtype = ffi::DLDataTypeToString(this->dtype);
+  ffi::Array<int64_t> shape = support::AsArray(this->shape);
   return ffi::Array<ffi::Any>{tag, dtype, shape};
 }
 
-TensorInfo TensorInfo::FromJSON(const ObjectRef& json_obj) {
+TensorInfo TensorInfo::FromJSON(const ffi::ObjectRef& json_obj) {
   DLDataType dtype;
-  ffi::Array<Integer> shape;
+  ffi::Array<int64_t> shape;
   try {
     const ffi::ArrayObj* json_array = json_obj.as<ffi::ArrayObj>();
     TVM_FFI_ICHECK(json_array && json_array->size() == 3);
     // Load json[1] => dtype
     {
       ffi::String dtype_str = json_array->at(1).cast<ffi::String>();
-      dtype = StringToDLDataType(dtype_str);
+      dtype = ffi::StringToDLDataType(dtype_str);
     }
     // Load json[2] => shape
-    shape = AsIntArray(json_array->at(2).cast<ObjectRef>());
+    shape = AsIntArray(json_array->at(2).cast<ffi::ObjectRef>());
   } catch (const std::runtime_error& e) {  // includes tvm::Error and dmlc::Error
     TVM_FFI_THROW(ValueError) << "Unable to parse the JSON object: " << json_obj
                               << "\nThe error is: " << e.what();
   }
   std::vector<int64_t> s;
-  std::transform(shape.begin(), shape.end(), std::back_inserter(s),
-                 [](Integer i) { return i.IntValue(); });
-  return TensorInfo(DataType(dtype), ffi::Shape(s.begin(), s.end()));
+  std::transform(shape.begin(), shape.end(), std::back_inserter(s), [](int64_t i) { return i; });
+  return TensorInfo(dtype, ffi::Shape(s.begin(), s.end()));
 }
 
 /******** Repr ********/
 
-TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
-    .set_dispatch<TensorInfoNode>([](const ObjectRef& n, ReprPrinter* p) {
-      const auto* self = n.as<TensorInfoNode>();
-      TVM_FFI_ICHECK(self);
-      p->stream << "TensorInfo(\"" << self->dtype << "\", " << self->shape << ")";
-    });
+TVM_FFI_STATIC_INIT_BLOCK() {
+  namespace refl = tvm::ffi::reflection;
+  refl::TypeAttrDef<TensorInfoNode>().def(refl::type_attr::kRepr,
+                                          [](TensorInfo ti, ffi::Function fn_repr) -> ffi::String {
+                                            std::ostringstream os;
+                                            os << "TensorInfo(\"" << ti->dtype << "\", [";
+                                            bool first = true;
+                                            for (int64_t v : ti->shape) {
+                                              if (!first) os << ", ";
+                                              os << v;
+                                              first = false;
+                                            }
+                                            os << "])";
+                                            return os.str();
+                                          });
+}
 
 /******** FFI ********/
 TVM_FFI_STATIC_INIT_BLOCK() { TensorInfoNode::RegisterReflection(); }
@@ -170,10 +181,9 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def("s_tir.meta_schedule.ArgInfoFromPrimFunc", ArgInfo::FromPrimFunc)
       .def("s_tir.meta_schedule.ArgInfoFromEntryFunc", ArgInfo::FromEntryFunc)
       .def("s_tir.meta_schedule.ArgInfoFromJSON", ArgInfo::FromJSON)
-      .def("s_tir.meta_schedule.TensorInfo",
-           [](runtime::DataType dtype, ffi::Shape shape) -> TensorInfo {
-             return TensorInfo(dtype, shape);
-           });
+      .def("s_tir.meta_schedule.TensorInfo", [](DLDataType dtype, ffi::Shape shape) -> TensorInfo {
+        return TensorInfo(dtype, shape);
+      });
 }
 
 }  // namespace meta_schedule

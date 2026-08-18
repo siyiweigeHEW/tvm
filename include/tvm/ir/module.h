@@ -28,12 +28,12 @@
 #include <tvm/ffi/container/map.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ffi/string.h>
+#include <tvm/ir/cow.h>
 #include <tvm/ir/expr.h>
 #include <tvm/ir/function.h>
 #include <tvm/ir/global_info.h>
 #include <tvm/ir/source_map.h>
 #include <tvm/ir/type.h>
-#include <tvm/node/script_printer.h>
 
 #include <string>
 #include <unordered_map>
@@ -55,7 +55,7 @@ class IRModule;
  *  but we mutate the Module while optimizing programs.
  * \sa IRModule
  */
-class IRModuleNode : public Object {
+class IRModuleNode : public ffi::Object {
  public:
   /*! \brief A map from ids to all global functions. */
   ffi::Map<GlobalVar, BaseFunc> functions;
@@ -85,7 +85,7 @@ class IRModuleNode : public Object {
    * \code
    *
    *  void GetAttrExample(const IRModule& mod) {
-   *    auto value = f->GetAttr<Integer>("AttrKey", 0);
+   *    auto value = f->GetAttr<int64_t>("AttrKey", 0);
    *  }
    *
    * \endcode
@@ -240,11 +240,9 @@ class IRModuleNode : public Object {
    */
   TVM_DLL std::unordered_set<ffi::String> Imports() const;
 
-  TVM_OBJECT_ENABLE_SCRIPT_PRINTER();
-
   static constexpr TVMFFISEqHashKind _type_s_eq_hash_kind = kTVMFFISEqHashKindTreeNode;
 
-  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("ir.IRModule", IRModuleNode, Object);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("ir.IRModule", IRModuleNode, ffi::Object);
 
  private:
   friend class IRModule;
@@ -254,7 +252,7 @@ class IRModuleNode : public Object {
  * \brief Managed reference class to IRModuleNode.
  * \sa IRModuleNode
  */
-class IRModule : public ObjectRef {
+class IRModule : public ffi::ObjectRef {
  public:
   /*!
    * \brief constructor
@@ -273,11 +271,11 @@ class IRModule : public ObjectRef {
    * \brief constructor
    * \param n The object pointer.
    */
-  explicit IRModule(ObjectPtr<IRModuleNode> n) : ObjectRef(n) {}
+  explicit IRModule(ffi::ObjectPtr<IRModuleNode> n) : ffi::ObjectRef(n) {}
   /*!
    * \brief constructor with UnsafeInit
    */
-  explicit IRModule(ffi::UnsafeInit tag) : ObjectRef(tag) {}
+  explicit IRModule(ffi::UnsafeInit tag) : ffi::ObjectRef(tag) {}
   /*! \return mutable pointers to the node. */
   IRModuleNode* operator->() const {
     auto* ptr = get_mutable();
@@ -289,7 +287,7 @@ class IRModule : public ObjectRef {
    * \brief As for \p FromExprInContext, but assuming \p expr is bound to 'main' and no
    * imports.
    */
-  TVM_DLL static IRModule FromExpr(const RelaxExpr& expr,
+  TVM_DLL static IRModule FromExpr(const Expr& expr,
                                    const ffi::Map<GlobalVar, BaseFunc>& global_funcs = {});
 
   /*!

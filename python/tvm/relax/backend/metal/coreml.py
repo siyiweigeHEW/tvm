@@ -24,21 +24,20 @@ import tvm_ffi
 
 import tvm
 from tvm.contrib import coreml_runtime
-from tvm.contrib.xcode import compile_coreml
+from tvm.ir import Call, PrimType
 from tvm.relax import transform
 from tvm.relax.dpl.pattern import is_op, wildcard
 from tvm.relax.expr import (
     BindingBlock,
-    Call,
     Constant,
     Function,
-    PrimValue,
     SeqExpr,
     Var,
     VarBinding,
 )
-from tvm.relax.struct_info import PrimStructInfo, TensorStructInfo
 from tvm.relax.transform import PatternCheckContext
+from tvm.relax.type import TensorType
+from tvm.support.xcode import compile_coreml
 
 from ...expr_functor import PyExprVisitor, visitor
 from ..pattern_registry import get_patterns_with_prefix, register_patterns
@@ -169,7 +168,7 @@ def partition_for_coreml(mod):
     """
 
     patterns = get_patterns_with_prefix("coreml")
-    mod = transform.FoldDataflowBlockOutput()(mod)
+    mod = transform.CanonicalizeBindings()(mod)
     mod = transform.FuseOpsByPattern(patterns, bind_constants=True, annotate_codegen=False)(mod)
     mod = transform.MergeCompositeFunctions()(mod)
     return mod
@@ -282,7 +281,7 @@ _convert_map = {
 @visitor
 class CallNodeInfoCollector(PyExprVisitor):
     """
-    Collect PrimValue, Constant and attributes in the inner function
+    Collect Expr, Constant and attributes in the inner function
     """
 
     def __init__(self, op_name):
@@ -294,7 +293,7 @@ class CallNodeInfoCollector(PyExprVisitor):
     def visit_call_(self, call: Call) -> None:
         self.attrs.append(call.attrs)
         for arg in call.args:
-            if isinstance(arg, PrimValue):
+            if tvm.ir.is_prim_expr(arg):
                 self.primvals.append(arg)
             if isinstance(arg, Constant):
                 self.consts.append(arg)
@@ -311,8 +310,14 @@ class CodegenCoreML(PyExprVisitor):
     """
 
     def __init__(self, model_name, function):
-        import coremltools
-        from coremltools.models.neural_network import NeuralNetworkBuilder
+        try:
+            import coremltools
+            from coremltools.models.neural_network import NeuralNetworkBuilder
+        except ImportError as err:
+            raise ImportError(
+                "coremltools is required by the CoreML backend. "
+                "Install it with: pip install coremltools"
+            ) from err
 
         self.model_name = model_name
         self.function = function
@@ -348,21 +353,21 @@ class CodegenCoreML(PyExprVisitor):
 
     def visit_function_(self, op) -> None:
         for var in op.params:
-            name = var.name_hint
-            sinfo = var.struct_info
-            if isinstance(sinfo, TensorStructInfo):
-                shape = [int(v) for v in list(sinfo.shape)]
-            elif isinstance(sinfo, PrimStructInfo):
+            name = var.name
+            ty = var.ty
+            if isinstance(ty, TensorType):
+                shape = [int(v) for v in list(ty.shape)]
+            elif isinstance(ty, PrimType):
                 shape = []
             else:
-                raise Exception("Currently not supported: ", type(sinfo))
-            dtype = sinfo.dtype
+                raise Exception("Currently not supported: ", type(ty))
+            dtype = ty.dtype
             self.model_inputs_.append((name, shape, dtype))
 
         self.visit_expr(op.body)
 
     def visit_var_(self, var):
-        self.out_map[var] = [var.name_hint]
+        self.out_map[var] = [var.name]
         prev_binding_var = self.cur_binding_var
         self.cur_binding_var = var
         if var in self.var2val:
@@ -450,12 +455,12 @@ class CodegenCoreML(PyExprVisitor):
             input_desc = self.builder.spec.description.input
             input_desc[i].type.multiArrayType.dataType = FEATURE_TYPE_MAP[dtype]
 
-        output_dim = [int(n) for n in self.function.struct_info.ret.shape]
+        output_dim = [int(n) for n in self.function.ty.ret.shape]
 
         last_binding_var = self.function.body.blocks[0].bindings[-1].var
         self.builder.set_output(self.out_map[last_binding_var], [output_dim])
 
-        for i, dtype in enumerate([self.function.struct_info.ret.dtype]):
+        for i, dtype in enumerate([self.function.ty.ret.dtype]):
             assert dtype in FEATURE_TYPE_MAP
             output_desc = self.builder.spec.description.output
             output_desc[i].type.multiArrayType.dataType = FEATURE_TYPE_MAP[dtype]

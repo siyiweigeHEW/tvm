@@ -75,6 +75,12 @@ class Tensor(tvm_ffi.core.Tensor):
     how can we use TVM in existing project which might have their own array containers.
     """
 
+    # Keep the same instance layout as ``tvm_ffi.core.Tensor``: the FFI runtime
+    # registers ``ffi.Tensor`` to its base wrapper and rejects re-registration
+    # with a larger wrapper (a subclass without ``__slots__`` would add
+    # ``__dict__``/``__weakref__`` and grow ``__basicsize__``).
+    __slots__ = ()
+
     def __setitem__(self, in_slice, value):
         """Set ndarray value"""
         if (
@@ -266,7 +272,7 @@ class Tensor(tvm_ffi.core.Tensor):
 
         Parameters
         ----------
-        shape: Union[tvm.runtime.ShapeTuple, Sequence[typing.SupportsInt]]
+        shape: Union[tvm_ffi.Shape, Sequence[typing.SupportsInt]]
 
             The shape of the view.
 
@@ -288,8 +294,8 @@ class Tensor(tvm_ffi.core.Tensor):
 
         """
 
-        if not isinstance(shape, tvm.runtime.ShapeTuple):
-            shape = tvm.runtime.ShapeTuple([int(dim) for dim in shape])
+        if not isinstance(shape, tvm_ffi.Shape):
+            shape = tvm_ffi.Shape([int(dim) for dim in shape])
 
         if dtype is None:
             dtype = self.dtype
@@ -302,7 +308,7 @@ def empty(shape, dtype="float32", device=None, mem_scope=None):
 
     Parameters
     ----------
-    shape : Union[tvm.runtime.ShapeTuple, Sequence[typing.SupportsInt]]
+    shape : Union[tvm_ffi.Shape, Sequence[typing.SupportsInt]]
         The shape of the array.
 
     dtype : type or str
@@ -320,8 +326,8 @@ def empty(shape, dtype="float32", device=None, mem_scope=None):
         The array tvm supported.
     """
     device = device or cpu()
-    if not isinstance(shape, tvm.runtime.ShapeTuple):
-        shape = tvm.runtime.ShapeTuple([int(dim) for dim in shape])
+    if not isinstance(shape, tvm_ffi.Shape):
+        shape = tvm_ffi.Shape([int(dim) for dim in shape])
     dtype = tvm_ffi.dtype(dtype)
     arr = _ffi_api.TVMTensorAllocWithScope(shape, dtype, device, mem_scope)
     return arr
@@ -349,8 +355,31 @@ def tensor(arr, device=None, mem_scope=None):
     device = device or cpu()
 
     if not isinstance(arr, np.ndarray | Tensor):
-        arr = np.array(arr)
+        arr = np.asarray(arr)
     return empty(arr.shape, arr.dtype, device, mem_scope).copyfrom(arr)
+
+
+def device_from_target(target, index=None):
+    """Construct a runtime device from a compilation target.
+
+    Parameters
+    ----------
+    target : str or dict or tvm.target.Target
+        The compilation target whose device type should be used.
+
+    index : int, optional
+        The integer device index.
+
+    Returns
+    -------
+    dev : Device
+        The created device.
+    """
+    from tvm.target import Target  # pylint: disable=import-outside-toplevel
+
+    if not isinstance(target, Target):
+        target = Target(target)
+    return device(target.get_target_device_type(), index)
 
 
 def cpu(dev_id=0):

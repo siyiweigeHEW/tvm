@@ -36,7 +36,7 @@
 namespace tvm {
 
 /*!
- * Abstract label for an area of memory.
+ * \brief Abstract label for an area of memory.
  *
  * Currently uninterpreted and arbitrary. Likely to be replaced by a structured representation
  * of a memory pool in the future. Please try to use this alias instead of ffi::String to aid future
@@ -169,7 +169,7 @@ constexpr int kInvalidDeviceType = -1;
  * These operations are needed during device planning.
  */
 
-class VirtualDeviceNode : public AttrsNodeReflAdapter<VirtualDeviceNode> {
+class VirtualDeviceNode : public AttrsNode {
  private:
   /*!
    * \brief The \p DLDeviceType (represented as an int) of the virtual device. If \p target is
@@ -257,7 +257,7 @@ class VirtualDeviceNode : public AttrsNodeReflAdapter<VirtualDeviceNode> {
                 "The area of memory w.r.t. the virtual device where data is stored.",
                 refl::DefaultValue(""));
   }
-  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("target.VirtualDevice", VirtualDeviceNode, BaseAttrsNode);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("target.VirtualDevice", VirtualDeviceNode, AttrsNode);
 
   friend class VirtualDevice;
 };
@@ -265,7 +265,7 @@ class VirtualDeviceNode : public AttrsNodeReflAdapter<VirtualDeviceNode> {
 /*!
  * \brief Managed reference class to \p VirtualDeviceNode.
  */
-class VirtualDevice : public ObjectRef {
+class VirtualDevice : public ffi::ObjectRef {
  public:
   /*!
    * \brief Construct a virtual device.
@@ -277,8 +277,9 @@ class VirtualDevice : public ObjectRef {
    * \param memory_scope The memory scope w.r.t. the virtual device which holds data, or "" if
    * unconstrained.
    */
-  explicit VirtualDevice(int device_type_int = kInvalidDeviceType, int virtual_device_id = -1,
-                         Target target = {}, MemoryScope memory_scope = {});
+  TVM_DLL explicit VirtualDevice(int device_type_int = kInvalidDeviceType,
+                                 int virtual_device_id = -1, Target target = {},
+                                 MemoryScope memory_scope = {});
 
   /*! \brief Returns the unique fully unconstrained \p VirtualDevice. */
   static VirtualDevice FullyUnconstrained();
@@ -294,8 +295,8 @@ class VirtualDevice : public ObjectRef {
   static VirtualDevice ForDeviceType(int device_type, int virtual_device_id = -1) {
     return ForDeviceType(static_cast<DLDeviceType>(device_type), virtual_device_id);
   }
-  static VirtualDevice ForDeviceType(const Integer& device_type, int virtual_device_id = -1) {
-    return ForDeviceType(static_cast<int>(device_type->value), virtual_device_id);
+  static VirtualDevice ForDeviceType(int64_t device_type, int virtual_device_id = -1) {
+    return ForDeviceType(static_cast<int>(device_type), virtual_device_id);
   }
 
   /*! \brief Returns the \p VirtualDevice for \p device. */
@@ -331,15 +332,16 @@ class VirtualDevice : public ObjectRef {
    * \p lhs and \p rhs on all their constrained fields. Returns the null optional if no such
    * join exists, ie there's disagreement on at least one constrained field.
    */
-  static ffi::Optional<VirtualDevice> Join(const VirtualDevice& lhs, const VirtualDevice& rhs);
+  TVM_DLL static ffi::Optional<VirtualDevice> Join(const VirtualDevice& lhs,
+                                                   const VirtualDevice& rhs);
 
   /*!
    * \brief Returns the 'default' of \p lhs and \p rhs. The result will be \p lhs, except any
    * unconstrained fields in \p lhs will take their value from \p rhs. Always well-defined.
    */
-  static VirtualDevice Default(const VirtualDevice& lhs, const VirtualDevice& rhs);
+  TVM_DLL static VirtualDevice Default(const VirtualDevice& lhs, const VirtualDevice& rhs);
 
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(VirtualDevice, ObjectRef, VirtualDeviceNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(VirtualDevice, ffi::ObjectRef, VirtualDeviceNode);
 
   friend class VirtualDeviceCache;  // Private implementation helper.
 };
@@ -352,7 +354,7 @@ class VirtualDevice : public ObjectRef {
  *  - So we can assume \p VirtualDevices are pointer equal if and only if they are structurally
  * equal. This simplifies the unification of 'device domains' which are built on \p VirtualDevices.
  */
-class VirtualDeviceCache {
+class TVM_DLL VirtualDeviceCache {
  public:
   /*! \brief Returns the unique \p VirtualDevice representing given fields. */
   VirtualDevice Make(int device_type = kInvalidDeviceType, int virtual_device_id = -1,

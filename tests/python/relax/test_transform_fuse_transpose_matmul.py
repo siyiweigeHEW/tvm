@@ -27,7 +27,7 @@ from tvm.script import tirx as T
 
 
 def test_transform_fuse_transpose_matmul():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Before:
         @R.function
         def main(
@@ -40,9 +40,9 @@ def test_transform_fuse_transpose_matmul():
                 R.output(o)
             return o
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Expected:
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def NT_matmul(
             x: T.Buffer((T.int64(128), T.int64(256)), "float32"),
             w: T.Buffer((T.int64(128), T.int64(256)), "float32"),
@@ -65,9 +65,7 @@ def test_transform_fuse_transpose_matmul():
         ) -> R.Tensor((128, 128), dtype="float32"):
             cls = Expected
             with R.dataflow():
-                gv = R.call_tir(
-                    cls.NT_matmul, (x, w), out_sinfo=R.Tensor((128, 128), dtype="float32")
-                )
+                gv = R.call_tir(cls.NT_matmul, (x, w), out_ty=R.Tensor((128, 128), dtype="float32"))
                 R.output(gv)
             return gv
 
@@ -83,7 +81,7 @@ def test_transform_fuse_transpose_matmul():
 def test_transform_fuse_transpose_matmul_const():
     w = relax.const(np.random.uniform(-1e-3, 1e-3, (128, 256)), "float32")
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Before:
         @R.function
         def main(
@@ -95,9 +93,9 @@ def test_transform_fuse_transpose_matmul_const():
                 R.output(o)
             return o
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Expected:
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def NT_matmul(
             x: T.Buffer((T.int64(128), T.int64(256)), "float32"),
             w: T.Buffer((T.int64(128), T.int64(256)), "float32"),
@@ -118,9 +116,7 @@ def test_transform_fuse_transpose_matmul_const():
         def main(x: R.Tensor((128, 256), dtype="float32")) -> R.Tensor((128, 128), dtype="float32"):
             cls = Expected
             with R.dataflow():
-                gv = R.call_tir(
-                    cls.NT_matmul, (x, w), out_sinfo=R.Tensor((128, 128), dtype="float32")
-                )
+                gv = R.call_tir(cls.NT_matmul, (x, w), out_ty=R.Tensor((128, 128), dtype="float32"))
                 R.output(gv)
             return gv
 

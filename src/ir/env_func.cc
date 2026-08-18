@@ -33,16 +33,12 @@ using ffi::Any;
 using ffi::Function;
 using ffi::PackedArgs;
 
-TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
-    .set_dispatch<EnvFuncNode>([](const ObjectRef& node, ReprPrinter* p) {
-      auto* op = static_cast<const EnvFuncNode*>(node.get());
-      p->stream << "EnvFunc(" << op->name << ")";
-    });
+// Pattern A (RM): auto-default repr from reflection.
 
-ObjectPtr<Object> CreateEnvNode(const std::string& name) {
+ffi::ObjectPtr<ffi::Object> CreateEnvNode(const std::string& name) {
   auto f = tvm::ffi::Function::GetGlobal(name);
   TVM_FFI_ICHECK(f.has_value()) << "Cannot find global function \'" << name << '\'';
-  ObjectPtr<EnvFuncNode> n = ffi::make_object<EnvFuncNode>();
+  ffi::ObjectPtr<EnvFuncNode> n = ffi::make_object<EnvFuncNode>();
   n->func = *f;
   n->name = name;
   return n;

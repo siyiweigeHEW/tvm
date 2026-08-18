@@ -19,10 +19,8 @@
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/module.h>
-#include <tvm/relax/analysis.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/script/ir_builder/ir/ir.h>
-#include <tvm/tirx/function.h>
-#include <tvm/tirx/op.h>
 
 #include "./utils.h"
 
@@ -31,22 +29,42 @@ namespace script {
 namespace ir_builder {
 namespace ir {
 
+using tvm::script::ir_builder::details::Namer;
+
+TVM_STATIC_IR_FUNCTOR(Namer, vtable)
+    .set_dispatch<tvm::VarNode>([](const ffi::ObjectRef& node, ffi::String name) -> void {
+      VarNode* var = const_cast<VarNode*>(node.as<VarNode>());
+      var->name = name;
+    });
+
 IRModuleFrame IRModule() {
-  ObjectPtr<IRModuleFrameNode> n = ffi::make_object<IRModuleFrameNode>();
+  ffi::ObjectPtr<IRModuleFrameNode> n = ffi::make_object<IRModuleFrameNode>();
   n->global_var_map.clear();
   n->functions.clear();
   return IRModuleFrame(n);
 }
 
-inline relax::StructInfo GetGlobalVarStructInfo(const BaseFunc& func) {
-  if (func->struct_info_.defined()) {
-    return tvm::relax::GetStructInfo(func);
-  } else if (const auto* prim_func = func.as<tvm::tirx::PrimFuncNode>()) {
-    return tvm::relax::FuncStructInfo::OpaqueFunc(
-        tvm::relax::StructInfoFromType(prim_func->ret_type));
-  } else {
-    TVM_FFI_THROW(InternalError) << "Unsupported function type: " << func->GetTypeKey();
+// DeclFunction lives at the IR layer because an IRModule may host
+// heterogeneous function kinds (e.g. relax::Function, tirx::PrimFunc).
+// To derive the GlobalVar's ty without coupling the IR layer to
+// any specific dialect, dispatch is keyed by the function's type-key:
+// each dialect registers its own handler that maps a function of that
+// type to the appropriate ty.
+inline ffi::Optional<Type> GetGlobalVarType(const BaseFunc& func) {
+  if (!func->ty.IsMissing()) {
+    return func->ty;
   }
+  // Registry: "script.ir_builder.decl_function.<type-key>" — per-function-kind
+  // handler that derives the GlobalVar ty from the function signature.
+  // Grep hint: grep -rn 'script.ir_builder.decl_function.' src/
+  const std::string key = "script.ir_builder.decl_function." + func->GetTypeKey();
+  if (auto fn = tvm::ffi::Function::GetGlobal(key)) {
+    ffi::Optional<ffi::ObjectRef> result = (*fn)(func).cast<ffi::Optional<ffi::ObjectRef>>();
+    if (result.has_value()) {
+      return result.value().as_or_throw<Type>();
+    }
+  }
+  return std::nullopt;
 }
 
 GlobalVar DeclFunction(const ffi::String& func_name, const BaseFunc& func_signature) {
@@ -54,18 +72,12 @@ GlobalVar DeclFunction(const ffi::String& func_name, const BaseFunc& func_signat
   TVM_FFI_CHECK(!frame->global_var_map.count(func_name), ValueError)
       << "function " << func_name << " already exists";
 
-  auto gvar_type = [&]() -> Type {
-    if (auto prim_func = func_signature.as<tirx::PrimFuncNode>()) {
-      ffi::Array<Type> arg_types =
-          prim_func->params.Map([](const auto& var) { return GetType(var); });
-      return FuncType(arg_types, prim_func->ret_type);
-    }
-
-    return {};
-  }();
-
   GlobalVar gv = GlobalVar(func_name);
-  gv->struct_info_ = GetGlobalVarStructInfo(func_signature);
+  if (auto ty = GetGlobalVarType(func_signature)) {
+    gv->ty = ty.value();
+  } else {
+    TVM_FFI_THROW(InternalError) << "Unsupported function type: " << func_signature->GetTypeKey();
+  }
   TVM_FFI_CHECK(frame->functions.find(gv) == frame->functions.end(), ValueError)
       << "function " << func_name << " has already been defined.";
   frame->global_var_map.Set(func_name, gv);
@@ -80,7 +92,11 @@ void DefFunction(const ffi::String& func_name, const BaseFunc& func) {
       << "function " << func_name << " does not exist, please declare it first.";
   const GlobalVar& gv = (*it).second;
   frame->functions.Set(gv, func);
-  gv->struct_info_ = GetGlobalVarStructInfo(func);
+  if (auto ty = GetGlobalVarType(func)) {
+    gv->ty = ty.value();
+  } else {
+    TVM_FFI_THROW(InternalError) << "Unsupported function type: " << func->GetTypeKey();
+  }
 }
 
 void ModuleAttrs(ffi::Map<ffi::String, Any> attrs, bool allow_overwrite) {
@@ -94,24 +110,24 @@ void ModuleAttrs(ffi::Map<ffi::String, Any> attrs, bool allow_overwrite) {
   }
 }
 
-ffi::Optional<ObjectRef> ModuleGetAttr(const ffi::String& key) {
+ffi::Optional<ffi::ObjectRef> ModuleGetAttr(const ffi::String& key) {
   if (IRBuilder::IsInScope()) {
     IRModuleFrame frame = FindModuleFrame();
     if (frame->attrs.find(key) != frame->attrs.end()) {
-      return frame->attrs[key].cast<ObjectRef>();
+      return frame->attrs[key].cast<ffi::ObjectRef>();
     }
   }
   return std::nullopt;
 }
 
-void ModuleSetAttr(const ffi::String& key, const ffi::Optional<ObjectRef>& value,
+void ModuleSetAttr(const ffi::String& key, const ffi::Optional<ffi::ObjectRef>& value,
                    bool allow_override) {
   if (IRBuilder::IsInScope()) {
     IRModuleFrame frame = FindModuleFrame();
-    if (!allow_override && frame->attrs.find(key) != frame->attrs.end() && value.defined()) {
+    if (!allow_override && frame->attrs.find(key) != frame->attrs.end() && value.has_value()) {
       TVM_FFI_THROW(ValueError) << "Duplicate module attr " << key;
     }
-    if (value.defined()) {
+    if (value.has_value()) {
       frame->attrs.Set(key, value.value());
     } else {
       frame->attrs.erase(key);
@@ -144,11 +160,11 @@ VDevice LookupVDevice(ffi::String target_kind, int device_index) {
       TVM_FFI_THROW(ValueError) << "The target VDevice in the GlobalInfos was not found.";
     }
     if (target_kind == "vdevice") {
-      return Downcast<VDevice>(vdevices[device_index]);
+      return vdevices[device_index].as_or_throw<VDevice>();
     }
     int count = 0;
     for (auto vdevice : vdevices) {
-      auto vdev = Downcast<VDevice>(vdevice);
+      auto vdev = vdevice.as_or_throw<VDevice>();
       if (vdev->target->kind->name == target_kind) {
         if (count == device_index) {
           return vdev;
@@ -161,6 +177,14 @@ VDevice LookupVDevice(ffi::String target_kind, int device_index) {
   return VDevice();
 }
 
+bool LookupName(const ffi::String& name) {
+  if (IRBuilder::IsInScope()) {
+    IRModuleFrame frame = FindModuleFrame();
+    return frame->global_var_map.find(name) != frame->global_var_map.end();
+  }
+  return false;
+}
+
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()
@@ -171,7 +195,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def("script.ir_builder.ir.ModuleGetAttr", ModuleGetAttr)
       .def("script.ir_builder.ir.ModuleSetAttr", ModuleSetAttr)
       .def("script.ir_builder.ir.ModuleGlobalInfos", ModuleGlobalInfos)
-      .def("script.ir_builder.ir.LookupVDevice", LookupVDevice);
+      .def("script.ir_builder.ir.LookupVDevice", LookupVDevice)
+      .def("script.ir_builder.ir.LookupName", LookupName);
 }
 
 }  // namespace ir

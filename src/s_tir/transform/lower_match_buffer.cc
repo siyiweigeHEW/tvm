@@ -23,7 +23,9 @@
  */
 
 #include <tvm/arith/analyzer.h>
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/s_tir/transform.h>
 #include <tvm/tirx/function.h>
 #include <tvm/tirx/op.h>
@@ -40,7 +42,10 @@ class MatchBufferLower : public StmtExprMutator {
   explicit MatchBufferLower(const PrimFunc& func) {
     for (const Var& param : func->params) {
       // Mark input var as const variable.
-      if (!param.dtype().is_handle()) var_map_.Set(param, param);
+      auto prim_type = param->ty.as<PrimType>();
+      if (prim_type) {
+        var_map_.Set(param, param.as_or_throw<PrimExpr>());
+      }
     }
   }
 
@@ -54,15 +59,15 @@ class MatchBufferLower : public StmtExprMutator {
     // (e.g., remapping elem_offset). We need match_buffers_ to also
     // contain the remapped buffer keys for lookups in the body.
     // Snapshot current match_buffers_ keys before base visit.
-    std::vector<Buffer> orig_buffers;
+    std::vector<BufferVar> orig_buffers;
     for (const auto& kv : match_buffers_) {
       orig_buffers.push_back(kv.first);
     }
     Stmt stmt = StmtExprMutator ::VisitStmt_(op);
     // Add remapped buffer keys to match_buffers_
-    for (const Buffer& orig_buf : orig_buffers) {
+    for (const BufferVar& orig_buf : orig_buffers) {
       if (auto remap_it = buffer_remap_.find(orig_buf); remap_it != buffer_remap_.end()) {
-        Buffer remapped = (*remap_it).second;
+        BufferVar remapped = (*remap_it).second;
         if (!match_buffers_.count(remapped)) {
           match_buffers_.Set(remapped, match_buffers_[orig_buf]);
         }
@@ -87,11 +92,11 @@ class MatchBufferLower : public StmtExprMutator {
   }
 
   Stmt VisitStmt_(const ForNode* op) final {
-    analyzer_.Bind(op->loop_var, Range::FromMinExtent(op->min, op->extent));
+    analyzer_->Bind(op->loop_var, Range::FromMinExtent(op->min, op->extent));
     return StmtExprMutator::VisitStmt_(op);
   }
 
-  PrimExpr VisitExpr_(const VarNode* op) final {
+  Expr VisitExpr_(const VarNode* op) final {
     Var v = ffi::GetRef<Var>(op);
     auto it = var_map_.find(v);
     if (it != var_map_.end()) {
@@ -101,9 +106,22 @@ class MatchBufferLower : public StmtExprMutator {
     }
   }
 
+  Expr VisitExpr_(const CallNode* op) final {
+    if (op->op.same_as(builtin::buffer_data()) && op->args.size() == 1) {
+      if (auto var = op->args[0].as<Var>();
+          var.has_value() && var.value()->ty.as<BufferTypeNode>()) {
+        auto it = match_buffers_.find(BufferVar(var.value()));
+        if (it != match_buffers_.end()) {
+          return (*it).second->buffer.data();
+        }
+      }
+    }
+    return StmtExprMutator::VisitExpr_(op);
+  }
+
   Stmt VisitStmt_(const BufferStoreNode* op) final {
     // Save the original buffer before base class mutation may remap it
-    Buffer orig_buffer = op->buffer;
+    BufferVar orig_buffer = op->buffer;
     Stmt stmt = StmtExprMutator::VisitStmt_(op);
     op = stmt.as<BufferStoreNode>();
     TVM_FFI_ICHECK(op != nullptr);
@@ -113,22 +131,22 @@ class MatchBufferLower : public StmtExprMutator {
     if (it == match_buffers_.end()) {
       return stmt;
     } else {
-      const Buffer& buffer = (*it).first;
+      const BufferVar& buffer = (*it).first;
       const BufferRegion& source = (*it).second;
 
       auto n = CopyOnWrite(op);
       n->indices = ConvertIndices(MatchBufferRegion(buffer, source), op->indices);
       n->buffer = source->buffer;
-      TVM_FFI_ICHECK(!op->predicate.defined())
+      TVM_FFI_ICHECK(!op->predicate.has_value())
           << "Predicated buffer store is not currently supported in lower match buffer pass.";
       return Stmt(n);
     }
   }
 
-  PrimExpr VisitExpr_(const BufferLoadNode* op) final {
+  Expr VisitExpr_(const BufferLoadNode* op) final {
     // Save the original buffer before base class mutation may remap it
-    Buffer orig_buffer = op->buffer;
-    PrimExpr expr = StmtExprMutator::VisitExpr_(op);
+    BufferVar orig_buffer = op->buffer;
+    PrimExpr expr = StmtExprMutator::VisitExpr_(op).as_or_throw<PrimExpr>();
     op = expr.as<BufferLoadNode>();
     TVM_FFI_ICHECK(op != nullptr);
 
@@ -136,17 +154,17 @@ class MatchBufferLower : public StmtExprMutator {
     if (it == match_buffers_.end()) {
       return expr;
     } else {
-      const Buffer& buffer = (*it).first;
+      const BufferVar& buffer = (*it).first;
       const BufferRegion& source = (*it).second;
       ffi::Array<PrimExpr> indices = ConvertIndices(MatchBufferRegion(buffer, source), op->indices);
-      TVM_FFI_ICHECK(!op->predicate.defined())
+      TVM_FFI_ICHECK(!op->predicate.has_value())
           << "Predicated buffer load is not currently supported in lower match buffer pass.";
       return BufferLoad(source->buffer, indices);
     }
   }
 
   BufferRegion VisitBufferRegion(const BufferRegion& buffer_region) {
-    const Buffer& buffer = buffer_region->buffer;
+    const BufferVar& buffer = buffer_region->buffer;
     auto it = match_buffers_.find(buffer);
     if (it == match_buffers_.end()) {
       return buffer_region;
@@ -160,9 +178,9 @@ class MatchBufferLower : public StmtExprMutator {
  private:
   void CheckAndUpdateVarMap(const MatchBufferRegion& match_buffer) {
     // Step.1. Check
-    const Buffer& buffer = match_buffer->buffer;
+    const BufferVar& buffer = match_buffer->buffer;
     const BufferRegion& source = VisitBufferRegion(match_buffer->source);
-    const Buffer& source_buffer = source->buffer;
+    const BufferVar& source_buffer = source->buffer;
 
     // Step.1.1. Check scope & dtype
     TVM_FFI_ICHECK_EQ(buffer.scope(), source_buffer.scope())
@@ -180,17 +198,14 @@ class MatchBufferLower : public StmtExprMutator {
     }
     if (is_zero(buffer->elem_offset)) {
       TVM_FFI_ICHECK(is_zero(source_buffer->elem_offset))
-          << "Trying to bind a Buffer with offset into one without offset "
+          << "Trying to bind a BufferVar with offset into one without offset "
           << " required elem_offset=" << buffer->elem_offset
           << ", provided elem_offset=" << source_buffer->elem_offset;
     }
 
     // Step.2. Update
     match_buffers_.Set(buffer, source);
-    // Step.2.1. Update buffer data
-    Bind(buffer->data, source_buffer->data, buffer->name + ".data");
-
-    // Step.2.2. Update element offset
+    // Step.2.1. Update element offset
     // We use the ElemOffset method to avoid duplicating the index calculation.
     {
       ffi::Array<PrimExpr> indices;
@@ -201,16 +216,16 @@ class MatchBufferLower : public StmtExprMutator {
 
       ffi::Array<PrimExpr> buffer_start_indices = source_buffer->ElemOffset(indices);
       if (buffer_start_indices.size() == 1) {
-        Bind(buffer->elem_offset, buffer_start_indices[0], buffer->name + ".elem_offset");
+        Bind(buffer->elem_offset, buffer_start_indices[0], buffer.name() + ".elem_offset");
         TVM_FFI_ICHECK(
-            analyzer_.CanProve(truncmod(buffer->elem_offset, buffer->offset_factor) == 0))
+            analyzer_->CanProve(truncmod(buffer->elem_offset, buffer->offset_factor) == 0))
             << "The source elem_offset " << buffer_start_indices[0]
             << " does not satisfy the offset_factor " << buffer->offset_factor << ".";
       } else {
         // Non-zero elem_offset is ill-defined for non-flat memory.
         // If needed in the future, will require `ffi::Array<PrimExpr>
         // elem_offsets`, with one offset for each flattened index.
-        Bind(buffer->elem_offset, make_const(buffer->elem_offset.dtype(), 0));
+        Bind(buffer->elem_offset, IntImm(buffer->elem_offset.ty(), 0));
       }
     }
 
@@ -221,17 +236,17 @@ class MatchBufferLower : public StmtExprMutator {
     if (!buffer->strides.empty()) {
       TVM_FFI_ICHECK_EQ(buffer->strides.size(), buffer->shape.size());
       if (source_buffer->strides.empty()) {
-        PrimExpr stride = make_const(buffer->strides.back().dtype(), 1);
+        PrimExpr stride = MakeConst(buffer->strides.back().ty(), 1);
         for (size_t i = buffer->shape.size(); i > 0; --i) {
           const PrimExpr& shape = source_buffer->shape[i - 1 + offset];
-          Bind(buffer->strides[i - 1], stride, buffer->name + ".strides_" + std::to_string(i - 1));
+          Bind(buffer->strides[i - 1], stride, buffer.name() + ".strides_" + std::to_string(i - 1));
           stride *= shape;
         }
       } else {
         TVM_FFI_ICHECK_EQ(buffer->shape.size() + offset, source_buffer->strides.size());
         for (size_t i = buffer->shape.size(); i > 0; --i) {
           const PrimExpr& stride = source_buffer->strides[i - 1 + offset];
-          Bind(buffer->strides[i - 1], stride, buffer->name + ".strides_" + std::to_string(i - 1));
+          Bind(buffer->strides[i - 1], stride, buffer.name() + ".strides_" + std::to_string(i - 1));
         }
       }
     }
@@ -239,28 +254,35 @@ class MatchBufferLower : public StmtExprMutator {
     // Step 2.4. Check and update shape
     for (size_t i = 0; i < buffer->shape.size(); ++i) {
       const Range& range = source->region[i + offset];
-      Bind(buffer->shape[i], range->extent, buffer->name + ".shape_" + std::to_string(i));
+      Bind(buffer->shape[i], range->extent, buffer.name() + ".shape_" + std::to_string(i));
     }
   }
 
-  void Bind(const PrimExpr& arg, PrimExpr value, const std::string& arg_name = "argument") {
-    if (arg.dtype() != value.dtype()) {
-      if (arg.dtype().is_int() && value.dtype().is_int() &&
-          arg.dtype().lanes() == value.dtype().lanes()) {
-        value = cast(arg.dtype(), value);
+  void Bind(const Expr& arg, Expr value, const std::string& arg_name = "argument") {
+    auto arg_prim = arg.as<PrimExpr>();
+    auto value_prim = value.as<PrimExpr>();
+    if (arg_prim && value_prim && arg_prim.value().ty() != value_prim.value().ty()) {
+      PrimType arg_ty = arg_prim.value().ty();
+      PrimType value_ty = value_prim.value().ty();
+      bool same_lanes = arg_ty.lanes() == value_ty.lanes();
+      if (arg_ty.MatchesCode(DLDataTypeCode::kDLInt) &&
+          value_ty.MatchesCode(DLDataTypeCode::kDLInt) && same_lanes) {
+        value = cast(arg_ty, value_prim.value());
       } else {
-        TVM_FFI_ICHECK_EQ(arg.dtype(), value.dtype())
-            << "The data type mismatched: " << arg->dtype << " vs. " << value->dtype;
+        TVM_FFI_ICHECK_EQ(arg_ty->dtype, value_ty->dtype)
+            << "The data type mismatched: " << arg_ty->dtype << " vs. " << value_ty->dtype;
       }
     }
     // Handle recursive case
     value = Substitute(std::move(value), var_map_);
     if (arg->IsInstance<VarNode>()) {
-      Var v = Downcast<Var>(arg);
+      Var v = arg.as_or_throw<Var>();
       auto it = var_map_.find(v);
       if (it == var_map_.end()) {
         var_map_.Set(v, value);
-        analyzer_.Bind(v, value);
+        if (auto prim_value = value.as<PrimExpr>()) {
+          analyzer_->Bind(v, prim_value.value());
+        }
       } else {
         AssertBinding((*it).second, value, arg_name);
       }
@@ -269,17 +291,24 @@ class MatchBufferLower : public StmtExprMutator {
     }
   }
 
-  void AssertBinding(const PrimExpr& lhs, const PrimExpr& rhs,
-                     const std::string& arg_name = "argument") {
-    TVM_FFI_ICHECK(analyzer_.CanProve(lhs == rhs)) << "The buffer match constraint for " << arg_name
-                                                   << " unmet: " << lhs << "==" << rhs << ".";
+  void AssertBinding(const Expr& lhs, const Expr& rhs, const std::string& arg_name = "argument") {
+    if (auto lhs_prim = lhs.as<PrimExpr>()) {
+      PrimExpr rhs_prim = rhs.as_or_throw<PrimExpr>();
+      TVM_FFI_ICHECK(analyzer_->CanProve(lhs_prim.value() == rhs_prim))
+          << "The buffer match constraint for " << arg_name << " unmet: " << lhs << "==" << rhs
+          << ".";
+    } else {
+      TVM_FFI_ICHECK(ffi::StructuralEqual()(lhs, rhs))
+          << "The buffer match constraint for " << arg_name << " unmet: " << lhs << "==" << rhs
+          << ".";
+    }
   }
 
  private:
-  /*! \brief Buffer region mapping. */
-  ffi::Map<Buffer, BufferRegion> match_buffers_;
+  /*! \brief BufferVar region mapping. */
+  ffi::Map<BufferVar, BufferRegion> match_buffers_;
   /*! \brief Var mapping for buffer signature (data, strides, element_offset, etc.) */
-  ffi::Map<Var, PrimExpr> var_map_;
+  ffi::Map<Var, Expr> var_map_;
   /*! \brief The analyzer */
   arith::Analyzer analyzer_;
 };

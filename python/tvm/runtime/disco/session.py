@@ -26,13 +26,11 @@ from collections.abc import Callable, Sequence
 from typing import Any, Optional, Union
 
 import numpy as np
-from tvm_ffi import get_global_func, register_global_func, register_object
+from tvm_ffi import Object, Shape, get_global_func, register_global_func, register_object
 
 from .._tensor import Tensor
 from .._tensor import tensor as _as_Tensor
-from ..container import ShapeTuple
 from ..device import Device
-from ..object import Object
 from . import _ffi_api, process_pool  # pylint: disable=unused-import
 
 
@@ -80,6 +78,10 @@ class DRef(Object):
 class DPackedFunc(DRef):
     """A PackedFunc in a Disco session."""
 
+    # tvm_ffi Object subclasses cannot store Python attributes by default
+    # (the metaclass sets `__slots__ = ()`); list the field(s) we store here.
+    __slots__ = ("session",)
+
     def __init__(self, dref: DRef, session: "Session") -> None:
         self.__move_handle_from__(dref)
         self.session = session
@@ -90,6 +92,10 @@ class DPackedFunc(DRef):
 
 class DModule(DRef):
     """A Module in a Disco session."""
+
+    # tvm_ffi Object subclasses cannot store Python attributes by default
+    # (the metaclass sets `__slots__ = ()`); list the field(s) we store here.
+    __slots__ = ("session",)
 
     def __init__(self, dref: DRef, session: "Session") -> None:
         self.__move_handle_from__(dref)
@@ -105,8 +111,13 @@ class Session(Object):
     """A Disco interactive session. It allows users to interact with the Disco command queue with
     various PackedFunc calling convention."""
 
+    # tvm_ffi Object subclasses cannot store Python attributes by default
+    # (the metaclass sets `__slots__ = ()`); list the fields we store here:
+    # the method-lookup cache and the lazily bound import helper.
+    __slots__ = ("_cache", "_import_python_module")
+
     def _get_cached_method(self, name: str) -> Callable:
-        if "_cache" not in self.__dict__:
+        if not hasattr(self, "_cache"):
             cache = self._cache = {}  # pylint: disable=attribute-defined-outside-init
         else:
             cache = self._cache
@@ -153,7 +164,7 @@ class Session(Object):
 
         """
         func = self._get_cached_method("runtime.disco.empty")
-        return func(ShapeTuple(shape), dtype, device, worker0_only, in_group)
+        return func(Shape(shape), dtype, device, worker0_only, in_group)
 
     def shutdown(self):
         """Shut down the Disco session"""
@@ -326,7 +337,7 @@ class Session(Object):
             The device IDs to be used by the underlying communication library.
         """
         assert ccl in ("nccl", "rccl"), f"Unsupported CCL backend: {ccl}"
-        _ffi_api.SessionInitCCL(self, ccl, ShapeTuple(device_ids))  # type: ignore # pylint: disable=no-member
+        _ffi_api.SessionInitCCL(self, ccl, Shape(device_ids))  # type: ignore # pylint: disable=no-member
         self._clear_ipc_memory_pool()
 
     def broadcast(
@@ -497,7 +508,7 @@ class Session(Object):
         """
         if op not in REDUCE_OPS:
             raise ValueError(f"Unsupported reduce op: {op}. Available ops are: {REDUCE_OPS.keys()}")
-        op = ShapeTuple([REDUCE_OPS[op]])
+        op = Shape([REDUCE_OPS[op]])
         func = self._get_cached_method("runtime.disco.allreduce")
         func(src, op, in_group, dst)
 

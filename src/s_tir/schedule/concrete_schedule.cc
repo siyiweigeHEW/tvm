@@ -18,22 +18,24 @@
  */
 #include "./concrete_schedule.h"
 
+#include <tvm/ffi/cast.h>
+#include <tvm/runtime/logging.h>
+
 #include <random>
 
 namespace tvm {
 namespace s_tir {
 using namespace tvm::tirx;
 
-Schedule Schedule::Concrete(IRModule mod, support::LinearCongruentialEngine::TRandState seed,
-                            int debug_mask, ScheduleErrorRenderLevel error_render_level,
-                            bool enable_check) {
-  ObjectPtr<ConcreteScheduleNode> n = ffi::make_object<ConcreteScheduleNode>();
+Schedule Schedule::Concrete(IRModule mod, LinearCongruentialEngine::TRandState seed, int debug_mask,
+                            ScheduleErrorRenderLevel error_render_level, bool enable_check) {
+  ffi::ObjectPtr<ConcreteScheduleNode> n = ffi::make_object<ConcreteScheduleNode>();
   n->state_ = ScheduleState(mod, debug_mask, enable_check);
   n->error_render_level_ = error_render_level;
   n->symbol_table_ = {};
-  n->analyzer_ = std::make_unique<arith::Analyzer>();
+  n->analyzer_ = arith::Analyzer();
   n->Seed(seed);
-  GlobalVar gv = NullValue<GlobalVar>();
+  GlobalVar gv;
   if (FindEntryFunc(mod, &gv) != nullptr) {
     n->func_working_on_ = gv;
   } else {
@@ -50,14 +52,14 @@ class ScheduleCopier {
   template <class K, class V>
   using UMap = std::unordered_map<K, V>;
   template <class K, class V>
-  using SMap = std::unordered_map<K, V, ObjectPtrHash, ObjectPtrEqual>;
+  using SMap = std::unordered_map<K, V, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>;
 
  public:
   static void Copy(const ConcreteScheduleNode* self, ScheduleState* new_state,
                    TSymbolTable* new_symbol_table) {
     const ScheduleState& src_state = self->state_;
     ScheduleCopier copier(src_state);
-    ObjectPtr<ScheduleStateNode> n = ffi::make_object<ScheduleStateNode>();
+    ffi::ObjectPtr<ScheduleStateNode> n = ffi::make_object<ScheduleStateNode>();
     n->mod = src_state->mod;
     n->block_info = copier.Copy(src_state->block_info);
     n->stmt2ref = copier.Copy(src_state->stmt2ref);
@@ -129,9 +131,9 @@ class ScheduleCopier {
     return result;
   }
 
-  /*! \brief Copy SMap<Buffer, ffi::Array<StmtSRef>> */
-  SMap<Buffer, ffi::Array<StmtSRef>> Copy(const SMap<Buffer, ffi::Array<StmtSRef>>& map) {
-    SMap<Buffer, ffi::Array<StmtSRef>> result;
+  /*! \brief Copy SMap<BufferVar, ffi::Array<StmtSRef>> */
+  SMap<BufferVar, ffi::Array<StmtSRef>> Copy(const SMap<BufferVar, ffi::Array<StmtSRef>>& map) {
+    SMap<BufferVar, ffi::Array<StmtSRef>> result;
     result.reserve(map.size());
     for (const auto& kv : map) {
       result[kv.first] = Copy(kv.second);
@@ -146,7 +148,7 @@ class ScheduleCopier {
       const StmtSRef& old_sref = kv.first;
       const SBlockInfo& old_info = kv.second;
       SBlockInfo new_info = old_info;
-      ObjectPtr<SBlockScopeNode> scope = ffi::make_object<SBlockScopeNode>();
+      ffi::ObjectPtr<SBlockScopeNode> scope = ffi::make_object<SBlockScopeNode>();
       scope->src2deps = Copy(old_info.scope->src2deps);
       scope->dst2deps = Copy(old_info.scope->dst2deps);
       scope->buffer_writers = Copy(old_info.scope->buffer_writers);
@@ -172,7 +174,7 @@ class ScheduleCopier {
   TSymbolTable Copy(const TSymbolTable& tab) {
     TSymbolTable result;
     for (const auto& kv : tab) {
-      ObjectRef entry = kv.second;
+      ffi::ObjectRef entry = kv.second;
       if (const auto* sref = entry.as<StmtSRefNode>()) {
         entry = Copy(sref);
       }
@@ -195,11 +197,11 @@ void ConcreteScheduleNode::Copy(ScheduleState* new_state, TSymbolTable* new_symb
 }
 
 Schedule ConcreteScheduleNode::Copy() {
-  ObjectPtr<ConcreteScheduleNode> n = ffi::make_object<ConcreteScheduleNode>();
+  ffi::ObjectPtr<ConcreteScheduleNode> n = ffi::make_object<ConcreteScheduleNode>();
   n->func_working_on_ = this->func_working_on_;
   n->error_render_level_ = this->error_render_level_;
   ConcreteScheduleNode::Copy(&n->state_, &n->symbol_table_);
-  n->analyzer_ = std::make_unique<arith::Analyzer>();  // new analyzer needed because it is stateful
+  n->analyzer_ = arith::Analyzer();  // new analyzer needed because it is stateful
   n->rand_state_ = ForkSeed();
   return Schedule(std::move(n));
 }
@@ -226,17 +228,17 @@ Schedule ConcreteScheduleNode::Copy() {
 
 /******** Schedule: Schedule: Sampling ********/
 
-void ConcreteScheduleNode::Seed(support::LinearCongruentialEngine::TRandState seed) {
-  this->rand_state_ = support::LinearCongruentialEngine::NormalizeSeed(seed);
+void ConcreteScheduleNode::Seed(LinearCongruentialEngine::TRandState seed) {
+  this->rand_state_ = LinearCongruentialEngine::NormalizeSeed(seed);
 }
 
-support::LinearCongruentialEngine::TRandState ConcreteScheduleNode::ForkSeed() {
-  return support::LinearCongruentialEngine(&rand_state_).ForkSeed();
+LinearCongruentialEngine::TRandState ConcreteScheduleNode::ForkSeed() {
+  return LinearCongruentialEngine(&rand_state_).ForkSeed();
 }
 
-ExprRV ConcreteScheduleNode::SampleCategorical(const ffi::Array<Integer>& candidates,
+ExprRV ConcreteScheduleNode::SampleCategorical(const ffi::Array<int64_t>& candidates,
                                                const ffi::Array<FloatImm>& probs,
-                                               ffi::Optional<Integer> decision) {
+                                               ffi::Optional<int64_t> decision) {
   TVM_TIR_SCHEDULE_BEGIN();
   return CreateRV(s_tir::SampleCategorical(&this->rand_state_, candidates, probs, &decision));
   TVM_TIR_SCHEDULE_END("sample-categorical", this->error_render_level_);
@@ -245,7 +247,7 @@ ExprRV ConcreteScheduleNode::SampleCategorical(const ffi::Array<Integer>& candid
 
 ffi::Array<ExprRV> ConcreteScheduleNode::SamplePerfectTile(
     const LoopRV& loop_rv, int n, int max_innermost_factor,
-    ffi::Optional<ffi::Array<Integer>> decision) {
+    ffi::Optional<ffi::Array<int64_t>> decision) {
   TVM_TIR_SCHEDULE_BEGIN();
   // use None RV object to denotes auto-infer tile factors.
   return CreateRV(s_tir::SamplePerfectTile(&this->rand_state_, this->GetSRef(loop_rv), n,
@@ -257,7 +259,7 @@ ffi::Array<ExprRV> ConcreteScheduleNode::SamplePerfectTile(
 
 ffi::Array<ExprRV> ConcreteScheduleNode::SamplePartitionedTile(
     const LoopRV& loop_rv, int n, int partition_pos, int innerpart_factor,
-    ffi::Optional<ffi::Array<Integer>> decision) {
+    ffi::Optional<ffi::Array<int64_t>> decision) {
   TVM_TIR_SCHEDULE_BEGIN();
   return CreateRV(s_tir::SamplePartitionedTile(&this->rand_state_, this->GetSRef(loop_rv), n,
                                                partition_pos, innerpart_factor, &decision));
@@ -266,7 +268,7 @@ ffi::Array<ExprRV> ConcreteScheduleNode::SamplePartitionedTile(
 }
 
 LoopRV ConcreteScheduleNode::SampleComputeLocation(const SBlockRV& block_rv,
-                                                   ffi::Optional<Integer> decision) {
+                                                   ffi::Optional<int64_t> decision) {
   TVM_TIR_SCHEDULE_BEGIN();
   return CreateRV<LoopRV>(
       s_tir::SampleComputeLocation(state_, &this->rand_state_, this->GetSRef(block_rv), &decision));
@@ -290,7 +292,7 @@ SBlockRV ConcreteScheduleNode::GetSBlock(const ffi::String& name,
     }
 
     IRModule mod() const final { return mod_; }
-    ffi::Array<ObjectRef> LocationsOfInterest() const final {
+    ffi::Array<ffi::ObjectRef> LocationsOfInterest() const final {
       return {blocks_.begin(), blocks_.end()};
     }
 
@@ -314,7 +316,7 @@ SBlockRV ConcreteScheduleNode::GetSBlock(const ffi::String& name,
     IRModule mod_;
     ffi::Array<SBlock> blocks_;
   };
-  GlobalVar gv = NullValue<GlobalVar>();
+  GlobalVar gv;
   if (func_name.has_value()) {
     gv = state_->mod->GetGlobalVar(func_name.value());
   } else if (func_working_on_.has_value()) {
@@ -414,7 +416,7 @@ class NotSingleInferFactorError : public ScheduleError {
   }
 
   IRModule mod() const final { return mod_; }
-  ffi::Array<ObjectRef> LocationsOfInterest() const final { return {}; }
+  ffi::Array<ffi::ObjectRef> LocationsOfInterest() const final { return {}; }
 
   IRModule mod_;
 };
@@ -440,7 +442,7 @@ class WrongFactorError : public ScheduleError {
   }
 
   IRModule mod() const final { return mod_; }
-  ffi::Array<ObjectRef> LocationsOfInterest() const final { return {loop_}; }
+  ffi::Array<ffi::ObjectRef> LocationsOfInterest() const final { return {loop_}; }
 
   IRModule mod_;
   For loop_;
@@ -463,7 +465,7 @@ class NonPositiveFactorError : public ScheduleError {
     return os.str();
   }
   IRModule mod() const final { return mod_; }
-  ffi::Array<ObjectRef> LocationsOfInterest() const final { return {}; }
+  ffi::Array<ffi::ObjectRef> LocationsOfInterest() const final { return {}; }
 
  private:
   IRModule mod_;
@@ -485,8 +487,8 @@ ffi::Array<LoopRV> ConcreteScheduleNode::Split(const LoopRV& loop_rv,
   TVM_TIR_SCHEDULE_BEGIN();
   // infer factor if needed and check validity of factors
   for (size_t i = 0; i < factor_rvs.size(); i++) {
-    if (!factor_rvs[i].defined()) {
-      factors.push_back(Integer(-1));
+    if (!factor_rvs[i].has_value()) {
+      factors.push_back(IntImm::Int32(-1));
       if (infer_index != -1) {
         throw NotSingleInferFactorError(state_->mod);
       }
@@ -496,8 +498,8 @@ ffi::Array<LoopRV> ConcreteScheduleNode::Split(const LoopRV& loop_rv,
       if (is_const_int(factor) && !is_positive_const(factor)) {
         throw NonPositiveFactorError(state_->mod, factor.as<IntImmNode>()->value, i);
       }
-      if (factor.dtype().bits() > loop->extent.dtype().bits()) {
-        factor = cast(loop->extent.dtype(), factor);
+      if (factor.ty().bits() > loop->extent.ty().bits()) {
+        factor = cast(loop->extent.ty(), factor);
       }
       factors.push_back(factor);
       tot_length *= factor;
@@ -532,7 +534,7 @@ ffi::Array<LoopRV> ConcreteScheduleNode::LoopPartition(
     }
 
     IRModule mod() const final { return mod_; }
-    ffi::Array<ObjectRef> LocationsOfInterest() const final { return {loop_}; }
+    ffi::Array<ffi::ObjectRef> LocationsOfInterest() const final { return {loop_}; }
 
     IRModule mod_;
     For loop_;
@@ -552,8 +554,8 @@ ffi::Array<LoopRV> ConcreteScheduleNode::LoopPartition(
   }
   // infer factor if needed and check validity of factors
   for (size_t i = 0; i < factor_rvs.size(); i++) {
-    if (!factor_rvs[i].defined()) {
-      factors.push_back(Integer(-1));
+    if (!factor_rvs[i].has_value()) {
+      factors.push_back(IntImm::Int32(-1));
       if (infer_index != -1) {
         throw NotSingleInferFactorError(state_->mod);
       }
@@ -563,8 +565,8 @@ ffi::Array<LoopRV> ConcreteScheduleNode::LoopPartition(
       if (is_const_int(factor) && !is_positive_const(factor)) {
         throw NonPositiveFactorError(state_->mod, factor.as<IntImmNode>()->value, i);
       }
-      if (factor.dtype().bits() > loop->extent.dtype().bits()) {
-        factor = cast(loop->extent.dtype(), factor);
+      if (factor.ty().bits() > loop->extent.ty().bits()) {
+        factor = cast(loop->extent.ty(), factor);
       }
       factors.push_back(factor);
       tot_length += factor;
@@ -598,7 +600,7 @@ void ConcreteScheduleNode::Reorder(const ffi::Array<LoopRV>& ordered_loop_rvs) {
 }
 
 void ConcreteScheduleNode::ReorderBlockIterVar(const SBlockRV& block_rv,
-                                               const ffi::Array<Integer> new_order) {
+                                               const ffi::Array<int64_t> new_order) {
   TVM_TIR_SCHEDULE_BEGIN();
   s_tir::ReorderBlockIterVar(state_, GetSRef(block_rv), new_order);
   TVM_TIR_SCHEDULE_END("reorder_block_iter_var", this->error_render_level_);
@@ -944,10 +946,10 @@ Any ConcreteScheduleNode::CheckAndGetAnnotationValue(const ffi::Any& ann_val) {
     return (*std::move(opt_floatimm))->value;
   }
 
-  if (const auto* expr = ann_val.as<PrimExprNode>()) {
-    TVM_FFI_CHECK(!expr->IsInstance<StringImmNode>(), TypeError)
+  if (auto expr = ann_val.as<PrimExpr>()) {
+    TVM_FFI_CHECK(!expr.value().as<StringImmNode>(), TypeError)
         << "ffi::String is expected, but gets StringImm";
-    auto res_expr = this->Get(ffi::GetRef<PrimExpr>(expr));
+    auto res_expr = this->Get(expr.value());
     // prefer to return int/float literals for annotations
     if (auto opt_intimm = res_expr.as<IntImm>()) {
       return (*std::move(opt_intimm))->value;
@@ -1027,7 +1029,7 @@ void ConcreteScheduleNode::TransformLayout(const SBlockRV& block_rv, int buffer_
   TVM_TIR_SCHEDULE_BEGIN();
   auto f_subst = [&](const Var& var) -> ffi::Optional<PrimExpr> {
     if (auto opt_expr = symbol_table_.Get(var)) {
-      return Downcast<PrimExpr>(opt_expr.value());
+      return opt_expr.value().as_or_throw<PrimExpr>();
     } else {
       return std::nullopt;
     }
@@ -1047,16 +1049,6 @@ void ConcreteScheduleNode::TransformBlockLayout(const SBlockRV& block_rv,
   TVM_TIR_SCHEDULE_END("transform_block_layout", this->error_render_level_);
 }
 
-void ConcreteScheduleNode::SetAxisSeparator(const SBlockRV& block_rv, int buffer_index,
-                                            BufferIndexType buffer_index_type,
-                                            const ffi::Array<IntImm>& axis_separators) {
-  TVM_TIR_SCHEDULE_BEGIN();
-  s_tir::SetAxisSeparator(state_, this->GetSRef(block_rv), buffer_index, buffer_index_type,
-                          axis_separators);
-  TVM_TIR_SCHEDULE_END("set-axis-separator", this->error_render_level_);
-  this->state_->DebugVerify();
-}
-
 /******** Schedule: Padding ********/
 
 SBlockRV ConcreteScheduleNode::DecomposePadding(const SBlockRV& block_rv, const LoopRV& loop_rv) {
@@ -1068,7 +1060,7 @@ SBlockRV ConcreteScheduleNode::DecomposePadding(const SBlockRV& block_rv, const 
   return CreateRV<SBlockRV>(result);
 }
 
-void ConcreteScheduleNode::PadEinsum(const SBlockRV& block_rv, const ffi::Array<Integer>& padding) {
+void ConcreteScheduleNode::PadEinsum(const SBlockRV& block_rv, const ffi::Array<int64_t>& padding) {
   TVM_TIR_SCHEDULE_BEGIN();
   s_tir::PadEinsum(state_, this->GetSRef(block_rv), padding);
   TVM_TIR_SCHEDULE_END("pad-einsum", this->error_render_level_);

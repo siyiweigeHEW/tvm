@@ -56,14 +56,14 @@
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Target/TargetOptions.h>
 #include <llvm/Transforms/Utils/Cloning.h>
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/container/array.h>
 #include <tvm/ffi/extra/module.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/string.h>
 #include <tvm/ir/module.h>
+#include <tvm/ir/with_context.h>
 #include <tvm/runtime/logging.h>
-#include <tvm/runtime/object.h>
-#include <tvm/support/with.h>
 #include <tvm/target/codegen.h>
 #include <tvm/target/target.h>
 
@@ -156,7 +156,7 @@ LLVMModuleNode::~LLVMModuleNode() {
 }
 
 ffi::Optional<ffi::Function> LLVMModuleNode::GetFunction(const ffi::String& name) {
-  ObjectPtr<Object> sptr_to_self = ffi::GetObjectPtr<Object>(this);
+  ffi::ObjectPtr<ffi::Object> sptr_to_self = ffi::GetObjectPtr<ffi::Object>(this);
   if (name == "__tvm_is_system_module") {
     bool flag = (module_->getFunction("__tvm_module_startup") != nullptr);
     return ffi::Function([flag](ffi::PackedArgs args, ffi::Any* rv) { *rv = flag; });
@@ -308,7 +308,7 @@ void LLVMModuleNode::Init(const IRModule& mod, const Target& target) {
       DLOG(INFO) << "Can only lower IR Module with PrimFuncs, but got " << kv.second->GetTypeKey();
       continue;
     }
-    auto f = Downcast<PrimFunc>(kv.second);
+    auto f = kv.second.as_or_throw<PrimFunc>();
     auto global_symbol = f->GetAttr<ffi::String>(tvm::attr::kGlobalSymbol);
     bool is_entry_func = f->HasNonzeroAttr(tirx::attr::kIsEntryFunc);
 
@@ -742,6 +742,15 @@ static void LLVMReflectionRegister() {
              auto llvm_instance = std::make_unique<LLVMInstance>();
              LLVMTargetInfo llvm_target(*llvm_instance, use_target);
              return llvm_target.TargetHasCPUFeature(feature);
+           })
+      .def("target.llvm_is_valid_cpu",
+           [](ffi::String cpu, ffi::String triple) -> bool {
+             auto llvm_instance = std::make_unique<LLVMInstance>();
+             ffi::Map<ffi::String, ffi::Any> target_map;
+             target_map.Set("kind", ffi::String("llvm"));
+             target_map.Set("mtriple", triple);
+             LLVMTargetInfo llvm_backend(*llvm_instance, Target(target_map));
+             return llvm_backend.IsValidCPU(std::string(cpu));
            })
       .def("target.llvm_version_major", []() -> int { return TVM_LLVM_VERSION / 10; })
       .def("ffi.Module.load_from_file.ll",

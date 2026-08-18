@@ -27,7 +27,7 @@ namespace tvm {
 namespace runtime {
 namespace vm {
 
-// Register Object Type
+// Register ffi::Object Type
 
 // KV State base methods
 TVM_FFI_STATIC_INIT_BLOCK() {
@@ -93,6 +93,13 @@ TVM_FFI_STATIC_INIT_BLOCK() {
               Tensor o_data, Tensor lse_data) {
              kv_cache->CrossAttention(layer_id, std::move(q_data), std::move(o_data),
                                       std::move(lse_data), sm_scale);
+           })
+      .def("vm.builtin.attention_kv_cache_attention_with_shared_kv",
+           [](AttentionKVCache kv_cache, int64_t source_layer_id, double sm_scale, Tensor q_data,
+              Tensor current_k_data, Tensor current_v_data, Tensor o_data) {
+             kv_cache->AttentionWithSharedKV(source_layer_id, std::move(q_data),
+                                             std::move(current_k_data), std::move(current_v_data),
+                                             std::move(o_data), sm_scale);
            })
       .def("vm.builtin.attention_kv_cache_append_mla_kv",
            [](AttentionKVCache kv_cache, int64_t layer_id, Tensor kv_data) {

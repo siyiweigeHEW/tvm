@@ -22,7 +22,7 @@ from tvm.script import tirx as T
 def test_ir_transform():
     @I.ir_module
     class Module:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(n: T.int32):
             for i in T.serial(n):
                 for j in T.serial(10):
@@ -47,12 +47,13 @@ def test_ir_transform():
         return None
 
     def postorder(op):
-        assert isinstance(op, tvm.tirx.Call)
+        assert isinstance(op, tvm.ir.Call)
+        assert tvm.ir.is_prim_expr(op)
         if op.op.same_as(builtin_call_extern) and op.args[0].value == "TestA":
             return tvm.tirx.call_extern("int32", "TestB", op.args[1] + 1)
         return op
 
-    body = tvm.tirx.stmt_functor.ir_transform(body, preorder, postorder, ["tirx.Call"])
+    body = tvm.tirx.stmt_functor.ir_transform(body, preorder, postorder, ["ir.Call"])
     stmt_list = tvm.tirx.stmt_list(body.body.body)
     assert stmt_list[0].value.args[1].args[0].value == "TestB"
     assert stmt_list[1].value.value == 42

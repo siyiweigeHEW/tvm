@@ -35,6 +35,7 @@
  *    4. This pass currently works for op_pattern kElemWise and kBroadcast.
  */
 
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/relax/expr.h>
 #include <tvm/relax/op_attr_types.h>
@@ -44,7 +45,7 @@
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
 
-#include <map>
+#include <unordered_map>
 
 #include "../../arith/constraint_extract.h"
 #include "../../arith/ir_mutator_with_analyzer.h"
@@ -114,7 +115,7 @@ class ParseAssumeAndOvercompute : public IRMutatorWithAnalyzer {
 
  public:
   using Parent = IRMutatorWithAnalyzer;
-  explicit ParseAssumeAndOvercompute(Analyzer* analyzer) : Parent(analyzer) {}
+  explicit ParseAssumeAndOvercompute(const Analyzer& analyzer) : Parent(analyzer) {}
 
  private:
   using Parent::VisitExpr_;
@@ -134,8 +135,9 @@ class ParseAssumeAndOvercompute : public IRMutatorWithAnalyzer {
   std::vector<PrimExpr> conditions_;
 
   // Storing all the buffer assumptions data in map
-  std::map<tirx::Buffer, assume_struct> map_buffer_assumption;
-  tirx::Buffer current_bufferstorenode_name;
+  std::unordered_map<tirx::BufferVar, assume_struct, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
+      map_buffer_assumption;
+  tirx::BufferVar current_bufferstorenode_name;
 
   struct InternalConstraintContext {
     /* This stuct appends the constraint passed to it in the conditions list.
@@ -176,7 +178,7 @@ class ParseAssumeAndOvercompute : public IRMutatorWithAnalyzer {
 
   PrimExpr CurrentScopePredicate() const {
     /* This combines all the constraints in a scope */
-    PrimExpr predicate = Bool(true);
+    PrimExpr predicate = IntImm::Bool(true);
     for (const auto& condition : conditions_) {
       predicate = predicate && condition;
     }
@@ -189,11 +191,12 @@ class ParseAssumeAndOvercompute : public IRMutatorWithAnalyzer {
     InternalConstraintContext */
     analyzer_->Bind(op->loop_var, Range::FromMinExtent(op->min, op->extent));
     InternalConstraintContext ctx1(this, op->loop_var >= op->min);
-    InternalConstraintContext ctx2(this, op->loop_var < op->min + op->extent);
+    InternalConstraintContext ctx2(this,
+                                   static_cast<PrimExpr>(op->loop_var) < op->min + op->extent);
     return Parent::VisitStmt_(op);
   }
 
-  PrimExpr VisitExpr_(const BufferLoadNode* op) override {
+  Expr VisitExpr_(const BufferLoadNode* op) override {
     if (map_buffer_assumption.find(op->buffer) != map_buffer_assumption.end()) {
       PrimExpr buf_value;
       /* If the cuurent context where the buffer load is present is same as
@@ -216,14 +219,14 @@ class ParseAssumeAndOvercompute : public IRMutatorWithAnalyzer {
   }
 
   Stmt VisitStmt_(const BufferStoreNode* op) final {
-    BufferStore store = Downcast<BufferStore>(Parent::VisitStmt_(op));
+    BufferStore store = Parent::VisitStmt_(op).as_or_throw<BufferStore>();
 
     // Eliminate the builtin if_then_else statement
     if (auto* call = op->value.as<CallNode>()) {
       if (call->op.same_as(builtin::if_then_else())) {
-        PrimExpr cond = call->args[0];
-        PrimExpr then_clause = call->args[1];
-        PrimExpr else_clause = call->args[2];
+        PrimExpr cond = call->args[0].as_or_throw<PrimExpr>();
+        PrimExpr then_clause = call->args[1].as_or_throw<PrimExpr>();
+        PrimExpr else_clause = call->args[2].as_or_throw<PrimExpr>();
 
         PrimExpr then_clause_in_then_context;
         PrimExpr else_clause_in_then_context;
@@ -233,20 +236,20 @@ class ParseAssumeAndOvercompute : public IRMutatorWithAnalyzer {
           // Simplifying expressions in " then context "
           InternalConstraintContext then_ctx(this, cond);
           // This will call the current class's appropriate VisitStmt function
-          then_clause_in_then_context = (*this)(then_clause);
+          then_clause_in_then_context = (*this)(then_clause).as_or_throw<PrimExpr>();
           then_clause_in_then_context = analyzer_->Simplify(then_clause_in_then_context);
 
-          else_clause_in_then_context = (*this)(else_clause);
+          else_clause_in_then_context = (*this)(else_clause).as_or_throw<PrimExpr>();
           else_clause_in_then_context = analyzer_->Simplify(else_clause_in_then_context);
         }
         {
           // Simplifying expressions in " else context "
           InternalConstraintContext else_ctx(this, !cond);
           // This will call the current class's appropriate VisitStmt function
-          then_clause_in_else_context = (*this)(then_clause);
+          then_clause_in_else_context = (*this)(then_clause).as_or_throw<PrimExpr>();
           then_clause_in_else_context = analyzer_->Simplify(then_clause_in_else_context);
 
-          else_clause_in_else_context = (*this)(else_clause);
+          else_clause_in_else_context = (*this)(else_clause).as_or_throw<PrimExpr>();
           else_clause_in_else_context = analyzer_->Simplify(else_clause_in_else_context);
         }
 
@@ -266,9 +269,9 @@ class ParseAssumeAndOvercompute : public IRMutatorWithAnalyzer {
     return Parent::VisitStmt_(op);
   }
 
-  PrimExpr VisitExpr_(const CallNode* op) override {
+  Expr VisitExpr_(const CallNode* op) override {
     if (op->op.same_as(builtin::assume())) {
-      Assume(op->args[0]);
+      Assume(op->args[0].as_or_throw<PrimExpr>());
     }
     return Parent::VisitExpr_(op);
   }
@@ -280,7 +283,7 @@ class ParseAssumeAndOvercompute : public IRMutatorWithAnalyzer {
   }
 
   void AssumeConstraintComponent(PrimExpr assumption) {
-    PrimExpr additional_predicate = Bool(true);
+    PrimExpr additional_predicate = IntImm::Bool(true);
     assume_struct buf_data;
 
     std::vector<PrimExpr> buffer_exprs;
@@ -348,7 +351,7 @@ class ParseAssumeAndOvercompute : public IRMutatorWithAnalyzer {
 
     auto has_side_effect = tirx::SideEffect(value) > tirx::CallEffectKind::kPure;
     TVM_FFI_ICHECK(!has_side_effect)
-        << "Buffer value in constraint must be pure expression, but was " << value;
+        << "BufferVar value in constraint must be pure expression, but was " << value;
     if (has_side_effect) {
       return;
     }
@@ -365,11 +368,11 @@ Pass UseAssumeToReduceBranches() {
     // The pass runs & eliminates pad branch with overcompute only if,
     // the primfunc has op_pattern defined and is an elementwise op.
     // AnnotateTIROpPattern pass will set op_pattern in op attributes of the primfunc.
-    if (n->attrs.GetAttr<Integer>("op_pattern").defined()) {
-      ffi::Optional<Integer> opt_pattern = f->GetAttr<Integer>("op_pattern");
-      if (opt_pattern.defined()) {
+    if (n->attrs.GetAttr<int64_t>("op_pattern").has_value()) {
+      ffi::Optional<int64_t> opt_pattern = f->GetAttr<int64_t>("op_pattern");
+      if (opt_pattern.has_value()) {
         relax::OpPatternKind pattern;
-        pattern = static_cast<relax::OpPatternKind>(Downcast<IntImm>(opt_pattern)->value);
+        pattern = static_cast<relax::OpPatternKind>(opt_pattern.value());
 
         if (pattern == relax::OpPatternKind::kElemWise ||
             pattern == relax::OpPatternKind::kBroadcast) {
@@ -379,7 +382,7 @@ Pass UseAssumeToReduceBranches() {
 
           if (assume_checker.has_assume) {
             // Leverage from assume and eliminate the branch
-            ParseAssumeAndOvercompute func_analyzer_mutator(&analyzer);
+            ParseAssumeAndOvercompute func_analyzer_mutator(analyzer);
             n->body = func_analyzer_mutator(std::move(n->body));
           }
         }

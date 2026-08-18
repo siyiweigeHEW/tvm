@@ -16,11 +16,42 @@
 # under the License.
 """Package tvm.script.ir_builder.ir.ir"""
 
+from typing import TYPE_CHECKING, Any, TypeVar
+
 from tvm.ir import BaseFunc, DummyGlobalInfo, GlobalInfo, GlobalVar, VDevice
 from tvm.runtime import Object as tvm_Object
 
 from . import _ffi_api
 from .frame import IRModuleFrame
+
+if TYPE_CHECKING:
+    T = TypeVar("T")
+
+    def meta_var(value: T) -> T:
+        """Mark a value for parser-time metaprogramming."""
+        return value
+
+else:
+
+    class meta_var:  # pylint: disable=invalid-name
+        """A value used only for TVMScript parser-time metaprogramming.
+
+        Assignments unwrap this object without emitting an IR binding.  The
+        shared wrapper is exposed as ``I.meta_var``; dialect namespaces may
+        provide compatibility aliases to the same implementation.
+        For Relax, this is the explicit opt-out from default primitive binding emission.
+
+        Parameters
+        ----------
+        value : Any
+            The parser-time value.
+        """
+
+        def __init__(self, value: Any) -> None:
+            self.value = value
+
+        def __iter__(self):
+            return (meta_var(item) for item in self.value)
 
 
 def ir_module() -> IRModuleFrame:
@@ -86,26 +117,6 @@ def module_attrs(attrs: dict[str, tvm_Object], allow_overwrite=False) -> None:
         Whether allow overwrite the existing attrs.
     """
     return _ffi_api.ModuleAttrs(attrs, allow_overwrite)  # type: ignore[attr-defined] # pylint: disable=no-member
-
-
-def current_ir_module() -> IRModuleFrame:
-    """Get the current ir_module frame.
-    Returns
-    -------
-    frame: IRModuleFrame
-        The current frame.
-    """
-    return _ffi_api.CurrentIRModule()  # type: ignore[attr-defined] # pylint: disable=no-member
-
-
-def module_get_attrs() -> dict[str, tvm_Object]:
-    """Get the attrs of the ir_module frame.
-    Returns
-    -------
-    attrs: Dict[str, Object]
-        The module attrs.
-    """
-    return _ffi_api.ModuleGetAttrs()  # type: ignore[attr-defined] # pylint: disable=no-member
 
 
 def module_get_attr(attr_key: str) -> tvm_Object | None:
@@ -195,3 +206,18 @@ def lookup_vdevice(target_kind: str | None = None, device_index: int = -1) -> VD
         The result virtual device.
     """
     return _ffi_api.LookupVDevice(target_kind, device_index)  # type: ignore[attr-defined] # pylint: disable=no-member
+
+
+def lookup_name(name: str) -> bool:
+    """Check if a global variable with the given name exists.
+    Parameters
+    ----------
+    name: str
+        The name of the global variable.
+
+    Returns
+    -------
+    res : bool
+        True if the global variable exists, False otherwise.
+    """
+    return _ffi_api.LookupName(name)  # type: ignore[attr-defined] # pylint: disable=no-member

@@ -49,52 +49,6 @@
 #include <vector>
 
 /*!
- * \brief Macro helper to force a function not to be inlined.
- * It is only used in places that we know not inlining is good,
- * e.g. some logging functions.
- */
-#if defined(_MSC_VER)
-#define TVM_NO_INLINE __declspec(noinline)
-#else
-#define TVM_NO_INLINE __attribute__((noinline))
-#endif
-
-/*!
- * \brief Macro helper to force a function to be inlined.
- * It is only used in places that we know inline is important,
- * e.g. some template expansion cases.
- */
-#ifdef _MSC_VER
-#define TVM_ALWAYS_INLINE __forceinline
-#else
-#define TVM_ALWAYS_INLINE inline __attribute__((always_inline))
-#endif
-
-/*!
- * \brief Macro helper for exception throwing.
- */
-#define TVM_THROW_EXCEPTION noexcept(false)
-
-/*!
- * \brief Whether or not enable backtrace logging during a
- *        fatal error.
- *
- * \note TVM won't depend on LIBBACKTRACE or other exec_info
- *       library when this option is disabled.
- */
-#ifndef TVM_LOG_STACK_TRACE
-#define TVM_LOG_STACK_TRACE 1
-#endif
-
-/*!
- * \brief Whether or not use libbacktrace library
- *        for getting backtrace information
- */
-#ifndef TVM_USE_LIBBACKTRACE
-#define TVM_USE_LIBBACKTRACE 0
-#endif
-
-/*!
  * \brief Whether or not customize the logging output.
  *  If log customize is enabled, the user must implement
  *  tvm::runtime::detail::LogFatalImpl and tvm::runtime::detail::LogMessageImpl.
@@ -106,22 +60,6 @@
 namespace tvm {
 namespace runtime {
 
-using ffi::EnvErrorAlreadySet;
-using ffi::Error;
-
-/*!
- * \brief Error type for errors from LOG(FATAL). This error
- * contains a backtrace of where it occurred.
- *
- * \note LOG(FATAL) always throws InternalError. For typed errors,
- * use TVM_FFI_THROW(ErrorKind) instead.
- */
-class InternalError : public Error {
- public:
-  InternalError(std::string file, int lineno, std::string message)
-      : Error("InternalError", std::move(message), TVMFFIBacktrace(file.c_str(), lineno, "", 0)) {}
-};
-
 /*! \brief Internal implementation */
 namespace detail {
 // Provide support for customized logging.
@@ -131,16 +69,16 @@ namespace detail {
  *
  * \sa TVM_LOG_CUSTOMIZE
  */
-[[noreturn]] TVM_DLL void LogFatalImpl(const std::string& file, int lineno,
-                                       const std::string& message);
+[[noreturn]] TVM_RUNTIME_DLL void LogFatalImpl(const std::string& file, int lineno,
+                                               const std::string& message);
 
 /*!
  * \brief Custom implementations of LogMessage.
  *
  * \sa TVM_LOG_CUSTOMIZE
  */
-TVM_DLL void LogMessageImpl(const std::string& file, int lineno, int level,
-                            const std::string& message);
+TVM_RUNTIME_DLL void LogMessageImpl(const std::string& file, int lineno, int level,
+                                    const std::string& message);
 
 /*!
  * \brief Class to accumulate an error message and throw it. Do not use
@@ -153,7 +91,7 @@ class LogFatal {
 #pragma warning(push)
 #pragma warning(disable : 4722)
 #endif
-  [[noreturn]] ~LogFatal() TVM_THROW_EXCEPTION { LogFatalImpl(file_, lineno_, stream_.str()); }
+  [[noreturn]] ~LogFatal() noexcept(false) { LogFatalImpl(file_, lineno_, stream_.str()); }
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
@@ -193,12 +131,12 @@ class LogMessage {
  */
 class LogFatal {
  public:
-  TVM_NO_INLINE LogFatal(const char* file, int lineno) { GetEntry().Init(file, lineno); }
+  TVM_FFI_NO_INLINE LogFatal(const char* file, int lineno) { GetEntry().Init(file, lineno); }
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable : 4722)
 #endif
-  [[noreturn]] ~LogFatal() TVM_THROW_EXCEPTION {
+  [[noreturn]] ~LogFatal() noexcept(false) {
     GetEntry().Finalize();
     throw;
   }
@@ -214,8 +152,9 @@ class LogFatal {
       this->file_ = file;
       this->lineno_ = lineno;
     }
-    [[noreturn]] TVM_NO_INLINE Error Finalize() TVM_THROW_EXCEPTION {
-      InternalError error(file_, lineno_, stream_.str());
+    [[noreturn]] TVM_FFI_NO_INLINE ffi::Error Finalize() noexcept(false) {
+      ffi::Error error("InternalError", stream_.str(),
+                       TVMFFIBacktrace(file_.c_str(), lineno_, "", 0));
       throw error;
     }
     std::ostringstream stream_;
@@ -223,7 +162,7 @@ class LogFatal {
     int lineno_;
   };
 
-  TVM_DLL TVM_NO_INLINE static Entry& GetEntry();
+  TVM_FFI_NO_INLINE TVM_RUNTIME_DLL static Entry& GetEntry();
 };
 
 /*!
@@ -233,16 +172,23 @@ class LogFatal {
 class LogMessage {
  public:
   LogMessage(const std::string& file, int lineno, int level) {
+    // Use inline constexpr to avoid ODR-issues with hidden static members
+    // when libtvm_runtime.so is built with -fvisibility=hidden.
+    static constexpr const char* kLevelStrings[] = {
+        ": Debug: ",    // TVM_LOG_LEVEL_DEBUG
+        ": ",           // TVM_LOG_LEVEL_INFO
+        ": Warning: ",  // TVM_LOG_LEVEL_WARNING
+        ": Error: ",    // TVM_LOG_LEVEL_ERROR
+    };
     std::time_t t = std::time(nullptr);
     stream_ << "[" << std::put_time(std::localtime(&t), "%H:%M:%S") << "] " << file << ":" << lineno
-            << level_strings_[level];
+            << kLevelStrings[level];
   }
-  TVM_NO_INLINE ~LogMessage() { std::cerr << stream_.str() << std::endl; }
+  TVM_FFI_NO_INLINE ~LogMessage() { std::cerr << stream_.str() << std::endl; }
   std::ostringstream& stream() { return stream_; }
 
  private:
   std::ostringstream stream_;
-  TVM_DLL static const char* level_strings_[];
 };
 
 #endif
@@ -259,7 +205,7 @@ class LogMessageVoidify {
 };
 
 /*! \brief Captures the state of the \p TVM_LOG_DEBUG environment flag. */
-class TvmLogDebugSettings {
+class TVM_RUNTIME_DLL TvmLogDebugSettings {
  public:
   /*!
    * \brief Parses the \p TVM_LOG_DEBUG environment flag as per the specification given by
@@ -452,9 +398,5 @@ class VLogContextEntry {
       << ::tvm::runtime::detail::ThreadLocalVLogContext()->str()
 
 }  // namespace runtime
-// Re-export error types
-using runtime::Error;
-using runtime::InternalError;
-
 }  // namespace tvm
 #endif  // TVM_RUNTIME_LOGGING_H_

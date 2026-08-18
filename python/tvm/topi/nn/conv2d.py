@@ -248,7 +248,7 @@ def conv2d_nhwc(
     auto_scheduler_rewritten_layout: str = ""
         The layout after auto-scheduler's layout rewrite pass.
 
-    meta_schedule_original_shape: Optional[List[PrimExpr]] = None
+    meta_schedule_original_shape: Optional[List[Expr]] = None
         The original shape of the input tensor.
 
     Returns
@@ -406,9 +406,8 @@ def conv2d_NCHWc_OIHWo(
         5-D with shape [batch, in_channel_chunk, in_height, in_width, in_channel_block]
 
     kernel : tvm.te.Tensor
-        6-D with shape
-        [num_filter_chunk, in_channel_chunk, filter_height, filter_width,
-         num_filter_block]
+        6-D with shape ``[num_filter_chunk, in_channel_chunk, filter_height,
+        filter_width, num_filter_block]``.
 
     stride : int or a list/tuple of two ints
         stride size, or [stride_height, stride_width]
@@ -790,7 +789,7 @@ def conv(
     auto_scheduler_rewritten_layout: str
         Layout from autoscheduler's layout rewritting.
 
-    meta_schedule_original_shape : Optional[List[PrimExpr]]
+    meta_schedule_original_shape : Optional[List[Expr]]
         The original shape of the input tensor.
 
     auto_scheduler_should_rewrite_layout : bool
@@ -860,8 +859,10 @@ def conv(
     if auto_scheduler_rewritten_layout:
         raise RuntimeError("LEGACY-FLOW triggered, to be removed")
 
-    assert in_channel % groups == 0, "input channels must divide group size"
-    assert num_filter % groups == 0, "output channels must divide group size"
+    if isinstance(in_channel, int):
+        assert in_channel % groups == 0, "input channels must divide group size"
+    if isinstance(num_filter, int):
+        assert num_filter % groups == 0, "output channels must divide group size"
 
     dilated_kernel_dimensions = [(k - 1) * dil + 1 for k, dil in zip(kernel_dimensions, dilations)]
     pad_begin, pad_end = get_pad_tuple_generic(padding, dilated_kernel_dimensions)
@@ -1032,7 +1033,7 @@ def conv2d_winograd_nhwc(
         Whether the kernel is precomputed
     auto_scheduler_rewritten_layout: str = ""
         The layout after auto-scheduler's layout rewrite pass.
-    meta_schedule_original_shape: Optional[List[PrimExpr]] = None
+    meta_schedule_original_shape: Optional[List[Expr]] = None
         The original shape of the input tensor.
 
     Returns
@@ -1088,7 +1089,7 @@ def conv2d_winograd_nchw(
         Whether the kernel is precomputed
     auto_scheduler_rewritten_layout: str = ""
         The layout after auto-scheduler's layout rewrite pass.
-    meta_schedule_original_shape: Optional[List[PrimExpr]] = None
+    meta_schedule_original_shape: Optional[List[Expr]] = None
         The original shape of the input tensor.
 
     Returns
@@ -1149,7 +1150,7 @@ def _conv2d_winograd_nhwc_impl(
         The cache level to write to in multi-level tiling rule in MetaSchedule.
     auto_scheduler_rewritten_layout: str = ""
         The layout after auto-scheduler's layout rewrite pass.
-    meta_schedule_original_shape: Optional[List[PrimExpr]] = None
+    meta_schedule_original_shape: Optional[List[Expr]] = None
         The original shape of the input tensor.
 
     Returns
@@ -1439,7 +1440,7 @@ def conv2d_winograd_nhwc_without_weight_transform(
         Specifies the output data type.
     auto_scheduler_rewritten_layout: str = ""
         The layout after auto-scheduler's layout rewrite pass.
-    meta_schedule_original_shape: Optional[List[PrimExpr]] = None
+    meta_schedule_original_shape: Optional[List[Expr]] = None
         The original shape of the input tensor.
 
     Returns
@@ -1490,7 +1491,7 @@ def conv2d_winograd_nchw_without_weight_transform(
         Specifies the output data type.
     auto_scheduler_rewritten_layout: str = ""
         The layout after auto-scheduler's layout rewrite pass.
-    meta_schedule_original_shape: Optional[List[PrimExpr]] = None
+    meta_schedule_original_shape: Optional[List[Expr]] = None
         The original shape of the input tensor.
 
     Returns

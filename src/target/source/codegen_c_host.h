@@ -57,8 +57,8 @@ class CodeGenCHost : public CodeGenC {
   void DefineModuleName();
 
   using CodeGenC::PrintType;
-  void PrintType(DataType t, std::ostream& os) final;  // NOLINT(*)
-  void PrintFuncPrefix(std::ostream& os) final;        // NOLINT(*)
+  void PrintType(const PrimType& t, std::ostream& os) final;  // NOLINT(*)
+  void PrintFuncPrefix(std::ostream& os) final;               // NOLINT(*)
 
   // overload visitor functions
   void VisitExpr_(const BroadcastNode* op, std::ostream& os) final;  // NOLINT(*)
@@ -74,6 +74,11 @@ class CodeGenCHost : public CodeGenC {
                                            const ffi::Array<Type>& arg_types,
                                            const Type& ret_type) override;
   ffi::Array<ffi::String> GetFunctionNames() { return function_names_; }
+
+ protected:
+  // Plain C has no address-space qualifiers.  Buffer storage scopes still
+  // control allocation lowering, but are not part of emitted pointer types.
+  bool IsScopePartOfType() const final { return false; }
 
  private:
   std::string module_name_;

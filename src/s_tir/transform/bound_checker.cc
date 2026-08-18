@@ -23,8 +23,10 @@
 // Instrument checkers for out of the bounds access.
 
 #include <tvm/arith/analyzer.h>
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/s_tir/stmt.h>
 #include <tvm/s_tir/transform.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
@@ -49,11 +51,12 @@ class BoundCollector : public StmtVisitor {
   BoundCollector() {}
 
   void VisitStmt_(const AttrStmtNode* op) final {
-    if (op->attr_key == tirx::attr::buffer_bound) {
+    if (op->attr_key == s_tir::attr::buffer_bound) {
       const VarNode* key = op->node.as<VarNode>();
       const CallNode* container = op->value.as<CallNode>();
       if (key && container) {
-        mem_to_shape[key] = container->args;
+        ffi::Array<PrimExpr> shape = container->args.as_or_throw<ffi::Array<PrimExpr>>();
+        mem_to_shape[key] = shape;
       }
     }
     StmtVisitor::VisitStmt_(op);
@@ -69,13 +72,13 @@ class BoundChecker : public StmtExprMutator {
       : mem_to_shape_(mem_to_shape) {}
 
   Stmt VisitStmt_(const AllocBufferNode* op) final {
-    if (UpdateIsNeeded(op->buffer->data)) {
-      Update(op->buffer->data, op->buffer->shape, op->buffer->dtype);
+    if (UpdateIsNeeded(op->buffer.var())) {
+      Update(op->buffer.var(), op->buffer->shape, op->buffer->dtype);
     }
     return StmtExprMutator::VisitStmt_(op);
   }
 
-  PrimExpr VisitExpr_(const CallNode* op) final {
+  Expr VisitExpr_(const CallNode* op) final {
     if (process_store_ && op->op.same_as(builtin::if_then_else())) {
       unsafe_rewritten_ = true;
     }
@@ -88,8 +91,8 @@ class BoundChecker : public StmtExprMutator {
     unsafe_rewritten_ = false;
     StmtExprMutator::VisitStmt_(op);
     process_store_ = false;
-    if (CanInstrument(op->indices, op->buffer->data)) {
-      Collect(op->indices, op->buffer->data);
+    if (CanInstrument(op->indices, op->buffer.var())) {
+      Collect(op->indices, op->buffer.var());
     }
     // The collector should has at least one item.
     if (store_scope_bound_collector_.size()) {
@@ -105,9 +108,9 @@ class BoundChecker : public StmtExprMutator {
     return ffi::GetRef<Stmt>(op);
   }
 
-  PrimExpr VisitExpr_(const BufferLoadNode* op) final {
-    if (CanInstrument(op->indices, op->buffer->data)) {
-      Collect(op->indices, op->buffer->data);
+  Expr VisitExpr_(const BufferLoadNode* op) final {
+    if (CanInstrument(op->indices, op->buffer.var())) {
+      Collect(op->indices, op->buffer.var());
     }
     return StmtExprMutator::VisitExpr_(op);
   }
@@ -117,15 +120,17 @@ class BoundChecker : public StmtExprMutator {
     return (buffer_var.defined() && mem_to_shape_.count(buffer_var.get()));
   }
 
-  void Update(const Var& buffer_var, ffi::Array<PrimExpr> new_shape, const DataType& type) {
+  void Update(const Var& buffer_var, ffi::Array<PrimExpr> new_shape, PrimType dtype) {
     // Sanity check at first.
     if (!ShapeIsValid(new_shape)) {
       return;
     }
 
+    int lanes = dtype.lanes();
+    TVM_FFI_ICHECK_GE(lanes, 0);
     new_shape.MutateByApply([&](const PrimExpr& dim) {
       // Cast to uint64 to avoid potential overflow.
-      return make_const(DataType::UInt(64), type.lanes()) * dim;
+      return IntImm(PrimType::UInt(64), lanes) * dim;
     });
     mem_to_shape_[buffer_var.get()] = new_shape;
   }
@@ -164,7 +169,7 @@ class BoundChecker : public StmtExprMutator {
         if (!lanes_int) {
           return false;
         }
-        int lanes = static_cast<int>(Downcast<IntImm>(ramp_index->lanes)->value);
+        int lanes = static_cast<int>(ramp_index->lanes.as_or_throw<IntImm>()->value);
         if (lanes <= 0) {
           return false;
         }
@@ -174,7 +179,8 @@ class BoundChecker : public StmtExprMutator {
   }
 
   bool IsValidScalar(const PrimExpr& expr) const {
-    return expr.defined() && expr.dtype().is_scalar();
+    if (!expr.defined()) return false;
+    return expr.ty().IsScalar();
   }
 
   bool CanInstrument(const ffi::Array<PrimExpr>& indices, const Var& buffer_var) const {
@@ -205,15 +211,15 @@ class BoundChecker : public StmtExprMutator {
         }
 
         // Try to simplify index and bound.
-        index = analyzer_.Simplify(index);
-        upper_bound = analyzer_.Simplify(upper_bound);
+        index = analyzer_->Simplify(index);
+        upper_bound = analyzer_->Simplify(upper_bound);
 
         // Cast to the same type - signed, to be able to check lower bound.
-        index = Cast(DataType::Int(64), index);
-        upper_bound = Cast(DataType::Int(64), upper_bound);
+        index = Cast(PrimType::Int(64), index);
+        upper_bound = Cast(PrimType::Int(64), upper_bound);
 
         // Looks like a lower bound should always be zero after normalization.
-        PrimExpr lower_bound = make_zero(DataType::Int(64));
+        PrimExpr lower_bound = IntImm::Int64(0);
 
         PrimExpr current_condition = And(GE(index, lower_bound), LT(index, upper_bound));
         condition = condition.defined() ? And(condition, current_condition) : current_condition;

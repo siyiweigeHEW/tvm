@@ -43,7 +43,7 @@ class VariablePathFinder : public ExprVisitor {
  public:
   explicit VariablePathFinder(PrimExpr target) : target_(target) {}
 
-  void VisitExpr(const PrimExpr& node) final {
+  void VisitExpr(const Expr& node) final {
     if (visited_.count(node.get()) != 0) return;
     visited_.insert(node.get());
 
@@ -53,17 +53,17 @@ class VariablePathFinder : public ExprVisitor {
     if (!found_) path_.pop_back();
   }
 
-  std::vector<const Object*> path_;
+  std::vector<const ffi::Object*> path_;
 
  private:
   bool found_{false};
   PrimExpr target_;
-  std::unordered_set<const Object*> visited_;
+  std::unordered_set<const ffi::Object*> visited_;
 };
 
 // get the path to the variable,
 // return empty vector to represent failure
-std::vector<const Object*> GetPath(PrimExpr target, PrimExpr expr) {
+std::vector<const ffi::Object*> GetPath(PrimExpr target, PrimExpr expr) {
   VariablePathFinder v(target);
   v(expr);
   return v.path_;
@@ -72,7 +72,7 @@ std::vector<const Object*> GetPath(PrimExpr target, PrimExpr expr) {
 enum CompareOp { kGreater, kLess, kEqual };
 
 // a visitor to deduce the bound of a variable from a expression
-class BoundDeducer : public ExprFunctor<void(const PrimExpr&)> {
+class BoundDeducer : public ExprFunctor<void(const Expr&)> {
  public:
   friend class BoundDeduceInputChecker;
   friend class Converter;
@@ -83,7 +83,7 @@ class BoundDeducer : public ExprFunctor<void(const PrimExpr&)> {
 
   void Deduce();
 
-  void VisitExpr(const PrimExpr& e) final {
+  void VisitExpr(const Expr& e) final {
     if (!success_) return;
     if (iter_ < path_.size() && e.get() == path_[iter_++]) {
       ExprFunctor::VisitExpr(e);
@@ -93,10 +93,11 @@ class BoundDeducer : public ExprFunctor<void(const PrimExpr&)> {
     }
   }
 
-  void VisitExprDefault_(const Object* op) final { success_ = false; }
+  void VisitExprDefault_(const ffi::Object* op) final { success_ = false; }
 
   SignType GetSignType(const PrimExpr& e) {
-    if (e.dtype().is_uint()) {
+    PrimType e_ty = e.ty();
+    if (e_ty.MatchesCode(DLDataTypeCode::kDLUInt)) {
       return kPositive;
     }
     return expr_map_[e].GetSignType();
@@ -137,7 +138,7 @@ class BoundDeducer : public ExprFunctor<void(const PrimExpr&)> {
     }
 
     // always use relax bound
-    bool divided = analyzer_.CanProve(floormod(result_, operand) == 0);
+    bool divided = analyzer_->CanProve(floormod(result_, operand) == 0);
 
     result_ = floordiv(result_, operand);  // rounding down here
 
@@ -171,7 +172,7 @@ class BoundDeducer : public ExprFunctor<void(const PrimExpr&)> {
       return;
     }
     PrimExpr divisor = op->b;
-    if (analyzer_.CanProveEqual(divisor, 0)) {
+    if (analyzer_->CanProveEqual(divisor, 0)) {
       // Skip zero divisor
       success_ = false;
       return;
@@ -224,7 +225,7 @@ class BoundDeducer : public ExprFunctor<void(const PrimExpr&)> {
   const std::unordered_map<const VarNode*, IntSet>& hint_map_;
   const std::unordered_map<const VarNode*, IntSet>& relax_map_;
   ExprIntSetMap expr_map_;
-  std::vector<const Object*> path_;
+  std::vector<const ffi::Object*> path_;
   size_t iter_{0};
   // internal analzyer
   Analyzer analyzer_;
@@ -238,7 +239,7 @@ class BoundDeduceInputChecker : public ExprVisitor {
     return target_count == 1;
   }
 
-  void VisitExpr(const PrimExpr& e) final {
+  void VisitExpr(const Expr& e) final {
     if (e.same_as(deducer_->target_)) ++target_count;
     ExprVisitor::VisitExpr(e);
   }
@@ -347,7 +348,7 @@ void BoundDeducer::Deduce() {
   this->VisitExpr(expr_);
 
   if (success_) {
-    result_ = analyzer_.Simplify(result_);
+    result_ = analyzer_->Simplify(result_);
   }
 }
 
@@ -362,7 +363,7 @@ void BoundDeducer::Relax() {
   // can not be resolved when either `i` or `j`  or both are variables with
   // some Range OR `i` and `j` both should be a single point in IntSet
   if (comp_op == kEqual &&
-      (!analyzer_.CanProve(b.min() == b.max()) || !analyzer_.CanProve(a.min() == a.max()))) {
+      (!analyzer_->CanProve(b.min() == b.max()) || !analyzer_->CanProve(a.min() == a.max()))) {
     success_ = false;
     return;
   }

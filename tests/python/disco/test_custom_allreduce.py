@@ -21,11 +21,14 @@ from itertools import product
 
 import numpy as np
 import pytest
+from tvm_ffi import Shape
 
 import tvm
 import tvm.testing
-from tvm.runtime import DataType, ShapeTuple, disco
-from tvm.runtime.disco import Session
+from tvm.runtime import DataType, disco
+
+if disco is None:
+    pytest.skip("disco runtime is not available", allow_module_level=True)
 
 
 class AllReduceStrategyType(enum.IntEnum):
@@ -44,7 +47,10 @@ _strategies = [
     AllReduceStrategyType.AUTO,
 ]
 
-_ccl = [ccl for ccl in tvm.get_global_func("runtime.disco.compiled_ccl")() if ccl == "nccl"]
+_compiled_ccl = tvm.get_global_func("runtime.disco.compiled_ccl", allow_missing=True)
+if _compiled_ccl is None:
+    pytest.skip("Disco CCL is not enabled in this TVM build", allow_module_level=True)
+_ccl = [ccl for ccl in _compiled_ccl() if ccl == "nccl"]
 
 
 @pytest.mark.parametrize("shape", _shapes)
@@ -52,7 +58,7 @@ _ccl = [ccl for ccl in tvm.get_global_func("runtime.disco.compiled_ccl")() if cc
 @pytest.mark.parametrize("strategy", _strategies)
 def test_allreduce(shape, ccl, strategy):
     devices = [0, 1]
-    sess: Session = disco.ProcessSession(num_workers=len(devices))
+    sess = disco.ProcessSession(num_workers=len(devices))
     sess.init_ccl(ccl, *devices)
 
     num_elements = reduce(lambda x, y: x * y, shape)
@@ -60,8 +66,8 @@ def test_allreduce(shape, ccl, strategy):
     falloc_ipc_storage = sess.get_global_func("runtime.disco.cuda_ipc.alloc_storage")
     falloc_tensor = sess.get_global_func("vm.builtin.alloc_tensor")
     fallreduce = sess.get_global_func("runtime.disco.cuda_ipc.custom_allreduce")
-    d_storage = sess.call_packed(falloc_ipc_storage, ShapeTuple(shape), DataType(dtype))
-    d_input = sess.call_packed(falloc_tensor, d_storage, 0, ShapeTuple(shape), DataType(dtype))
+    d_storage = sess.call_packed(falloc_ipc_storage, Shape(shape), DataType(dtype))
+    d_input = sess.call_packed(falloc_tensor, d_storage, 0, Shape(shape), DataType(dtype))
 
     array_1 = np.arange(num_elements, dtype="float32").reshape(*shape)
     array_2 = np.arange(start=1, stop=-(num_elements - 1), step=-1, dtype="float32").reshape(*shape)

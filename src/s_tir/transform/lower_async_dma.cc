@@ -24,7 +24,9 @@
 #include <tvm/arith/analyzer.h>
 #include <tvm/arith/bound.h>
 #include <tvm/arith/iter_affine_map.h>
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/s_tir/analysis.h>
 #include <tvm/s_tir/stmt.h>
 #include <tvm/s_tir/transform.h>
@@ -44,7 +46,7 @@ using namespace tvm::tirx;
 
 class AsyncDMALowerer : public arith::IRMutatorWithAnalyzer {
  public:
-  explicit AsyncDMALowerer(bool dma_bypass_cache, arith::Analyzer* analyzer)
+  explicit AsyncDMALowerer(bool dma_bypass_cache, const arith::Analyzer& analyzer)
       : IRMutatorWithAnalyzer(analyzer), dma_bypass_cache_(dma_bypass_cache) {}
 
   // TODO(leiwang1999): split lower async DMA support for CUDA and Hexagon Backend
@@ -55,7 +57,8 @@ class AsyncDMALowerer : public arith::IRMutatorWithAnalyzer {
     }
 
     // if for loop is not a memcpy of a contiguous region, it might be a cuda cp.async behavior
-    std::optional<MemCpyDetails> mem_copy = IdentifyMemCpy(ffi::GetRef<For>(loop), analyzer_);
+    std::optional<s_tir::MemCpyDetails> mem_copy =
+        s_tir::IdentifyMemCpy(ffi::GetRef<For>(loop), ffi::GetRef<arith::Analyzer>(analyzer_));
     if (!mem_copy.has_value() || mem_copy->dest->region.size() != 1 ||
         mem_copy->source->region.size() != 1) {
       return arith::IRMutatorWithAnalyzer::VisitStmt_(loop);
@@ -73,11 +76,17 @@ class AsyncDMALowerer : public arith::IRMutatorWithAnalyzer {
 
     auto src = BufferLoad(mem_copy->source->buffer, {src_min});
     auto dst = BufferLoad(mem_copy->dest->buffer, {dst_min});
-    return Evaluate(
-        Call(DataType::Int(32), builtin::dma_copy(),
-             {async_queue_id_.value(), Call(DataType::Handle(), builtin::address_of(), {dst}),
-              Call(DataType::Handle(), builtin::address_of(), {src}),
-              dst_extent * src->dtype.bytes(), dma_bypass_cache_}));
+    PrimExpr dst_nbytes = dst_extent * static_cast<int>(src.ty().StorageBytes());
+    return Evaluate(Call(PrimType::Int(32), builtin::dma_copy(),
+                         ffi::Array<Expr>{
+                             PrimExpr(async_queue_id_.value()),
+                             Call(mem_copy->dest->buffer.DataPointerType(), builtin::address_of(),
+                                  ffi::Array<Expr>{dst}, Attrs(), {}, Span()),
+                             Call(mem_copy->source->buffer.DataPointerType(), builtin::address_of(),
+                                  ffi::Array<Expr>{src}, Attrs(), {}, Span()),
+                             dst_nbytes, PrimExpr(dma_bypass_cache_)},
+                         Attrs(), {}, Span())
+                        .as_or_throw<PrimExpr>());
   }
 
   Stmt VisitStmt_(const AttrStmtNode* op) final {
@@ -115,8 +124,9 @@ class AsyncDMALowerer : public arith::IRMutatorWithAnalyzer {
                       "`async_wait_inflight_count`";
         return previsit;
       }
-      auto call_dma_wait =
-          Evaluate(Call(DataType::Int(32), builtin::dma_wait(), {queue_id, async_wait->value}));
+      auto call_dma_wait = Evaluate(
+          Call(PrimType::Int(32), builtin::dma_wait(), {PrimExpr(queue_id), async_wait->value})
+              .as_or_throw<PrimExpr>());
 
       // concatenate the call with the body and return
       return SeqStmt({call_dma_wait, arith::IRMutatorWithAnalyzer::VisitStmt(async_wait->body)});
@@ -144,9 +154,11 @@ class AsyncDMALowerer : public arith::IRMutatorWithAnalyzer {
       auto result = arith::IRMutatorWithAnalyzer::VisitStmt_(op);
       if (dmas_in_group_ > 1) {
         auto call_dma_start_group = Evaluate(
-            Call(DataType::Int(32), builtin::dma_start_group(), {async_queue_id_.value()}));
-        auto call_dma_end_group =
-            Evaluate(Call(DataType::Int(32), builtin::dma_end_group(), {async_queue_id_.value()}));
+            Call(PrimType::Int(32), builtin::dma_start_group(), {PrimExpr(async_queue_id_.value())})
+                .as_or_throw<PrimExpr>());
+        auto call_dma_end_group = Evaluate(
+            Call(PrimType::Int(32), builtin::dma_end_group(), {PrimExpr(async_queue_id_.value())})
+                .as_or_throw<PrimExpr>());
         result = SeqStmt({call_dma_start_group, result, call_dma_end_group});
       }
 
@@ -172,8 +184,8 @@ Pass LowerAsyncDMA() {
     auto fptr = f.CopyOnWrite();
     arith::Analyzer analyzer;
     bool dma_bypass_cache =
-        ctx->GetConfig<Bool>("tirx.experimental_dma_bypass_cache", Bool(false)).value();
-    fptr->body = AsyncDMALowerer(dma_bypass_cache, &analyzer)(std::move(fptr->body));
+        ctx->GetConfig<bool>("tirx.experimental_dma_bypass_cache", false).value();
+    fptr->body = AsyncDMALowerer(dma_bypass_cache, analyzer)(std::move(fptr->body));
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "s_tir.LowerAsyncDMA", {});

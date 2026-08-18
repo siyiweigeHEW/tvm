@@ -19,6 +19,7 @@
 
 /*! \file src/relax/transform/lazy_transform_params.cc */
 
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/relax/analysis.h>
 #include <tvm/relax/expr.h>
@@ -64,33 +65,29 @@ class LazyInputMutator : public ExprMutator {
       param_lookup.insert({func->params[i], i - num_input_params});
     }
 
-    Var fget_param("fget_param",
-                   FuncStructInfo({PrimStructInfo(DataType::Int(64)), ObjectStructInfo()},
-                                  ObjectStructInfo()));
+    Var fget_param("fget_param", FuncType({PrimType::Int(64), AnyType()}, AnyType()));
 
     ffi::Array<Var> new_params(func->params.begin(), func->params.begin() + num_input_params);
     new_params.push_back(fget_param);
 
-    auto array_externally_visible_vars =
-        DefinableTIRVarsInStructInfo(TupleStructInfo(new_params.Map(GetStructInfo)));
+    auto array_externally_visible_vars = DefinableTIRVarsInType(TupleType(new_params.Map(GetType)));
     std::unordered_set<tirx::Var> externally_visible_vars(array_externally_visible_vars.begin(),
                                                           array_externally_visible_vars.end());
-    StructInfo new_ret_struct_info = EraseToWellDefined(
-        func->ret_struct_info, [&](const tirx::Var& var) -> ffi::Optional<PrimExpr> {
-          if (externally_visible_vars.count(var)) {
-            return var;
-          } else {
-            return std::nullopt;
-          }
-        });
+    Type new_ret_ty = EraseToWellDefined(func->ret_ty, [&](const Var& var) -> ffi::Optional<Expr> {
+      if (auto prim_var = var.as<tirx::PrimVar>();
+          prim_var && externally_visible_vars.count(prim_var.value())) {
+        return prim_var.value().as_or_throw<PrimExpr>();
+      }
+      return std::nullopt;
+    });
 
     auto node = ffi::GetRef<Function>(func);
     node.CopyOnWrite()->params = new_params;
-    node.CopyOnWrite()->ret_struct_info = new_ret_struct_info;
+    node.CopyOnWrite()->ret_ty = new_ret_ty;
     node = WithAttr(node, attr::kNumInput, num_input_params + 1);
 
     plan_ = FunctionPlan{std::move(param_lookup), fget_param};
-    auto output = Downcast<Function>(ExprMutator::VisitExpr_(node.get()));
+    auto output = ExprMutator::VisitExpr_(node.get()).as_or_throw<Function>();
     plan_.reset();
     return output;
   }
@@ -99,14 +96,13 @@ class LazyInputMutator : public ExprMutator {
     if (plan_) {
       Var var = ffi::GetRef<Var>(op);
       if (auto it = plan_->param_lookup.find(var); it != plan_->param_lookup.end()) {
-        auto untyped =
-            builder_->Emit(relax::Call(plan_->fget_param,
-                                       {
-                                           PrimValue(IntImm(DataType::Int(64), it->second)),
-                                           StringImm(var->name_hint()),
-                                       }),
-                           var->name_hint() + "_untyped");
-        return builder_->EmitMatchCast(untyped, GetStructInfo(var), var->name_hint());
+        auto untyped = builder_->Emit(Call(Type::Missing(), plan_->fget_param,
+                                           {
+                                               PrimExpr(IntImm::Int64(it->second)),
+                                               StringImm(var->name),
+                                           }),
+                                      var->name + "_untyped");
+        return builder_->EmitMatchCast(untyped, GetType(var), var->name);
       }
     }
 
@@ -138,7 +134,7 @@ class LazyOutputMutator : public ExprMutator {
       }
     };
 
-    auto func_body = Downcast<SeqExpr>(func->body);
+    auto func_body = func->body.as_or_throw<SeqExpr>();
     if (auto tuple_output = func_body->body.as<TupleNode>()) {
       for (size_t i = 0; i < tuple_output->fields.size(); i++) {
         define_lookup(i, tuple_output->fields[i]);
@@ -147,10 +143,8 @@ class LazyOutputMutator : public ExprMutator {
       define_lookup(0, func_body->body);
     }
 
-    Var fset_output(
-        "fset_output",
-        FuncStructInfo({PrimStructInfo(DataType::Int(64)), ObjectStructInfo()},
-                       TupleStructInfo(ffi::Array<StructInfo>{}), /* purity = */ false));
+    Var fset_output("fset_output", FuncType({PrimType::Int(64), AnyType()},
+                                            TupleType(ffi::Array<Type>{}), /* purity = */ false));
     plan_ = FunctionPlan{std::move(output_lookup), fset_output};
 
     std::optional<int64_t> num_input_params = GetNumInputParams(func);
@@ -163,7 +157,7 @@ class LazyOutputMutator : public ExprMutator {
       ffi::Array<Binding> propagated_params;
       for (auto param : func->params) {
         GenerateSetOutputCalls(param, [&](const auto& fset_output_call) {
-          Var void_output("_void", TupleStructInfo(ffi::Array<StructInfo>{}));
+          Var void_output("_void", TupleType(ffi::Array<Type>{}));
           propagated_params.push_back(VarBinding(void_output, fset_output_call));
         });
       }
@@ -172,9 +166,9 @@ class LazyOutputMutator : public ExprMutator {
     BindingBlock end_of_func = [&]() {
       ffi::Array<Binding> propagated_params;
       for (const auto& [output_index, expr] : inline_outputs) {
-        Call fset_output_call(fset_output,
-                              {PrimValue(IntImm(DataType::Int(64), output_index)), expr});
-        Var void_output("_void", TupleStructInfo(ffi::Array<StructInfo>{}));
+        Call fset_output_call(Type::Missing(), fset_output,
+                              {PrimExpr(IntImm::Int64(output_index)), expr});
+        Var void_output("_void", TupleType(ffi::Array<Type>{}));
         propagated_params.push_back(VarBinding(void_output, fset_output_call));
       }
       return BindingBlock(propagated_params);
@@ -196,7 +190,7 @@ class LazyOutputMutator : public ExprMutator {
       node = WithAttr(node, attr::kNumInput, num_input_params.value() + 1);
     }
 
-    auto output = Downcast<Function>(ExprMutator::VisitExpr_(node.get()));
+    auto output = ExprMutator::VisitExpr_(node.get()).as_or_throw<Function>();
     plan_.reset();
     return output;
   }
@@ -214,8 +208,8 @@ class LazyOutputMutator : public ExprMutator {
     if (plan_.has_value()) {
       if (auto it = plan_->output_lookup.find(var); it != plan_->output_lookup.end()) {
         for (auto output_index : it->second) {
-          callback(
-              Call(plan_->fset_output, {PrimValue(IntImm(DataType::Int(64), output_index)), var}));
+          callback(Call(Type::Missing(), plan_->fset_output,
+                        {PrimExpr(IntImm::Int64(output_index)), var}));
         }
       }
     }
@@ -232,16 +226,16 @@ class LazyOutputMutator : public ExprMutator {
 Function WithLazyInputs(Function func) {
   LazyInputMutator mutator;
 
-  func = Downcast<Function>(mutator.VisitExpr(func));
-  func = Downcast<Function>(EliminateCommonSubexpr(func));
-  func = Downcast<Function>(RemoveAllUnused(func));
+  func = mutator.VisitExpr(func).as_or_throw<Function>();
+  func = EliminateCommonSubexpr(func).as_or_throw<Function>();
+  func = RemoveAllUnused(func).as_or_throw<Function>();
   return func;
 }
 
 Function WithLazyOutputs(Function func) {
   LazyOutputMutator mutator;
 
-  func = Downcast<Function>(mutator.VisitExpr(func));
+  func = mutator.VisitExpr(func).as_or_throw<Function>();
   return func;
 }
 

@@ -19,6 +19,8 @@
 /*!
  * \file expr_functor.cc
  */
+#include <tvm/ffi/cast.h>
+#include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr_functor.h>
 
 #include "functor_common.h"
@@ -27,10 +29,6 @@ namespace tvm {
 namespace tirx {
 
 void ExprVisitor::VisitExpr_(const VarNode* op) {}
-
-void ExprVisitor::VisitExpr_(const SizeVarNode* op) {
-  this->VisitExpr_(static_cast<const VarNode*>(op));
-}
 
 void ExprVisitor::VisitExpr_(const BufferLoadNode* op) {
   VisitArray(op->indices, [this](const PrimExpr& e) { this->VisitExpr(e); });
@@ -46,7 +44,7 @@ void ExprVisitor::VisitExpr_(const LetNode* op) {
 }
 
 void ExprVisitor::VisitExpr_(const CallNode* op) {
-  VisitArray(op->args, [this](const PrimExpr& e) { this->VisitExpr(e); });
+  VisitArray(op->args, [this](const Expr& e) { this->VisitExpr(e); });
 }
 
 #define DEFINE_BINOP_VISIT_(OP)                \
@@ -111,14 +109,10 @@ void ExprVisitor::VisitExpr_(const ShuffleNode* op) {
 
 void ExprVisitor::VisitExpr_(const BroadcastNode* op) { this->VisitExpr(op->value); }
 
-PrimExpr ExprMutator::VisitExpr_(const VarNode* op) { return ffi::GetRef<PrimExpr>(op); }
+Expr ExprMutator::VisitExpr_(const VarNode* op) { return ffi::GetRef<Var>(op); }
 
-PrimExpr ExprMutator::VisitExpr_(const SizeVarNode* op) {
-  return this->VisitExpr_(static_cast<const VarNode*>(op));
-}
-
-PrimExpr ExprMutator::VisitExpr_(const BufferLoadNode* op) {
-  auto fmutate = [this](const PrimExpr& e) { return this->VisitExpr(e); };
+Expr ExprMutator::VisitExpr_(const BufferLoadNode* op) {
+  auto fmutate = [this](const PrimExpr& e) { return this->VisitPrimExpr(e); };
   ffi::Array<PrimExpr> indices = op->indices.Map(fmutate);
   if (indices.same_as(op->indices)) {
     return ffi::GetRef<PrimExpr>(op);
@@ -127,8 +121,8 @@ PrimExpr ExprMutator::VisitExpr_(const BufferLoadNode* op) {
   }
 }
 
-PrimExpr ExprMutator::VisitExpr_(const ProducerLoadNode* op) {
-  auto fmutate = [this](const PrimExpr& e) { return this->VisitExpr(e); };
+Expr ExprMutator::VisitExpr_(const ProducerLoadNode* op) {
+  auto fmutate = [this](const PrimExpr& e) { return this->VisitPrimExpr(e); };
   ffi::Array<PrimExpr> indices = op->indices.Map(fmutate);
   if (indices.same_as(op->indices)) {
     return ffi::GetRef<PrimExpr>(op);
@@ -137,9 +131,9 @@ PrimExpr ExprMutator::VisitExpr_(const ProducerLoadNode* op) {
   }
 }
 
-PrimExpr ExprMutator::VisitExpr_(const LetNode* op) {
-  PrimExpr value = this->VisitExpr(op->value);
-  PrimExpr body = this->VisitExpr(op->body);
+Expr ExprMutator::VisitExpr_(const LetNode* op) {
+  PrimExpr value = this->VisitPrimExpr(op->value);
+  PrimExpr body = this->VisitPrimExpr(op->body);
   if (value.same_as(op->value) && body.same_as(op->body)) {
     return ffi::GetRef<PrimExpr>(op);
   } else {
@@ -147,33 +141,42 @@ PrimExpr ExprMutator::VisitExpr_(const LetNode* op) {
   }
 }
 
-PrimExpr ExprMutator::VisitExpr_(const CallNode* op) {
-  auto fmutate = [this](const PrimExpr& e) { return this->VisitExpr(e); };
-  ffi::Array<PrimExpr> args = op->args.Map(fmutate);
+Expr ExprMutator::VisitExpr_(const CallNode* op) {
+  ffi::Array<Expr> args =
+      op->args.Map([this](const Expr& arg) -> Expr { return this->VisitExpr(arg); });
 
   if (args.same_as(op->args)) {
-    return ffi::GetRef<PrimExpr>(op);
+    return ffi::GetRef<Call>(op);
   } else {
-    return Call(op->dtype, op->op, args);
+    Type result_type = op->ExprNode::ty;
+    if (op->op.same_as(builtin::buffer_data())) {
+      TVM_FFI_ICHECK_EQ(args.size(), 1);
+      const auto* buffer_var = args[0].as<VarNode>();
+      TVM_FFI_ICHECK(buffer_var);
+      const auto* buffer_type = buffer_var->ty.as<BufferTypeNode>();
+      TVM_FFI_ICHECK(buffer_type);
+      result_type = buffer_type->DataPointerType();
+    }
+    return Call(result_type, op->op, args, op->attrs, op->ty_args, op->span);
   }
 }
 
 #define DEFINE_OP_RETURN_SELF_EXPR_MUTATE_(OP) \
-  PrimExpr ExprMutator::VisitExpr_(const OP* op) { return ffi::GetRef<PrimExpr>(op); }
+  Expr ExprMutator::VisitExpr_(const OP* op) { return ffi::GetRef<PrimExpr>(op); }
 
 DEFINE_OP_RETURN_SELF_EXPR_MUTATE_(IntImmNode)
 DEFINE_OP_RETURN_SELF_EXPR_MUTATE_(FloatImmNode)
 DEFINE_OP_RETURN_SELF_EXPR_MUTATE_(StringImmNode)
 
-#define DEFINE_BIOP_EXPR_MUTATE_(OP)                     \
-  PrimExpr ExprMutator::VisitExpr_(const OP##Node* op) { \
-    PrimExpr a = this->VisitExpr(op->a);                 \
-    PrimExpr b = this->VisitExpr(op->b);                 \
-    if (a.same_as(op->a) && b.same_as(op->b)) {          \
-      return ffi::GetRef<PrimExpr>(op);                  \
-    } else {                                             \
-      return OP(a, b);                                   \
-    }                                                    \
+#define DEFINE_BIOP_EXPR_MUTATE_(OP)                 \
+  Expr ExprMutator::VisitExpr_(const OP##Node* op) { \
+    PrimExpr a = this->VisitPrimExpr(op->a);         \
+    PrimExpr b = this->VisitPrimExpr(op->b);         \
+    if (a.same_as(op->a) && b.same_as(op->b)) {      \
+      return ffi::GetRef<PrimExpr>(op);              \
+    } else {                                         \
+      return OP(a, b);                               \
+    }                                                \
   }
 
 DEFINE_BIOP_EXPR_MUTATE_(Add);
@@ -194,11 +197,11 @@ DEFINE_BIOP_EXPR_MUTATE_(GE);
 DEFINE_BIOP_EXPR_MUTATE_(And);
 DEFINE_BIOP_EXPR_MUTATE_(Or);
 
-PrimExpr ExprMutator::VisitExpr_(const ReduceNode* op) {
+Expr ExprMutator::VisitExpr_(const ReduceNode* op) {
   auto fitervar = [this](const IterVar& v) {
     Range r = v->dom;
-    PrimExpr min = this->VisitExpr(r->min);
-    PrimExpr extent = this->VisitExpr(r->extent);
+    PrimExpr min = this->VisitPrimExpr(r->min);
+    PrimExpr extent = this->VisitPrimExpr(r->extent);
     if (min.same_as(r->min) && extent.same_as(r->extent)) {
       return v;
     } else {
@@ -207,11 +210,11 @@ PrimExpr ExprMutator::VisitExpr_(const ReduceNode* op) {
   };
   ffi::Array<IterVar> axis = op->axis.Map(fitervar);
 
-  auto fexpr = [this](const PrimExpr& e) { return this->VisitExpr(e); };
+  auto fexpr = [this](const PrimExpr& e) { return this->VisitPrimExpr(e); };
   ffi::Array<PrimExpr> source = op->source.Map(fexpr);
   ffi::Array<PrimExpr> init = op->init.Map(fexpr);
 
-  PrimExpr condition = this->VisitExpr(op->condition);
+  PrimExpr condition = this->VisitPrimExpr(op->condition);
 
   if (axis.same_as(op->axis) && source.same_as(op->source) && condition.same_as(op->condition) &&
       init.same_as(op->init)) {
@@ -221,17 +224,17 @@ PrimExpr ExprMutator::VisitExpr_(const ReduceNode* op) {
   }
 }
 
-PrimExpr ExprMutator::VisitExpr_(const CastNode* op) {
-  PrimExpr value = this->VisitExpr(op->value);
+Expr ExprMutator::VisitExpr_(const CastNode* op) {
+  PrimExpr value = this->VisitPrimExpr(op->value);
   if (value.same_as(op->value)) {
     return ffi::GetRef<PrimExpr>(op);
   } else {
-    return Cast(op->dtype, value);
+    return Cast(op->ExprNode::ty.as_or_throw<PrimType>(), value);
   }
 }
 
-PrimExpr ExprMutator::VisitExpr_(const NotNode* op) {
-  PrimExpr a = this->VisitExpr(op->a);
+Expr ExprMutator::VisitExpr_(const NotNode* op) {
+  PrimExpr a = this->VisitPrimExpr(op->a);
   if (a.same_as(op->a)) {
     return ffi::GetRef<PrimExpr>(op);
   } else {
@@ -239,10 +242,10 @@ PrimExpr ExprMutator::VisitExpr_(const NotNode* op) {
   }
 }
 
-PrimExpr ExprMutator::VisitExpr_(const SelectNode* op) {
-  PrimExpr condition = this->VisitExpr(op->condition);
-  PrimExpr true_value = this->VisitExpr(op->true_value);
-  PrimExpr false_value = this->VisitExpr(op->false_value);
+Expr ExprMutator::VisitExpr_(const SelectNode* op) {
+  PrimExpr condition = this->VisitPrimExpr(op->condition);
+  PrimExpr true_value = this->VisitPrimExpr(op->true_value);
+  PrimExpr false_value = this->VisitPrimExpr(op->false_value);
   if (condition.same_as(op->condition) && true_value.same_as(op->true_value) &&
       false_value.same_as(op->false_value)) {
     return ffi::GetRef<PrimExpr>(op);
@@ -251,10 +254,10 @@ PrimExpr ExprMutator::VisitExpr_(const SelectNode* op) {
   }
 }
 
-PrimExpr ExprMutator::VisitExpr_(const RampNode* op) {
-  PrimExpr base = this->VisitExpr(op->base);
-  PrimExpr stride = this->VisitExpr(op->stride);
-  PrimExpr lanes = this->VisitExpr(op->lanes);
+Expr ExprMutator::VisitExpr_(const RampNode* op) {
+  PrimExpr base = this->VisitPrimExpr(op->base);
+  PrimExpr stride = this->VisitPrimExpr(op->stride);
+  PrimExpr lanes = this->VisitPrimExpr(op->lanes);
   if (base.same_as(op->base) && stride.same_as(op->stride) && lanes.same_as(op->lanes)) {
     return ffi::GetRef<PrimExpr>(op);
   } else {
@@ -262,9 +265,9 @@ PrimExpr ExprMutator::VisitExpr_(const RampNode* op) {
   }
 }
 
-PrimExpr ExprMutator::VisitExpr_(const BroadcastNode* op) {
-  PrimExpr value = this->VisitExpr(op->value);
-  PrimExpr lanes = this->VisitExpr(op->lanes);
+Expr ExprMutator::VisitExpr_(const BroadcastNode* op) {
+  PrimExpr value = this->VisitPrimExpr(op->value);
+  PrimExpr lanes = this->VisitPrimExpr(op->lanes);
   if (value.same_as(op->value) && lanes.same_as(op->lanes)) {
     return ffi::GetRef<PrimExpr>(op);
   } else {
@@ -272,8 +275,8 @@ PrimExpr ExprMutator::VisitExpr_(const BroadcastNode* op) {
   }
 }
 
-PrimExpr ExprMutator::VisitExpr_(const ShuffleNode* op) {
-  auto fexpr = [this](const PrimExpr& e) { return this->VisitExpr(e); };
+Expr ExprMutator::VisitExpr_(const ShuffleNode* op) {
+  auto fexpr = [this](const PrimExpr& e) { return this->VisitPrimExpr(e); };
   auto vectors = op->vectors.Map(fexpr);
   auto indices = op->indices.Map(fexpr);
   if (vectors.same_as(op->vectors) && indices.same_as(op->indices)) {

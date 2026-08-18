@@ -61,7 +61,7 @@ void VerifyCachedFlags(const ScheduleState& self);
  * \param root_block The root block of the PrimFunc
  * \param result_g_var The result GlobalVar
  * \return The result PrimFunc where the root block belongs to
- * \note This function returns the pointer instead of ObjectRef to avoid later copy-on-write
+ * \note This function returns the pointer instead of ffi::ObjectRef to avoid later copy-on-write
  */
 const PrimFuncNode* GetRootPrimFunc(const IRModule& mod, const StmtNode* root_block,
                                     GlobalVar* result_g_var);
@@ -81,7 +81,7 @@ StmtSRef GetSRefTreeRoot(const StmtSRef& sref);
  * \param analyzer The analyzer to be bound
  */
 void AddShapeVarBounds(const ScheduleState& state, const StmtSRefNode* sref,
-                       arith::Analyzer* analyzer);
+                       arith::AnalyzerObj* analyzer);
 
 /******** Scope ********/
 /*!
@@ -232,7 +232,7 @@ bool IsWriteCache(const StmtSRef& block_sref);
  * \return A boolean flag indicating if the binding is affine
  */
 bool IsAffineBinding(const SBlockRealize& realize, const ffi::Map<Var, Range>& loop_var_ranges,
-                     arith::Analyzer* analyzer);
+                     arith::AnalyzerObj* analyzer);
 
 /*!
  * \brief Check whether a block has an affine binding using the cached flag, and throw an exception
@@ -298,7 +298,7 @@ bool GetVarsTouchedByBlockIters(const SBlockRealize& block_realize,
  * \throw ScheduleError If the loop doesn't starts with zero.
  */
 void CheckLoopStartsWithZero(const ScheduleState& self, const StmtSRef& loop_sref,
-                             arith::Analyzer* analyzer);
+                             arith::AnalyzerObj* analyzer);
 
 /*!
  * \brief Check whether a block has a trivial binding, i.e. each block var is bound to a outer loop,
@@ -450,8 +450,8 @@ struct ProducerConsumerSplit {
  * \return The buffer of the n-th read/write region of the block.
  * \throw ScheduleError If the buffer index is out of bound.
  */
-Buffer GetNthAccessBuffer(const ScheduleState& self, const SBlock& block, int n,
-                          BufferIndexType index_type);
+BufferVar GetNthAccessBuffer(const ScheduleState& self, const SBlock& block, int n,
+                             BufferIndexType index_type);
 
 /*!
  * \brief Get the n-th read or write buffer of the given block.
@@ -473,7 +473,7 @@ BufferRegion GetNthAccessBufferRegion(const ScheduleState& self, const SBlock& b
  *         buffer is from match_buffer).
  */
 std::pair<ffi::Optional<StmtSRef>, bool> GetBufferDefiningSite(const StmtSRef& block_sref,
-                                                               const Buffer& buffer);
+                                                               const BufferVar& buffer);
 
 /******** Reduction SBlock Related ********/
 
@@ -600,9 +600,10 @@ bool CanReverseComputeAt(const ScheduleState& self, const StmtSRef& block_sref,
  * \param predicate The predicate of the access
  * \param analyzer Arithmetic analyzer
  */
-ffi::Optional<IndexMap> SuggestIndexMap(const Buffer& buffer, const ffi::Array<PrimExpr>& indices,
+ffi::Optional<IndexMap> SuggestIndexMap(const BufferVar& buffer,
+                                        const ffi::Array<PrimExpr>& indices,
                                         const ffi::Array<For>& loops, const PrimExpr& predicate,
-                                        arith::Analyzer* analyzer);
+                                        arith::AnalyzerObj* analyzer);
 
 /*!
  * \brief Checks if the given AST contains the specific operators
@@ -706,7 +707,7 @@ ffi::Array<arith::IntSet> AnalyzeRegionUpperBound(const BufferRegion& region,
                                                   const PrimExpr& predicate,
                                                   const StmtSRef& dom_low_inclusive,
                                                   const StmtSRef& dom_high_exclusive,
-                                                  arith::Analyzer* analyzer);
+                                                  arith::AnalyzerObj* analyzer);
 
 /*!
  * \brief Analyze the buffer region under the sref tree path [dom_low_inclusive, dom_high_exclusive)
@@ -722,7 +723,7 @@ ffi::Array<arith::IntSet> AnalyzeRegionLowerBound(const BufferRegion& region,
                                                   const PrimExpr& predicate,
                                                   const StmtSRef& dom_low_inclusive,
                                                   const StmtSRef& dom_high_exclusive,
-                                                  arith::Analyzer* analyzer);
+                                                  arith::AnalyzerObj* analyzer);
 
 /*!
  * \brief Simplify non-trivial expressions
@@ -734,19 +735,19 @@ ffi::Array<arith::IntSet> AnalyzeRegionLowerBound(const BufferRegion& region,
  * simplified to constant values for further scheduling and analysis because simplifing away the
  * block iters may result in loss of information for further analysis.
  */
-PrimExpr SimplifyNonTrivialExpr(const PrimExpr& expr, arith::Analyzer* analyzer);
+PrimExpr SimplifyNonTrivialExpr(const PrimExpr& expr, arith::AnalyzerObj* analyzer);
 
 /*! \brief Necessary information used for tensorization */
-class TensorizeInfoNode : public Object {
+class TensorizeInfoNode : public ffi::Object {
  public:
   /*! \brief Maps loops in a target block to the ones in an intrinsic description */
   ffi::Map<tirx::StmtSRef, tirx::For> loop_map;
   /*! \brief Maps loops in an intrinsic description to its index, outer to inner */
-  ffi::Map<tirx::For, Integer> desc_loop_indexer;
+  ffi::Map<tirx::For, int64_t> desc_loop_indexer;
   /*! \brief Optional padded extents of the block iters when padding is needed to match the
    * intrinsic description
    */
-  ffi::Optional<ffi::Array<Integer>> block_iter_paddings;
+  ffi::Optional<ffi::Array<int64_t>> block_iter_paddings;
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
@@ -755,15 +756,15 @@ class TensorizeInfoNode : public Object {
         .def_ro("desc_loop_indexer", &TensorizeInfoNode::desc_loop_indexer)
         .def_ro("block_iter_paddings", &TensorizeInfoNode::block_iter_paddings);
   }
-  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("s_tir.schedule.TensorizeInfo", TensorizeInfoNode, Object);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("s_tir.schedule.TensorizeInfo", TensorizeInfoNode, ffi::Object);
 };
 
-class TensorizeInfo : public ObjectRef {
+class TensorizeInfo : public ffi::ObjectRef {
  public:
-  explicit TensorizeInfo(ObjectPtr<TensorizeInfoNode> data) : ObjectRef(data) {
+  explicit TensorizeInfo(ffi::ObjectPtr<TensorizeInfoNode> data) : ffi::ObjectRef(data) {
     TVM_FFI_ICHECK(data != nullptr);
   }
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(TensorizeInfo, ObjectRef, TensorizeInfoNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(TensorizeInfo, ffi::ObjectRef, TensorizeInfoNode);
 };
 
 /*!
@@ -780,7 +781,7 @@ ffi::Optional<TensorizeInfo> GetTensorizeLoopMapping(const s_tir::ScheduleState&
                                                      bool allow_padding);
 
 /*！\brief Necessary information used to perform transformations for tensorization */
-class AutoTensorizeMappingInfoNode : public Object {
+class AutoTensorizeMappingInfoNode : public ffi::Object {
  public:
   /*! \brief Possible mappings to apply to block iters */
   ffi::Array<IndexMap> mappings;
@@ -788,9 +789,9 @@ class AutoTensorizeMappingInfoNode : public Object {
   /* Additional information from AutoTensorizeComparator */
 
   /*! \brief Mapping from LHS buffer to RHS buffer */
-  ffi::Map<Buffer, Buffer> lhs_buffer_map;
-  /*! \brief Buffer indices on RHS */
-  ffi::Map<Buffer, ffi::Array<PrimExpr>> rhs_buffer_indices;
+  ffi::Map<BufferVar, BufferVar> lhs_buffer_map;
+  /*! \brief BufferVar indices on RHS */
+  ffi::Map<BufferVar, ffi::Array<PrimExpr>> rhs_buffer_indices;
   /*! \brief SBlock iters on LHS */
   ffi::Array<IterVar> lhs_iters;
   /*! \brief SBlock iters on RHS */
@@ -806,16 +807,16 @@ class AutoTensorizeMappingInfoNode : public Object {
         .def_ro("rhs_iters", &AutoTensorizeMappingInfoNode::rhs_iters);
   }
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("s_tir.schedule.AutoTensorizeMappingInfo",
-                                    AutoTensorizeMappingInfoNode, Object);
+                                    AutoTensorizeMappingInfoNode, ffi::Object);
 };
 
-class AutoTensorizeMappingInfo : public ObjectRef {
+class AutoTensorizeMappingInfo : public ffi::ObjectRef {
  public:
-  explicit AutoTensorizeMappingInfo(ObjectPtr<AutoTensorizeMappingInfoNode> data)
-      : ObjectRef(data) {
+  explicit AutoTensorizeMappingInfo(ffi::ObjectPtr<AutoTensorizeMappingInfoNode> data)
+      : ffi::ObjectRef(data) {
     TVM_FFI_ICHECK(data != nullptr);
   }
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(AutoTensorizeMappingInfo, ObjectRef,
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(AutoTensorizeMappingInfo, ffi::ObjectRef,
                                                 AutoTensorizeMappingInfoNode);
 };
 

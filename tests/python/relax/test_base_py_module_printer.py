@@ -35,7 +35,7 @@ class SimplePyFuncModule(BasePyModule):
         """Simple addition function."""
         x_tvm = self._convert_pytorch_to_tvm(x)
         y_tvm = self._convert_pytorch_to_tvm(y)
-        result = self.call_tir(self.add_tir, [x_tvm, y_tvm], out_sinfo=R.Tensor((5,), "float32"))
+        result = self.call_tir(self.add_tir, [x_tvm, y_tvm], out_ty=R.Tensor((5,), "float32"))
         return self._convert_tvm_to_pytorch(result)
 
     @I.pyfunc
@@ -43,12 +43,10 @@ class SimplePyFuncModule(BasePyModule):
         """Simple multiplication function."""
         x_tvm = self._convert_pytorch_to_tvm(x)
         y_tvm = self._convert_pytorch_to_tvm(y)
-        result = self.call_tir(
-            self.multiply_tir, [x_tvm, y_tvm], out_sinfo=R.Tensor((5,), "float32")
-        )
+        result = self.call_tir(self.multiply_tir, [x_tvm, y_tvm], out_ty=R.Tensor((5,), "float32"))
         return self._convert_tvm_to_pytorch(result)
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def add_tir(var_x: T.handle, var_y: T.handle, var_out: T.handle):
         x = T.match_buffer(var_x, (5,), "float32")
         y = T.match_buffer(var_y, (5,), "float32")
@@ -57,7 +55,7 @@ class SimplePyFuncModule(BasePyModule):
         for i in range(5):
             out[i] = x[i] + y[i]
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def multiply_tir(var_x: T.handle, var_y: T.handle, var_out: T.handle):
         x = T.match_buffer(var_x, (5,), "float32")
         y = T.match_buffer(var_y, (5,), "float32")
@@ -91,16 +89,16 @@ class ComplexPyFuncModule(BasePyModule):
 
             # Run ML inference
             features = self.call_tir(
-                self.extract_features, [tvm_data], out_sinfo=R.Tensor((10,), "float32")
+                self.extract_features, [tvm_data], out_ty=R.Tensor((10,), "float32")
             )
 
             predictions = self.call_tir(
-                self.ml_inference, [features, tvm_params], out_sinfo=R.Tensor((5,), "float32")
+                self.ml_inference, [features, tvm_params], out_ty=R.Tensor((5,), "float32")
             )
 
             # Post-process results
             final_result = self.call_tir(
-                self.post_process, [predictions], out_sinfo=R.Tensor((5,), "float32")
+                self.post_process, [predictions], out_ty=R.Tensor((5,), "float32")
             )
 
             return self._convert_tvm_to_pytorch(final_result)
@@ -123,11 +121,11 @@ class ComplexPyFuncModule(BasePyModule):
         # Convert and return
         tvm_processed = self._convert_pytorch_to_tvm(processed)
         result = self.call_tir(
-            self.normalize_data, [tvm_processed], out_sinfo=R.Tensor((10,), "float32")
+            self.normalize_data, [tvm_processed], out_ty=R.Tensor((10,), "float32")
         )
         return self._convert_tvm_to_pytorch(result)
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def extract_features(data: T.handle, features: T.handle):
         T.func_attr({"tirx.noalias": True})
         Data = T.match_buffer(data, (10,), "float32")
@@ -136,7 +134,7 @@ class ComplexPyFuncModule(BasePyModule):
         for i in range(10):
             Features[i] = T.sqrt(Data[i])
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def ml_inference(features: T.handle, params: T.handle, output: T.handle):
         T.func_attr({"tirx.noalias": True})
         Features = T.match_buffer(features, (10,), "float32")
@@ -146,7 +144,7 @@ class ComplexPyFuncModule(BasePyModule):
         for i in range(5):
             Output[i] = Features[i] * Params[i] + Features[i + 5] * Params[i + 5]
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def post_process(predictions: T.handle, final: T.handle):
         T.func_attr({"tirx.noalias": True})
         Predictions = T.match_buffer(predictions, (5,), "float32")
@@ -155,7 +153,7 @@ class ComplexPyFuncModule(BasePyModule):
         for i in range(5):
             Final[i] = T.max(Predictions[i], 0.0)
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def normalize_data(data: T.handle, normalized: T.handle):
         T.func_attr({"tirx.noalias": True})
         Data = T.match_buffer(data, (10,), "float32")
@@ -211,7 +209,7 @@ class EdgeCasePyFuncModule(BasePyModule):
                 result.append(0)
         return result
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def dummy_tir(data: T.handle, output: T.handle):
         T.func_attr({"tirx.noalias": True})
         Data = T.match_buffer(data, (1,), "float32")
@@ -240,7 +238,7 @@ class PerformancePyFuncModule(BasePyModule):
         x_tvm = self._convert_pytorch_to_tvm(x)
         y_tvm = self._convert_pytorch_to_tvm(y)
         result = self.call_tir(
-            self.vectorized_add, [x_tvm, y_tvm], out_sinfo=R.Tensor((10,), "float32")
+            self.vectorized_add, [x_tvm, y_tvm], out_ty=R.Tensor((10,), "float32")
         )
         return self._convert_tvm_to_pytorch(result)
 
@@ -271,7 +269,7 @@ class PerformancePyFuncModule(BasePyModule):
             # Create new tensor if gradients are needed
             return large_tensor + 1.0
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def vectorized_add(a: T.handle, b: T.handle, c: T.handle):
         T.func_attr({"tirx.noalias": True})
         A = T.match_buffer(a, (10,), "float32")
@@ -317,7 +315,7 @@ class IntegrationPyFuncModule(BasePyModule):
             result = self.call_tir(
                 self.final_transform,
                 [tvm_data],
-                out_sinfo=R.Tensor((reduced_data.shape[0], 10), "float32"),
+                out_ty=R.Tensor((reduced_data.shape[0], 10), "float32"),
             )
 
             return self._convert_tvm_to_pytorch(result)
@@ -343,7 +341,7 @@ class IntegrationPyFuncModule(BasePyModule):
 
         return final_result
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def final_transform(data: T.handle, output: T.handle):
         T.func_attr({"tirx.noalias": True})
         Data = T.match_buffer(data, (10, 10), "float32")
@@ -408,7 +406,7 @@ class ErrorHandlingPyFuncModule(BasePyModule):
                 # Return safe default
                 return self._get_safe_default()
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def safe_transform(data: T.handle, output: T.handle):
         T.func_attr({"tirx.noalias": True})
         Data = T.match_buffer(data, (5,), "float32")
@@ -719,15 +717,15 @@ def test_call_py_func_with_base_py_module():
     import numpy as np
     import torch
 
-    from tvm.relax import TensorStructInfo, Var
+    from tvm.relax import TensorType, Var
     from tvm.relax.expr import StringImm
     from tvm.relax.op import call_py_func
 
     # Test 1: Operator creation and basic properties
-    x = Var("x", TensorStructInfo((5,), "float32"))
-    y = Var("y", TensorStructInfo((5,), "float32"))
+    x = Var("x", TensorType((5,), "float32"))
+    y = Var("y", TensorType((5,), "float32"))
 
-    call_expr = call_py_func(StringImm("test_func"), (x, y), out_sinfo=R.Tensor((5,), "float32"))
+    call_expr = call_py_func(StringImm("test_func"), (x, y), out_ty=R.Tensor((5,), "float32"))
 
     assert call_expr.op.name == "relax.call_py_func"
     assert call_expr.args[0].value == "test_func"
@@ -737,8 +735,8 @@ def test_call_py_func_with_base_py_module():
     try:
         call_py_func(
             "invalid",
-            (Var("x", TensorStructInfo((5,), "float32")),),
-            out_sinfo=R.Tensor((5,), "float32"),
+            (Var("x", TensorType((5,), "float32")),),
+            out_ty=R.Tensor((5,), "float32"),
         )
         assert False, "Should raise type error"
     except Exception as e:
@@ -749,7 +747,7 @@ def test_call_py_func_with_base_py_module():
     class ValidationTestModule(BasePyModule):
         @R.function
         def test_invalid_call(x: R.Tensor((5,), "float32")) -> R.Tensor((5,), "float32"):
-            result = R.call_py_func("non_existent_func", (x,), out_sinfo=R.Tensor((5,), "float32"))
+            result = R.call_py_func("non_existent_func", (x,), out_ty=R.Tensor((5,), "float32"))
             return result
 
     device = tvm.cpu()
@@ -775,9 +773,9 @@ def test_call_py_func_with_base_py_module():
 
         @R.function
         def mixed_computation(x: R.Tensor((10,), "float32")) -> R.Tensor((10,), "float32"):
-            relu_result = R.call_py_func("torch_relu", (x,), out_sinfo=R.Tensor((10,), "float32"))
+            relu_result = R.call_py_func("torch_relu", (x,), out_ty=R.Tensor((10,), "float32"))
             final_result = R.call_py_func(
-                "torch_softmax", (relu_result,), out_sinfo=R.Tensor((10,), "float32")
+                "torch_softmax", (relu_result,), out_ty=R.Tensor((10,), "float32")
             )
             return final_result
 

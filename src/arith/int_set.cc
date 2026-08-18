@@ -23,14 +23,17 @@
  */
 #include <tvm/arith/int_set.h>
 #include <tvm/arith/iter_affine_map.h>
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/expr_functor.h>
 #include <tvm/tirx/op.h>
 
 #include <algorithm>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #include "constraint_extract.h"
@@ -43,13 +46,12 @@ namespace arith {
 
 using tirx::is_one;
 using tirx::is_zero;
-using tirx::make_const;
-using tirx::make_zero;
+using tirx::MakeConst;
 
 TVM_FFI_STATIC_INIT_BLOCK() { IntervalSetNode::RegisterReflection(); }
 
-PrimExpr SymbolicLimits::pos_inf_ = Var("pos_inf", DataType::Handle());
-PrimExpr SymbolicLimits::neg_inf_ = Var("neg_inf", DataType::Handle());
+PrimExpr SymbolicLimits::pos_inf_ = tirx::PrimVar("pos_inf", PrimType::Int(64));
+PrimExpr SymbolicLimits::neg_inf_ = tirx::PrimVar("neg_inf", PrimType::Int(64));
 
 IntervalSet::IntervalSet(PrimExpr min_value, PrimExpr max_value) {
   auto node = ffi::make_object<IntervalSetNode>();
@@ -67,11 +69,13 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   refl::GlobalDef().def("arith.IntervalSet", MakeIntervalSet);
 }
 
-IntervalSet Intersect(Analyzer* analyzer, IntervalSet a, IntervalSet b) {
+IntervalSet Intersect(AnalyzerObj* analyzer, IntervalSet a, IntervalSet b) {
   PrimExpr max_value = min(a->max_value, b->max_value);
   PrimExpr min_value = max(a->min_value, b->min_value);
-  if ((max_value.dtype().is_int() || max_value.dtype().is_uint()) &&
-      (min_value.dtype().is_int() || min_value.dtype().is_uint()) &&
+  PrimType max_ty = max_value.ty();
+  PrimType min_ty = min_value.ty();
+  if (max_ty.MatchesCode(DLDataTypeCode::kDLInt, DLDataTypeCode::kDLUInt) &&
+      min_ty.MatchesCode(DLDataTypeCode::kDLInt, DLDataTypeCode::kDLUInt) &&
       analyzer->CanProve(max_value < min_value)) {
     return IntervalSet::Empty();
   } else {
@@ -79,7 +83,7 @@ IntervalSet Intersect(Analyzer* analyzer, IntervalSet a, IntervalSet b) {
   }
 }
 
-IntervalSet Union(Analyzer* analyzer, IntervalSet a, IntervalSet b) {
+IntervalSet Union(AnalyzerObj* analyzer, IntervalSet a, IntervalSet b) {
   if (a->IsEmpty()) return b;
   if (b->IsEmpty()) return a;
   PrimExpr max_value = max(a->max_value, b->max_value);
@@ -118,8 +122,8 @@ TVM_DECLARE_LOGICAL_OP(Not);
  * \note this can possibly relax the set.
  */
 template <typename Op, typename OpNode>
-inline IntervalSet Combine(Analyzer* analyzer, IntervalSet a, IntervalSet b, const OpNode* op) {
-  DataType dtype = op->dtype;
+inline IntervalSet Combine(AnalyzerObj* analyzer, IntervalSet a, IntervalSet b, const OpNode* op) {
+  PrimType dtype = op->ty.template as_or_throw<PrimType>();
   if (a->IsSinglePoint() && b->IsSinglePoint()) {
     PrimExpr expr;
     if (auto res = TryConstFold<Op>(a->min_value, b->min_value)) {
@@ -130,7 +134,7 @@ inline IntervalSet Combine(Analyzer* analyzer, IntervalSet a, IntervalSet b, con
     return IntervalSet::SinglePoint(expr);
   }
   if (is_logical_op<Op>::value) {
-    return IntervalSet(make_const(dtype, 0), make_const(dtype, 1));
+    return IntervalSet(IntImm(dtype, 0), IntImm(dtype, 1));
   }
   if (a->IsEmpty()) return a;
   if (b->IsEmpty()) return b;
@@ -140,7 +144,7 @@ inline IntervalSet Combine(Analyzer* analyzer, IntervalSet a, IntervalSet b, con
 }
 
 template <>
-inline IntervalSet Combine<tirx::Add>(Analyzer* analyer, IntervalSet a, IntervalSet b,
+inline IntervalSet Combine<tirx::Add>(AnalyzerObj* analyer, IntervalSet a, IntervalSet b,
                                       const tirx::AddNode* /* op */) {
   if (a->IsSinglePoint() && b->IsSinglePoint()) {
     return IntervalSet::SinglePoint(a->min_value + b->min_value);
@@ -155,7 +159,7 @@ inline IntervalSet Combine<tirx::Add>(Analyzer* analyer, IntervalSet a, Interval
 }
 
 template <>
-inline IntervalSet Combine<tirx::Sub>(Analyzer* analyer, IntervalSet a, IntervalSet b,
+inline IntervalSet Combine<tirx::Sub>(AnalyzerObj* analyer, IntervalSet a, IntervalSet b,
                                       const tirx::SubNode* /* op */) {
   if (a->IsSinglePoint() && b->IsSinglePoint()) {
     return IntervalSet::SinglePoint(a->min_value - b->min_value);
@@ -170,7 +174,7 @@ inline IntervalSet Combine<tirx::Sub>(Analyzer* analyer, IntervalSet a, Interval
 }
 
 template <>
-inline IntervalSet Combine<tirx::Mul>(Analyzer* analyzer, IntervalSet a, IntervalSet b,
+inline IntervalSet Combine<tirx::Mul>(AnalyzerObj* analyzer, IntervalSet a, IntervalSet b,
                                       const tirx::MulNode* /* op */) {
   if (a->IsSinglePoint() && b->IsSinglePoint()) {
     return IntervalSet::SinglePoint(a->min_value * b->min_value);
@@ -193,7 +197,7 @@ inline IntervalSet Combine<tirx::Mul>(Analyzer* analyzer, IntervalSet a, Interva
       return IntervalSet(min_value, max_value);
     } else if (a->HasUpperBound() && a->HasLowerBound()) {
       using tirx::Select;
-      PrimExpr sign = b->min_value >= make_zero(b->min_value.dtype().element_of());
+      PrimExpr sign = b->min_value >= IntImm(b->min_value.ty().WithLanes(1), 0);
       PrimExpr e1 = a->min_value * b->min_value;
       PrimExpr e2 = a->max_value * b->min_value;
       return IntervalSet(Select(sign, e1, e2), Select(sign, e2, e1));
@@ -204,7 +208,7 @@ inline IntervalSet Combine<tirx::Mul>(Analyzer* analyzer, IntervalSet a, Interva
 }
 
 template <>
-inline IntervalSet Combine<tirx::Div>(Analyzer* analyzer, IntervalSet a, IntervalSet b,
+inline IntervalSet Combine<tirx::Div>(AnalyzerObj* analyzer, IntervalSet a, IntervalSet b,
                                       const tirx::DivNode* /* op */) {
   if (a->IsSinglePoint() && b->IsSinglePoint()) {
     return IntervalSet::SinglePoint(a->min_value / b->min_value);
@@ -227,7 +231,7 @@ inline IntervalSet Combine<tirx::Div>(Analyzer* analyzer, IntervalSet a, Interva
       return IntervalSet(min_value, max_value);
     } else if (a->HasUpperBound() && a->HasLowerBound()) {
       using tirx::Select;
-      PrimExpr sign = b->min_value >= make_zero(b->min_value.dtype().element_of());
+      PrimExpr sign = b->min_value >= IntImm(b->min_value.ty().WithLanes(1), 0);
       PrimExpr e1 = a->min_value / b->min_value;
       PrimExpr e2 = a->max_value / b->min_value;
       return IntervalSet(Select(sign, e1, e2), Select(sign, e2, e1));
@@ -238,7 +242,7 @@ inline IntervalSet Combine<tirx::Div>(Analyzer* analyzer, IntervalSet a, Interva
 }
 
 template <>
-inline IntervalSet Combine<tirx::Mod>(Analyzer* analyzer, IntervalSet a, IntervalSet b,
+inline IntervalSet Combine<tirx::Mod>(AnalyzerObj* analyzer, IntervalSet a, IntervalSet b,
                                       const tirx::ModNode* op) {
   if (a->IsSinglePoint() && b->IsSinglePoint()) {
     return IntervalSet::SinglePoint(truncmod(a->min_value, b->min_value));
@@ -256,7 +260,7 @@ inline IntervalSet Combine<tirx::Mod>(Analyzer* analyzer, IntervalSet a, Interva
     // is the case of our application.
     // TODO(tqchen): add bound constraints for a.
     if (analyzer->CanProveGreaterEqual(divisor, 0)) {
-      return IntervalSet(make_zero(divisor.dtype()), divisor - 1);
+      return IntervalSet(IntImm(divisor.ty(), 0), divisor - 1);
     } else {
       PrimExpr bound = abs(divisor) - 1;
       return IntervalSet(-bound, bound);
@@ -267,7 +271,7 @@ inline IntervalSet Combine<tirx::Mod>(Analyzer* analyzer, IntervalSet a, Interva
 }
 
 template <>
-inline IntervalSet Combine<tirx::FloorDiv>(Analyzer* analyzer, IntervalSet a, IntervalSet b,
+inline IntervalSet Combine<tirx::FloorDiv>(AnalyzerObj* analyzer, IntervalSet a, IntervalSet b,
                                            const tirx::FloorDivNode* /* op */) {
   if (a->IsSinglePoint() && b->IsSinglePoint()) {
     return IntervalSet::SinglePoint(floordiv(a->min_value, b->min_value));
@@ -290,7 +294,7 @@ inline IntervalSet Combine<tirx::FloorDiv>(Analyzer* analyzer, IntervalSet a, In
       return IntervalSet(min_value, max_value);
     } else if (a->HasUpperBound() && a->HasLowerBound()) {
       using tirx::Select;
-      PrimExpr sign = b->min_value >= make_zero(b->min_value.dtype().element_of());
+      PrimExpr sign = b->min_value >= IntImm(b->min_value.ty().WithLanes(1), 0);
       PrimExpr e1 = floordiv(a->min_value, b->min_value);
       PrimExpr e2 = floordiv(a->max_value, b->min_value);
       return IntervalSet(Select(sign, e1, e2), Select(sign, e2, e1));
@@ -301,7 +305,7 @@ inline IntervalSet Combine<tirx::FloorDiv>(Analyzer* analyzer, IntervalSet a, In
 }
 
 template <>
-inline IntervalSet Combine<tirx::FloorMod>(Analyzer* analyzer, IntervalSet a, IntervalSet b,
+inline IntervalSet Combine<tirx::FloorMod>(AnalyzerObj* analyzer, IntervalSet a, IntervalSet b,
                                            const tirx::FloorModNode* op) {
   if (a->IsSinglePoint() && b->IsSinglePoint()) {
     return IntervalSet::SinglePoint(floormod(a->min_value, b->min_value));
@@ -321,7 +325,9 @@ inline IntervalSet Combine<tirx::FloorMod>(Analyzer* analyzer, IntervalSet a, In
         auto qmin = a->HasLowerBound() ? floordiv(a->min_value, divisor) : neg_inf();
         // We can compare +/- inf against each other, but cannot use
         // operator== between the symbolic limits and an integer.
-        bool compatible_dtypes = !(qmin.dtype().is_handle() ^ qmax.dtype().is_handle());
+        bool qmin_is_symbolic_limit = is_pos_inf(qmin) || is_neg_inf(qmin);
+        bool qmax_is_symbolic_limit = is_pos_inf(qmax) || is_neg_inf(qmax);
+        bool compatible_dtypes = qmin_is_symbolic_limit == qmax_is_symbolic_limit;
         if (compatible_dtypes && analyzer->CanProve(qmax == qmin)) {
           auto tmax = a->max_value - divisor * qmin;
           auto tmin = a->min_value - divisor * qmin;
@@ -346,12 +352,13 @@ inline IntervalSet Combine<tirx::FloorMod>(Analyzer* analyzer, IntervalSet a, In
             int64_t max_mod_result = max_quotient * gcd + (dividend_mod->base % gcd);
 
             if (max_mod_result >= 0 && max_mod_result < div_val) {
-              return IntervalSet(make_zero(op->dtype), make_const(op->dtype, max_mod_result));
+              PrimType result_ty = op->ty.as_or_throw<PrimType>();
+              return IntervalSet(IntImm(result_ty, 0), IntImm(result_ty, max_mod_result));
             }
           }
         }
       }
-      return IntervalSet(make_zero(divisor.dtype()), divisor - 1);
+      return IntervalSet(IntImm(divisor.ty(), 0), divisor - 1);
     } else {
       PrimExpr bound = abs(divisor) - 1;
       return IntervalSet(-bound, bound);
@@ -362,7 +369,7 @@ inline IntervalSet Combine<tirx::FloorMod>(Analyzer* analyzer, IntervalSet a, In
 }
 
 template <>
-inline IntervalSet Combine<tirx::Max>(Analyzer* analzyer, IntervalSet a, IntervalSet b,
+inline IntervalSet Combine<tirx::Max>(AnalyzerObj* analzyer, IntervalSet a, IntervalSet b,
                                       const tirx::MaxNode* /* op */) {
   if (a->IsSinglePoint() && b->IsSinglePoint()) {
     return IntervalSet::SinglePoint(max(a->min_value, b->min_value));
@@ -373,7 +380,7 @@ inline IntervalSet Combine<tirx::Max>(Analyzer* analzyer, IntervalSet a, Interva
 }
 
 template <>
-inline IntervalSet Combine<tirx::Min>(Analyzer* analzyer, IntervalSet a, IntervalSet b,
+inline IntervalSet Combine<tirx::Min>(AnalyzerObj* analzyer, IntervalSet a, IntervalSet b,
                                       const tirx::MinNode* /* op */) {
   if (a->IsSinglePoint() && b->IsSinglePoint()) {
     return IntervalSet::SinglePoint(min(a->min_value, b->min_value));
@@ -396,9 +403,9 @@ using namespace tirx;
 
 // Simplified version of int set evaluator that operates on IntervalSet
 // We might use better set analysis in the future to replace the intervalset.
-class IntervalSetEvaluator : public ExprFunctor<IntervalSet(const PrimExpr&)> {
+class IntervalSetEvaluator : public ExprFunctor<IntervalSet(const Expr&)> {
  public:
-  IntervalSetEvaluator(Analyzer* analyzer, const ffi::Map<Var, IntSet>& dom_map,
+  IntervalSetEvaluator(AnalyzerObj* analyzer, const ffi::Map<Var, IntSet>& dom_map,
                        const std::vector<std::pair<Var, IntSet>>* dom_constraints = nullptr,
                        bool eval_vec = false)
       : analyzer_(analyzer),
@@ -426,6 +433,13 @@ class IntervalSetEvaluator : public ExprFunctor<IntervalSet(const PrimExpr&)> {
   IntervalSet VisitExpr_(const VarNode* op) final {
     Var var = ffi::GetRef<Var>(op);
 
+    auto it = dom_map_.find(var);
+    // Scoped constraints refine explicit relaxation domains.  Variables that
+    // are absent from dom_map_ remain free parameters of the relaxed result.
+    if (it == dom_map_.end()) {
+      return IntervalSet::SinglePoint(var.as_or_throw<PrimExpr>());
+    }
+
     ffi::Array<IntSet> values;
     if (dom_constraints_) {
       for (const auto& constraint : *dom_constraints_) {
@@ -435,14 +449,7 @@ class IntervalSetEvaluator : public ExprFunctor<IntervalSet(const PrimExpr&)> {
       }
     }
 
-    auto it = dom_map_.find(var);
-    if (it != dom_map_.end()) {
-      values.push_back((*it).second);
-    }
-
-    if (values.empty()) {
-      return IntervalSet::SinglePoint(var);
-    }
+    values.push_back((*it).second);
 
     IntSet intersection = [&]() {
       if (values.size() == 1) {
@@ -456,9 +463,29 @@ class IntervalSetEvaluator : public ExprFunctor<IntervalSet(const PrimExpr&)> {
     if (res->min_value.same_as(var) && res->max_value.same_as(var)) {
       return res;
     }
-    // recursively evaluate mapped result
-    // in case the domain contains variables to be relaxed.
-    return Eval(res);
+    // Recursively relax the mapped interval, since the domain bounds may
+    // themselves reference other variables that need to be relaxed.
+    //
+    // Memoize the fully-relaxed interval per variable, and guard against
+    // cyclic variable dependencies with an in-progress set.  Without this,
+    // diamond-shaped variable dependencies (var a -> {b, c}, b -> {d, e}, ...)
+    // are re-expanded along every path: each level evaluates both the min and
+    // max sub-expressions, so the cost is exponential (2^depth) in the length
+    // of the variable dependency chain rather than linear.
+    auto memo_it = relax_memo_.find(op);
+    if (memo_it != relax_memo_.end()) {
+      return memo_it->second;
+    }
+    if (relax_in_progress_.count(op)) {
+      // Cyclic dependency among variable bounds: stop relaxing here to keep
+      // the recursion finite, keeping this variable symbolic.
+      return res;
+    }
+    relax_in_progress_.insert(op);
+    IntervalSet relaxed = Eval(res);
+    relax_in_progress_.erase(op);
+    relax_memo_[op] = relaxed;
+    return relaxed;
   }
 
   IntervalSet VisitExpr_(const AddNode* op) final { return VisitBinaryExpr_<Add>(op); }
@@ -500,30 +527,30 @@ class IntervalSetEvaluator : public ExprFunctor<IntervalSet(const PrimExpr&)> {
     IntervalSet base = Eval(op->base);
     PVar<IntImm> stride;
     if (stride.Match(op->stride)) {
-      DataType t = op->base.dtype();
+      PrimType t = op->base.ty();
       int64_t vstride = stride.Eval()->value;
       if (op->lanes->IsInstance<IntImmNode>()) {
-        int lanes = static_cast<int>(Downcast<IntImm>(op->lanes)->value);
+        int lanes = static_cast<int>(op->lanes.as_or_throw<IntImm>()->value);
         if (vstride > 0) {
-          PrimExpr stride_expr = make_const(t, vstride * (lanes - 1));
+          PrimExpr stride_expr = MakeConst(t, vstride * (lanes - 1));
           auto add_op = tirx::Add(op->base, stride_expr);
           auto add_node = add_op.as<tirx::AddNode>();
-          return Combine<Add>(analyzer_, base, IntervalSet(make_zero(t), stride_expr), add_node);
+          return Combine<Add>(analyzer_, base, IntervalSet(IntImm(t, 0), stride_expr), add_node);
         } else {
-          PrimExpr stride_expr = make_const(t, vstride * (lanes - 1));
+          PrimExpr stride_expr = MakeConst(t, vstride * (lanes - 1));
           auto add_op = tirx::Add(op->base, stride_expr);
           auto add_node = add_op.as<tirx::AddNode>();
-          return Combine<Add>(analyzer_, base, IntervalSet(stride_expr, make_zero(t)), add_node);
+          return Combine<Add>(analyzer_, base, IntervalSet(stride_expr, IntImm(t, 0)), add_node);
         }
       } else { /* Scalable vector */
         if (vstride > 0) {
-          auto add_op = tirx::Add(op->base, make_zero(t));
+          auto add_op = tirx::Add(op->base, IntImm(t, 0));
           auto add_node = add_op.as<tirx::AddNode>();
-          return Combine<Add>(analyzer_, base, IntervalSet(make_zero(t), pos_inf()), add_node);
+          return Combine<Add>(analyzer_, base, IntervalSet(IntImm(t, 0), pos_inf()), add_node);
         } else {
-          auto add_op = tirx::Add(op->base, make_zero(t));
+          auto add_op = tirx::Add(op->base, IntImm(t, 0));
           auto add_node = add_op.as<tirx::AddNode>();
-          return Combine<Add>(analyzer_, base, IntervalSet(neg_inf(), make_zero(t)), add_node);
+          return Combine<Add>(analyzer_, base, IntervalSet(neg_inf(), IntImm(t, 0)), add_node);
         }
       }
     }
@@ -547,18 +574,21 @@ class IntervalSetEvaluator : public ExprFunctor<IntervalSet(const PrimExpr&)> {
     // short cut for the int set.
     if (value_set->min_value.same_as(value_set->max_value)) {
       if (value_set->IsEmpty()) return value_set;
-      return IntervalSet::SinglePoint(cast(op->dtype, value_set->min_value));
+      return IntervalSet::SinglePoint(cast(op->ty.as_or_throw<PrimType>(), value_set->min_value));
     }
-    PrimExpr min_value =
-        value_set->HasLowerBound() ? cast(op->dtype, value_set->min_value) : neg_inf();
-    PrimExpr max_value =
-        value_set->HasUpperBound() ? cast(op->dtype, value_set->max_value) : pos_inf();
+    PrimExpr min_value = value_set->HasLowerBound()
+                             ? cast(op->ty.as_or_throw<PrimType>(), value_set->min_value)
+                             : neg_inf();
+    PrimExpr max_value = value_set->HasUpperBound()
+                             ? cast(op->ty.as_or_throw<PrimType>(), value_set->max_value)
+                             : pos_inf();
     return IntervalSet(min_value, max_value);
   }
 
   IntervalSet VisitExpr_(const BufferLoadNode* op) final {
-    if (!(op->dtype.is_int() || op->dtype.is_uint())) {
-      DLOG(WARNING) << "cannot evaluate set BufferLoad which loads from a " << op->dtype
+    PrimType op_ty = op->ty.as_or_throw<PrimType>();
+    if (!op_ty.MatchesCode(DLDataTypeCode::kDLInt, DLDataTypeCode::kDLUInt)) {
+      DLOG(WARNING) << "cannot evaluate set BufferLoad which loads from a " << op_ty->dtype
                     << " buffer";
       return IntervalSet::Everything();
     }
@@ -575,12 +605,14 @@ class IntervalSetEvaluator : public ExprFunctor<IntervalSet(const PrimExpr&)> {
   }
 
   IntervalSet VisitExpr_(const CallNode* op) final {
-    if (op->op.same_as(tirx::builtin::vscale()))
-      return IntervalSet(ffi::GetRef<PrimExpr>(op), ffi::GetRef<PrimExpr>(op));
+    if (op->op.same_as(tirx::builtin::vscale())) {
+      PrimExpr call = ffi::GetRef<Call>(op).as_or_throw<PrimExpr>();
+      return IntervalSet(call, call);
+    }
     return IntervalSet::Everything();
   }
 
-  IntervalSet VisitExprDefault_(const Object* op) final {
+  IntervalSet VisitExprDefault_(const ffi::Object* op) final {
     DLOG(WARNING) << "cannot evaluate set type " << op->GetTypeKey();
     return IntervalSet::Everything();
   }
@@ -604,8 +636,13 @@ class IntervalSetEvaluator : public ExprFunctor<IntervalSet(const PrimExpr&)> {
 
   // recursive depth
   int recur_depth_{0};
+  // Memo of fully-relaxed interval sets per variable, to avoid exponential
+  // re-expansion of diamond-shaped variable dependencies.
+  std::unordered_map<const VarNode*, IntervalSet> relax_memo_;
+  // Variables currently being relaxed, used to break cyclic dependencies.
+  std::unordered_set<const VarNode*> relax_in_progress_;
   // analyzer
-  Analyzer* analyzer_;
+  AnalyzerObj* analyzer_;
   const ffi::Map<Var, IntSet>& dom_map_;
   const std::vector<std::pair<Var, IntSet>>* dom_constraints_;
   bool eval_vec_{false};
@@ -613,7 +650,7 @@ class IntervalSetEvaluator : public ExprFunctor<IntervalSet(const PrimExpr&)> {
 
 class IntSetAnalyzer::Impl {
  public:
-  explicit Impl(Analyzer* analyzer) : analyzer_(analyzer) {}
+  explicit Impl(AnalyzerObj* analyzer) : analyzer_(analyzer) {}
 
   IntSet Eval(const PrimExpr& expr, const ffi::Map<Var, IntSet>& dom_map) const {
     return IntervalSetEvaluator(analyzer_, dom_map).Eval(expr);
@@ -631,13 +668,18 @@ class IntSetAnalyzer::Impl {
   void Bind(const Var& var, const PrimExpr& expr, bool override_info);
   std::function<void()> EnterConstraint(const PrimExpr& constraint);
 
+  void CopyFrom(const Impl& other) {
+    dom_map_ = other.dom_map_;
+    dom_constraints_ = other.dom_constraints_;
+  }
+
  private:
   // Utility function to split a boolean condition into the domain
   // bounds implied by that condition.
   static std::vector<std::pair<Var, IntSet>> DetectBoundInfo(const PrimExpr& cond);
 
   // The parent arith::Analyzer
-  Analyzer* analyzer_;
+  AnalyzerObj* analyzer_;
 
   // Map of variables to global variable bounds (e.g. loop iterator
   // ranges)
@@ -650,9 +692,11 @@ class IntSetAnalyzer::Impl {
   std::vector<std::pair<Var, IntSet>> dom_constraints_;
 };
 
-IntSetAnalyzer::IntSetAnalyzer(Analyzer* parent) : impl_(new Impl(parent)) {}
+IntSetAnalyzer::IntSetAnalyzer(AnalyzerObj* parent) : impl_(new Impl(parent)) {}
 
 IntSetAnalyzer::~IntSetAnalyzer() { delete impl_; }
+
+void IntSetAnalyzer::CopyFrom(const IntSetAnalyzer& other) { impl_->CopyFrom(*other.impl_); }
 
 IntSet IntSetAnalyzer::operator()(const PrimExpr& expr, const ffi::Map<Var, IntSet>& dom_map) {
   return impl_->Eval(expr, dom_map);
@@ -753,8 +797,8 @@ Range IntSet::CoverRange(Range max_range) const {
   const IntervalSetNode* s_int = (*this).as<IntervalSetNode>();
   TVM_FFI_ICHECK(s_int != nullptr);
   if (s_int->HasUpperBound() && s_int->HasLowerBound()) {
-    return Range::FromMinExtent(analyzer.Simplify(s_int->min_value),
-                                analyzer.Simplify(s_int->max_value + 1 - s_int->min_value));
+    return Range::FromMinExtent(analyzer->Simplify(s_int->min_value),
+                                analyzer->Simplify(s_int->max_value + 1 - s_int->min_value));
   }
   return max_range;
 }
@@ -786,7 +830,7 @@ bool IntSet::IsSinglePoint() const {
   return (s_int && s_int->IsSinglePoint());
 }
 
-bool IntSet::CanProveSinglePoint(Analyzer* ana) const {
+bool IntSet::CanProveSinglePoint(const Analyzer& ana) const {
   const IntervalSetNode* s_int = (*this).as<IntervalSetNode>();
   if (!s_int) return false;
   if (s_int->IsSinglePoint()) return true;
@@ -796,19 +840,19 @@ bool IntSet::CanProveSinglePoint(Analyzer* ana) const {
 bool IntSet::CanProvePositive() const {
   Analyzer analyzer;
   const IntervalSetNode* s_int = (*this).as<IntervalSetNode>();
-  return (s_int && is_positive_const(analyzer.Simplify(s_int->min_value)));
+  return (s_int && is_positive_const(analyzer->Simplify(s_int->min_value)));
 }
 
 bool IntSet::CanProveNegative() const {
   Analyzer analyzer;
   const IntervalSetNode* s_int = (*this).as<IntervalSetNode>();
-  return (s_int && is_negative_const(analyzer.Simplify(s_int->max_value)));
+  return (s_int && is_negative_const(analyzer->Simplify(s_int->max_value)));
 }
 
 bool IntSet::CanProveNonPositive() const {
   Analyzer analyzer;
   if (const auto* s_int = (*this).as<IntervalSetNode>()) {
-    auto max = analyzer.Simplify(s_int->max_value);
+    auto max = analyzer->Simplify(s_int->max_value);
     return is_zero(max) || is_negative_const(max);
   }
   return false;
@@ -817,7 +861,7 @@ bool IntSet::CanProveNonPositive() const {
 bool IntSet::CanProveNonNegative() const {
   Analyzer analyzer;
   if (const IntervalSetNode* s_int = (*this).as<IntervalSetNode>()) {
-    auto min = analyzer.Simplify(s_int->min_value);
+    auto min = analyzer->Simplify(s_int->min_value);
     return is_zero(min) || is_positive_const(min);
   }
   return false;
@@ -868,7 +912,7 @@ IntSet IntSet::Interval(PrimExpr min, PrimExpr max) {
 }
 
 // Range related code
-inline bool ProveEqual(Analyzer* analyzer, PrimExpr lhs, PrimExpr rhs) {
+inline bool ProveEqual(AnalyzerObj* analyzer, PrimExpr lhs, PrimExpr rhs) {
   return is_zero(analyzer->Simplify(lhs - rhs));
 }
 
@@ -893,8 +937,8 @@ bool IntSet::MatchRange(const Range& b) const {
   if (!a_int) return false;
   if (!a_int->HasUpperBound() || !a_int->HasLowerBound()) return false;
   Analyzer ana;
-  return ProveEqual(&ana, a_int->min_value, b->min) &&
-         ProveEqual(&ana, a_int->max_value, b->extent + b->min - 1);
+  return ProveEqual(ana.get(), a_int->min_value, b->min) &&
+         ProveEqual(ana.get(), a_int->max_value, b->extent + b->min - 1);
 }
 
 IntSet Union(const ffi::Array<IntSet>& sets) {
@@ -903,9 +947,9 @@ IntSet Union(const ffi::Array<IntSet>& sets) {
   Analyzer ana;
   IntervalSet x = ToIntervalSet(sets[0]);
   for (size_t i = 1; i < sets.size(); ++i) {
-    x = Union(&ana, x, ToIntervalSet(sets[i]));
+    x = Union(ana.get(), x, ToIntervalSet(sets[i]));
   }
-  return IntervalSet(ana.Simplify(x->min_value), ana.Simplify(x->max_value));
+  return IntervalSet(ana->Simplify(x->min_value), ana->Simplify(x->max_value));
 }
 
 ffi::Array<IntSet> UnionRegion(const ffi::Array<ffi::Array<IntSet>>& nd_int_sets) {
@@ -946,9 +990,9 @@ IntSet UnionLowerBound(const ffi::Array<IntSet>& sets) {
         continue;
       }
       bool bound_1 = is_neg_inf(new_min_inclusive) || is_pos_inf(max_inclusive) ||
-                     analyzer.CanProve(new_min_inclusive <= max_inclusive + 1);
+                     analyzer->CanProve(new_min_inclusive <= max_inclusive + 1);
       bool bound_2 = is_neg_inf(min_inclusive) || is_pos_inf(new_max_inclusive) ||
-                     analyzer.CanProve(min_inclusive <= new_max_inclusive + 1);
+                     analyzer->CanProve(min_inclusive <= new_max_inclusive + 1);
       if (bound_1 && bound_2) {
         min_inclusive = min(min_inclusive, new_min_inclusive);
         max_inclusive = max(max_inclusive, new_max_inclusive);
@@ -986,9 +1030,9 @@ IntSet Intersect(const ffi::Array<IntSet>& sets) {
   Analyzer ana;
   IntervalSet x = ToIntervalSet(sets[0]);
   for (size_t i = 1; i < sets.size(); ++i) {
-    x = Intersect(&ana, x, ToIntervalSet(sets[i]));
+    x = Intersect(ana.get(), x, ToIntervalSet(sets[i]));
   }
-  return IntervalSet(ana.Simplify(x->min_value), ana.Simplify(x->max_value));
+  return IntervalSet(ana->Simplify(x->min_value), ana->Simplify(x->max_value));
 }
 
 ffi::Map<Var, IntSet> ConvertDomMap(const ffi::Map<IterVar, IntSet>& dom_map) {
@@ -1009,18 +1053,18 @@ ffi::Map<Var, IntSet> ConvertDomMap(const std::unordered_map<const VarNode*, Int
 
 IntSet EvalSet(PrimExpr e, const ffi::Map<Var, IntSet>& dom_map) {
   Analyzer ana;
-  return IntervalSetEvaluator(&ana, dom_map, {}, false).Eval(e);
+  return IntervalSetEvaluator(ana.get(), dom_map, {}, false).Eval(e);
 }
 
 IntSet IntSet::Vector(PrimExpr x) {
   // short cut: simply get single point
-  if (!x.dtype().is_scalable_or_fixed_length_vector()) {
+  if (!x.ty().IsScalableVector() && !x.ty().IsFixedLengthVector()) {
     return IntSet::SinglePoint(x);
   } else {
     // vector case.
     Analyzer ana;
     ffi::Map<Var, IntSet> dmap;
-    return IntervalSetEvaluator(&ana, dmap, {}, true).Eval(x);
+    return IntervalSetEvaluator(ana.get(), dmap, {}, true).Eval(x);
   }
 }
 
@@ -1034,13 +1078,15 @@ IntSet EvalSet(PrimExpr e, const std::unordered_map<const VarNode*, IntSet>& dom
 
 IntSet EvalSet(Range r, const ffi::Map<Var, IntSet>& dom_map) {
   Analyzer ana;
-  if ((r->min->dtype.is_int() || r->min->dtype.is_uint()) && ana.CanProveEqual(r->extent, 1)) {
+  PrimType min_ty = r->min.ty();
+  if (min_ty.MatchesCode(DLDataTypeCode::kDLInt, DLDataTypeCode::kDLUInt) &&
+      ana->CanProveEqual(r->extent, 1)) {
     return EvalSet(r->min, dom_map);
   }
-  IntervalSetEvaluator m(&ana, dom_map);
+  IntervalSetEvaluator m(ana.get(), dom_map);
   // Simplifying first can give tighter bounds if r->min and r->extent share variables
   PrimExpr sum = r->min + r->extent - 1;
-  auto res = m.Eval(IntervalSet(r->min, ana.Simplify(sum)));
+  auto res = m.Eval(IntervalSet(r->min, ana->Simplify(sum)));
   return res;
 }
 
@@ -1050,12 +1096,12 @@ IntSet EvalSet(Range r, const std::unordered_map<const VarNode*, IntSet>& dom_ma
 
 ffi::Array<IntSet> EvalSet(const ffi::Array<Range>& region, const ffi::Map<Var, IntSet>& dom_map) {
   Analyzer ana;
-  IntervalSetEvaluator m(&ana, dom_map);
+  IntervalSetEvaluator m(ana.get(), dom_map);
   ffi::Array<IntSet> result;
   result.reserve(region.size());
   for (const Range& r : region) {
     PrimExpr sum = r->min + (r->extent - 1);
-    result.push_back(m.Eval(IntervalSet(r->min, ana.Simplify(sum))));
+    result.push_back(m.Eval(IntervalSet(r->min, ana->Simplify(sum))));
   }
   return result;
 }
@@ -1063,7 +1109,7 @@ ffi::Array<IntSet> EvalSet(const ffi::Array<Range>& region, const ffi::Map<Var, 
 IntSet EvalSet(IntSet s, const std::unordered_map<const VarNode*, IntSet>& dom_map) {
   Analyzer ana;
   auto dmap = ConvertDomMap(dom_map);
-  IntervalSetEvaluator m(&ana, dmap);
+  IntervalSetEvaluator m(ana.get(), dmap);
   const IntervalSetNode* s_int = s.as<IntervalSetNode>();
   PrimExpr vmax = s_int->HasUpperBound() ? m.Eval(s_int->max_value).max() : s_int->max_value;
   PrimExpr vmin = s_int->HasLowerBound() ? m.Eval(s_int->min_value).min() : s_int->min_value;
@@ -1072,12 +1118,12 @@ IntSet EvalSet(IntSet s, const std::unordered_map<const VarNode*, IntSet>& dom_m
 
 class SubExprIntervalSetEvaluator : public IntervalSetEvaluator {
  public:
-  explicit SubExprIntervalSetEvaluator(Analyzer* analyzer, const ffi::Map<Var, IntSet>& dom_map)
+  explicit SubExprIntervalSetEvaluator(AnalyzerObj* analyzer, const ffi::Map<Var, IntSet>& dom_map)
       : IntervalSetEvaluator(analyzer, dom_map) {}
 
-  IntervalSet VisitExpr(const PrimExpr& n) final {
+  IntervalSet VisitExpr(const Expr& n) final {
     IntervalSet ret = IntervalSetEvaluator::VisitExpr(n);
-    expr_map[n] = ret;
+    expr_map[n.as_or_throw<PrimExpr>()] = ret;
     return ret;
   }
 
@@ -1088,7 +1134,7 @@ ExprIntSetMap EvalSetForEachSubExpr(PrimExpr e,
                                     const std::unordered_map<const VarNode*, IntSet>& dom_map) {
   Analyzer ana;
   auto dmap = ConvertDomMap(dom_map);
-  SubExprIntervalSetEvaluator m(&ana, dmap);
+  SubExprIntervalSetEvaluator m(ana.get(), dmap);
   m.Eval(e);
   return m.expr_map;
 }
@@ -1109,7 +1155,7 @@ ffi::Map<Var, arith::IntSet> AsIntSet(const ffi::Map<Var, Range>& var_dom) {
 
 /*! \brief Helper function to convert IterSumExpr to the actual touched range. */
 static ffi::Optional<IntSet> EvalIterSum(const IterSumExpr& iter_min, const PrimExpr& extent,
-                                         Analyzer* analyzer) {
+                                         AnalyzerObj* analyzer) {
   if (analyzer->CanProve(extent == 0)) {
     return IntSet::Nothing();
   }
@@ -1144,7 +1190,12 @@ static ffi::Optional<IntSet> EvalIterSum(const IterSumExpr& iter_min, const Prim
 ffi::Optional<ffi::Array<IntSet>> EstimateRegionStrictBound(const ffi::Array<Range>& region,
                                                             const ffi::Map<Var, Range>& var_dom,
                                                             const PrimExpr& predicate,
-                                                            Analyzer* analyzer) {
+                                                            const Analyzer& analyzer) {
+  ffi::Map<PrimVar, Range> input_iters;
+  for (const auto& [var, range] : var_dom) {
+    input_iters.Set(var.as_or_throw<PrimVar>(), range);
+  }
+  AnalyzerObj* analyzer_ptr = analyzer.get();
   int ndim = region.size();
   ffi::Array<IterSumExpr> iter_sum_exprs{nullptr};
   {
@@ -1158,7 +1209,7 @@ ffi::Optional<ffi::Array<IntSet>> EstimateRegionStrictBound(const ffi::Array<Ran
       affine_indices.push_back(range->min);
     }
     auto res = DetectIterMap(
-        /*indices=*/affine_indices, /*input_iters=*/var_dom,
+        /*indices=*/affine_indices, /*input_iters=*/input_iters,
         /*predicate=*/predicate, /*check_level=*/IterMapLevel::Surjective, analyzer);
     iter_sum_exprs = res->indices;
   }
@@ -1171,8 +1222,8 @@ ffi::Optional<ffi::Array<IntSet>> EstimateRegionStrictBound(const ffi::Array<Ran
   for (int i = 0; i < ndim; ++i) {
     const IterSumExpr& sum_expr = iter_sum_exprs[i];
     const Range& range = region[i];
-    ffi::Optional<IntSet> int_set = EvalIterSum(sum_expr, range->extent, analyzer);
-    if (int_set.defined()) {
+    ffi::Optional<IntSet> int_set = EvalIterSum(sum_expr, range->extent, analyzer_ptr);
+    if (int_set.has_value()) {
       result.push_back(int_set.value());
     } else {
       return std::nullopt;
@@ -1184,13 +1235,14 @@ ffi::Optional<ffi::Array<IntSet>> EstimateRegionStrictBound(const ffi::Array<Ran
 ffi::Optional<ffi::Array<IntSet>> EstimateRegionLowerBound(const ffi::Array<Range>& region,
                                                            const ffi::Map<Var, Range>& var_dom,
                                                            const PrimExpr& predicate,
-                                                           arith::Analyzer* analyzer) {
+                                                           const Analyzer& analyzer) {
   return EstimateRegionStrictBound(region, var_dom, predicate, analyzer);
 }
 
 ffi::Array<IntSet> EstimateRegionUpperBound(const ffi::Array<Range>& region,
                                             const ffi::Map<Var, Range>& var_dom,
-                                            const PrimExpr& predicate, Analyzer* analyzer) {
+                                            const PrimExpr& predicate, const Analyzer& analyzer) {
+  AnalyzerObj* analyzer_ptr = analyzer.get();
   if (ffi::Optional<ffi::Array<arith::IntSet>> result = EstimateRegionStrictBound(
           /*region=*/region,
           /*var_dom=*/var_dom,
@@ -1199,10 +1251,14 @@ ffi::Array<IntSet> EstimateRegionUpperBound(const ffi::Array<Range>& region,
   }
   ffi::Array<IntSet> result;
   result.reserve(region.size());
+  ffi::Map<PrimVar, Range> input_iters;
+  for (const auto& [var, range] : var_dom) {
+    input_iters.Set(var.as_or_throw<PrimVar>(), range);
+  }
   // try estimate each dimension independently
   for (const Range& range : region) {
     auto res = DetectIterMap(
-        /*indices=*/{range->min}, /*input_iters=*/var_dom,
+        /*indices=*/{range->min}, /*input_iters=*/input_iters,
         /*predicate=*/predicate, /*check_level=*/IterMapLevel::Surjective, analyzer);
     if (!res->indices.empty()) {
       TVM_FFI_ICHECK_EQ(res->indices.size(), 1U);
@@ -1216,7 +1272,7 @@ ffi::Array<IntSet> EstimateRegionUpperBound(const ffi::Array<Range>& region,
         extent = relaxed.max();
       }
 
-      if (ffi::Optional<IntSet> int_set = EvalIterSum(sum_expr, range->extent, analyzer)) {
+      if (ffi::Optional<IntSet> int_set = EvalIterSum(sum_expr, range->extent, analyzer_ptr)) {
         result.push_back(int_set.value());
         continue;
       }
@@ -1227,12 +1283,7 @@ ffi::Array<IntSet> EstimateRegionUpperBound(const ffi::Array<Range>& region,
   return result;
 }
 
-TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
-    .set_dispatch<IntervalSetNode>([](const ObjectRef& node, ReprPrinter* p) {
-      auto* op = static_cast<const IntervalSetNode*>(node.get());
-      p->stream << "IntervalSet"
-                << "[" << op->min_value << ", " << op->max_value << ']';
-    });
+// Pattern A (RM): auto-default repr from reflection.
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
@@ -1245,22 +1296,22 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def_method("arith.IntSetIsNothing", &IntSet::IsNothing)
       .def_method("arith.IntSetIsEverything", &IntSet::IsEverything)
       .def("arith.EstimateRegionLowerBound",
-           [](ffi::Array<Range> region, ffi::Map<Var, Range> var_dom,
-              PrimExpr predicate) -> ffi::Optional<ffi::Array<IntSet>> {
-             Analyzer analyzer;
-             return EstimateRegionLowerBound(region, var_dom, predicate, &analyzer);
+           [](ffi::Array<Range> region, ffi::Map<Var, Range> var_dom, PrimExpr predicate,
+              ffi::Optional<Analyzer> opt_analyzer) -> ffi::Optional<ffi::Array<IntSet>> {
+             Analyzer analyzer = opt_analyzer.has_value() ? opt_analyzer.value() : Analyzer();
+             return EstimateRegionLowerBound(region, var_dom, predicate, analyzer);
            })
       .def("arith.EstimateRegionStrictBound",
-           [](ffi::Array<Range> region, ffi::Map<Var, Range> var_dom,
-              PrimExpr predicate) -> ffi::Optional<ffi::Array<IntSet>> {
-             Analyzer analyzer;
-             return EstimateRegionStrictBound(region, var_dom, predicate, &analyzer);
+           [](ffi::Array<Range> region, ffi::Map<Var, Range> var_dom, PrimExpr predicate,
+              ffi::Optional<Analyzer> opt_analyzer) -> ffi::Optional<ffi::Array<IntSet>> {
+             Analyzer analyzer = opt_analyzer.has_value() ? opt_analyzer.value() : Analyzer();
+             return EstimateRegionStrictBound(region, var_dom, predicate, analyzer);
            })
       .def("arith.EstimateRegionUpperBound",
-           [](ffi::Array<Range> region, ffi::Map<Var, Range> var_dom,
-              PrimExpr predicate) -> ffi::Optional<ffi::Array<IntSet>> {
-             Analyzer analyzer;
-             return EstimateRegionUpperBound(region, var_dom, predicate, &analyzer);
+           [](ffi::Array<Range> region, ffi::Map<Var, Range> var_dom, PrimExpr predicate,
+              ffi::Optional<Analyzer> opt_analyzer) -> ffi::Optional<ffi::Array<IntSet>> {
+             Analyzer analyzer = opt_analyzer.has_value() ? opt_analyzer.value() : Analyzer();
+             return EstimateRegionUpperBound(region, var_dom, predicate, analyzer);
            })
       .def("arith.PosInf", []() { return SymbolicLimits::pos_inf_; })
       .def("arith.NegInf", []() { return SymbolicLimits::neg_inf_; })

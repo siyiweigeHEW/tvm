@@ -44,7 +44,7 @@ def _check(
 
 
 def test_call_tir_dtensor():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class TestModule:
         I.module_attrs({"device_num": 10})
         I.module_global_infos(
@@ -56,7 +56,7 @@ def test_call_tir_dtensor():
             }
         )
 
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def tir_func(
             x: T.Buffer((T.int64(128), T.int64(128)), "float32"),
             y: T.Buffer((T.int64(128), T.int64(128)), "float32"),
@@ -84,10 +84,10 @@ def test_call_tir_dtensor():
     foo_func = TestModule["foo"]
     params = foo_func.params
     assert len(params) == 1
-    assert params[0].struct_info == R.DTensor(
+    assert params[0].ty == R.DTensor(
         (128, 128), "float32", device_mesh_list[0], placement="S[0], R"
     )
-    assert foo_func.ret_struct_info == R.DTensor(
+    assert foo_func.ret_ty == R.DTensor(
         (128, 128), "float32", device_mesh_list[0], placement="S[0], R"
     )
     assert isinstance(foo_func.body, SeqExpr)
@@ -95,14 +95,14 @@ def test_call_tir_dtensor():
     assert isinstance(foo_func.body.blocks[0].bindings[0], VarBinding)
     value = foo_func.body.blocks[0].bindings[0].value
     assert isinstance(value, Call)
-    assert value.sinfo_args[0] == R.DTensor(
+    assert value.ty_args[0] == R.DTensor(
         (128, 128), "float32", device_mesh_list[0], placement="S[0], R"
     )
     _check(TestModule)
 
 
 def test_explicit_device_id():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class TestModule:
         I.module_attrs({"device_num": 10})
         I.module_global_infos(
@@ -119,7 +119,7 @@ def test_explicit_device_id():
             }
         )
 
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def tir_func(
             x: T.Buffer((T.int64(128), T.int64(128)), "float32"),
             y: T.Buffer((T.int64(128), T.int64(128)), "float32"),
@@ -147,7 +147,7 @@ def test_explicit_device_id():
 
 
 def test_constant():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class TestModule:
         I.module_attrs({"device_num": 10})
         I.module_global_infos(
@@ -159,7 +159,7 @@ def test_constant():
             }
         )
 
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def tir_func(
             x: T.Buffer((T.int64(128), T.int64(128)), "float32"),
             y: T.Buffer((T.int64(128), T.int64(128)), "float32"),
@@ -181,9 +181,7 @@ def test_constant():
                     shape=(128, 128), dtype="float32", device_mesh="mesh[0]", placement="S[0], R"
                 ),
             )
-            gv1 = R.add(
-                gv0, R.dist.const(1.0, struct_info=R.DTensor((), "float32", "mesh[0]", "R, R"))
-            )
+            gv1 = R.add(gv0, R.dist.const(1.0, ty=R.DTensor((), "float32", "mesh[0]", "R, R")))
             return gv1
 
     _check(TestModule)

@@ -21,6 +21,7 @@
  * \file is_pure_function.cc
  * \brief PrimFunc purity analysis
  */
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/op.h>
 #include <tvm/tirx/analysis.h>
@@ -31,8 +32,6 @@
 namespace tvm {
 namespace s_tir {
 using namespace tvm::tirx;
-
-using AccessPath = ffi::reflection::AccessPath;
 
 namespace {
 class PurityChecker : TIRVisitorWithPath {
@@ -46,15 +45,15 @@ class PurityChecker : TIRVisitorWithPath {
  private:
   explicit PurityChecker(bool assert_on_error) : assert_on_error_(assert_on_error) {}
 
-  void VisitStmt_(const AllocBufferNode* op, AccessPath path) override {
-    internal_allocations_.insert(op->buffer->data);
+  void VisitStmt_(const AllocBufferNode* op, ffi::reflection::AccessPath path) override {
+    internal_allocations_.insert(op->buffer.var());
     TIRVisitorWithPath::VisitStmt_(op, path);
   }
 
-  void VisitStmt_(const BufferStoreNode* op, AccessPath path) override {
+  void VisitStmt_(const BufferStoreNode* op, ffi::reflection::AccessPath path) override {
     TIRVisitorWithPath::VisitStmt_(op, path);
 
-    if (!internal_allocations_.count(op->buffer->data)) {
+    if (!internal_allocations_.count(op->buffer.var())) {
       is_pure_ = false;
       if (assert_on_error_) {
         TVM_FFI_THROW(AssertionError) << "Pure functions must not write to buffers, "
@@ -64,13 +63,13 @@ class PurityChecker : TIRVisitorWithPath {
     }
   }
 
-  void VisitExpr_(const CallNode* call, AccessPath path) override {
+  void VisitExpr_(const CallNode* call, ffi::reflection::AccessPath path) override {
     TIRVisitorWithPath::VisitExpr_(call, path);
 
     static auto op_call_effect = Op::GetAttrMap<TCallEffectKind>("TCallEffectKind");
     CallEffectKind effect = [&]() {
       if (auto opt = call->op.as<Op>()) {
-        return static_cast<CallEffectKind>(op_call_effect[opt.value()]->value);
+        return static_cast<CallEffectKind>(op_call_effect[opt.value()]);
       } else {
         return CallEffectKind::kOpaque;
       }
@@ -81,7 +80,7 @@ class PurityChecker : TIRVisitorWithPath {
       if (assert_on_error_) {
         TVM_FFI_THROW(AssertionError)
             << "Pure functions must not contain calls to impure operators, "
-            << "but " << ffi::GetRef<PrimExpr>(call) << " calls operator " << call->op
+            << "but " << ffi::GetRef<Call>(call) << " calls operator " << call->op
             << ", which has side effect " << effect;
       }
     }

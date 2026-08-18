@@ -46,7 +46,7 @@ class ReplayFuncNode : public SearchStrategyNode {
           num_trials_per_iter(num_trials_per_iter),
           st(0),
           ed(num_trials_per_iter) {
-      TVM_FFI_CHECK(self->mod_.defined() && self->space_generator_.defined(), ValueError)
+      TVM_FFI_CHECK(self->mod_.has_value() && self->space_generator_.has_value(), ValueError)
           << "The search strategy has not been initialized.";
     }
 
@@ -71,10 +71,10 @@ class ReplayFuncNode : public SearchStrategyNode {
                                     SearchStrategyNode);
 
   void InitializeWithTuneContext(const TuneContext& ctx) final {
-    TVM_FFI_CHECK(ctx->mod.defined(), ValueError) << "TuneContext.mod is not defined";
-    TVM_FFI_CHECK(ctx->space_generator.defined(), ValueError)
+    TVM_FFI_CHECK(ctx->mod.has_value(), ValueError) << "TuneContext.mod is not defined";
+    TVM_FFI_CHECK(ctx->space_generator.has_value(), ValueError)
         << "TuneContext.space_generator is not defined";
-    if (!ctx->space_generator.value()->postprocs.defined()) {
+    if (!ctx->space_generator.value()->postprocs.has_value()) {
       TVM_PY_LOG(WARNING, ctx->logger)
           << "`postprocs` is not defined in " << ctx->space_generator.value()
           << ". Please explicitly set `postprocs` to an empty list if you don't want to "
@@ -114,7 +114,7 @@ class ReplayFuncNode : public SearchStrategyNode {
   }
 
   SearchStrategy Clone() const final {
-    ObjectPtr<ReplayFuncNode> n = ffi::make_object<ReplayFuncNode>();
+    ffi::ObjectPtr<ReplayFuncNode> n = ffi::make_object<ReplayFuncNode>();
     n->rand_state_ = -1;
     n->mod_ = std::nullopt;
     n->space_generator_ = std::nullopt;
@@ -161,7 +161,7 @@ inline void ReplayFuncNode::State::NotifyRunnerResults(const ffi::Array<RunnerRe
 }
 
 SearchStrategy SearchStrategy::ReplayFunc() {
-  ObjectPtr<ReplayFuncNode> n = ffi::make_object<ReplayFuncNode>();
+  ffi::ObjectPtr<ReplayFuncNode> n = ffi::make_object<ReplayFuncNode>();
   return SearchStrategy(n);
 }
 

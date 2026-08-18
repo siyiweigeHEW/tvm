@@ -76,12 +76,12 @@ inline Tensor dilate(const Tensor& x, ffi::Array<PrimExpr> strides, double dilat
   ffi::Array<PrimExpr> out_shape;
   arith::Analyzer analyzer;
   for (size_t i = 0; i < n; ++i) {
-    out_shape.push_back(analyzer.Simplify((x->shape[i] - 1) * (strides[i] + 1)));
+    out_shape.push_back(analyzer->Simplify((x->shape[i] - 1) * (strides[i] + 1)));
   }
 
   return tvm::te::compute(
       out_shape,
-      [&](const ffi::Array<Var>& indices) {
+      [&](const ffi::Array<PrimVar>& indices) {
         ffi::Array<PrimExpr> not_zero;
         ffi::Array<PrimExpr> index_tuple;
         for (size_t i = 0; i < n; ++i) {
@@ -95,7 +95,7 @@ inline Tensor dilate(const Tensor& x, ffi::Array<PrimExpr> strides, double dilat
         if (not_zero.size() > 0) {
           auto all_not_zero = all(not_zero);
           return tvm::if_then_else(all_not_zero, x(index_tuple),
-                                   make_const(x->dtype, dilation_value));
+                                   MakeConst(PrimType(x->dtype), dilation_value));
         }
         return x(index_tuple);
       },

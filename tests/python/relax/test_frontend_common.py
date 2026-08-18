@@ -45,7 +45,7 @@ class TestAutopad:
     def _test_autopad(self, pad_type, expected):
         bb = relax.BlockBuilder()
         input_shape = (1, 1, 4, 4)
-        x = relax.Var("x", relax.TensorStructInfo(input_shape, "float32"))
+        x = relax.Var("x", relax.TensorType(input_shape, "float32"))
 
         with bb.function("main", [x]):
             with bb.dataflow():
@@ -66,9 +66,9 @@ class TestAutopad:
         tvm.ir.assert_structural_equal(bb.get(), expected)
 
     def test_constant(self):
-        @I.ir_module
+        @I.ir_module(s_tir=True)
         class expected:
-            @T.prim_func(private=True)
+            @T.prim_func(private=True, s_tir=True)
             def pad(
                 x: T.Buffer((T.int64(1), T.int64(1), T.int64(4), T.int64(4)), "float32"),
                 PadInput: T.Buffer((T.int64(1), T.int64(1), T.int64(5), T.int64(5)), "float32"),
@@ -94,9 +94,7 @@ class TestAutopad:
             ):
                 cls = expected
                 with R.dataflow():
-                    lv = R.call_tir(
-                        cls.pad, (x,), out_sinfo=R.Tensor((1, 1, 5, 5), dtype="float32")
-                    )
+                    lv = R.call_tir(cls.pad, (x,), out_ty=R.Tensor((1, 1, 5, 5), dtype="float32"))
                     gv: R.Tensor((1, 1, 5, 5), dtype="float32") = lv
                     R.output(gv)
                 return gv
@@ -104,9 +102,9 @@ class TestAutopad:
         self._test_autopad("constant", expected)
 
     def test_edge(self):
-        @I.ir_module
+        @I.ir_module(s_tir=True)
         class expected:
-            @T.prim_func(private=True)
+            @T.prim_func(private=True, s_tir=True)
             def replicate_pad(
                 x: T.Buffer((T.int64(1), T.int64(1), T.int64(4), T.int64(4)), "float32"),
                 ReplicatePadInput: T.Buffer(
@@ -156,7 +154,7 @@ class TestAutopad:
                 cls = expected
                 with R.dataflow():
                     lv = R.call_tir(
-                        cls.replicate_pad, (x,), out_sinfo=R.Tensor((1, 1, 5, 5), dtype="float32")
+                        cls.replicate_pad, (x,), out_ty=R.Tensor((1, 1, 5, 5), dtype="float32")
                     )
                     gv: R.Tensor((1, 1, 5, 5), dtype="float32") = lv
                     R.output(gv)
@@ -165,9 +163,9 @@ class TestAutopad:
         self._test_autopad("edge", expected)
 
     def test_reflect(self):
-        @I.ir_module
+        @I.ir_module(s_tir=True)
         class expected:
-            @T.prim_func(private=True)
+            @T.prim_func(private=True, s_tir=True)
             def mirror_pad(
                 x: T.Buffer((T.int64(1), T.int64(1), T.int64(4), T.int64(4)), "float32"),
                 MirrorPadInput: T.Buffer(
@@ -202,7 +200,7 @@ class TestAutopad:
                 cls = expected
                 with R.dataflow():
                     lv = R.call_tir(
-                        cls.mirror_pad, (x,), out_sinfo=R.Tensor((1, 1, 5, 5), dtype="float32")
+                        cls.mirror_pad, (x,), out_ty=R.Tensor((1, 1, 5, 5), dtype="float32")
                     )
                     gv: R.Tensor((1, 1, 5, 5), dtype="float32") = lv
                     R.output(gv)

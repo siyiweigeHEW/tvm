@@ -22,6 +22,7 @@
  * \brief Check if schedulable tirx is well-formed.
  */
 
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/stmt.h>
@@ -40,85 +41,6 @@ namespace tvm {
 namespace tirx {
 
 using AccessPath = ffi::reflection::AccessPath;
-
-namespace {
-
-template <typename DerivedVerifier>
-class Verifier : protected TIRVisitorWithPath {
- public:
-  template <typename TirNodeRef>
-  static bool Verify(const TirNodeRef& node, bool assert_on_error) {
-    DerivedVerifier verifier(assert_on_error);
-    verifier(node);
-    return !verifier.has_error_;
-  }
-
- protected:
-  explicit Verifier(bool assert_on_error) : assert_on_error_(assert_on_error) {}
-
-  /* \brief Helper class to handle the bool-or-assert handles
-   *
-   * Each verifier can either return a boolean, or assert on failure.
-   * To avoid needing to duplicate this logic at every step, the
-   * Verify() method can be used.  Similar to `TVM_FFI_THROW(InternalError)` or
-   * `LOG(DEBUG)`, it returns an object that can accept streamed
-   * context information.
-   *
-   * If the error should be raised, then the context is collected
-   * identically to `TVM_FFI_THROW(InternalError)`.  If a boolean is returned, or if the
-   * condition passes, then the streamed context is discarded.
-   *
-   * Usage:
-   *
-   *     Verify(value == expected_value)
-   *            << value
-   *            << " was not the expected value of " << expected_value;
-   */
-  class VerifyStream {
-   public:
-    explicit VerifyStream(bool log_fatal) {
-      if (log_fatal) {
-        log_.emplace();
-      }
-    }
-
-    VerifyStream(const VerifyStream&) = delete;
-    VerifyStream& operator=(const VerifyStream&) = delete;
-    VerifyStream(VerifyStream&& other) { std::swap(log_, other.log_); }
-    VerifyStream& operator=(VerifyStream&& other) {
-      std::swap(log_, other.log_);
-      return *this;
-    }
-
-    template <typename T>
-    VerifyStream& operator<<(T&& t) {
-      if (log_.has_value()) {
-        log_.value() << std::forward<T>(t);
-      }
-      return *this;
-    }
-
-    ~VerifyStream() noexcept(false) {
-      if (log_.has_value()) {
-        TVM_FFI_THROW(ValueError) << log_->str();
-      }
-    }
-
-    std::optional<std::ostringstream> log_{std::nullopt};
-  };
-
-  // TODO(Lunderberg): Add the filename/linenum with
-  // std::source_location when C++20 is available.
-  VerifyStream Verify(bool condition) {
-    has_error_ = has_error_ || !condition;
-    return VerifyStream(!condition && assert_on_error_);
-  }
-
-  bool assert_on_error_;
-  bool has_error_{false};
-};
-
-}  // namespace
 
 /*! \brief Verify all Expr inside the block does not contain:
  *    1. loop vars outside the current block.
@@ -141,7 +63,7 @@ class BlockVarAccessVerifier : public StmtExprVisitor {
     }
   }
 
-  void VisitExpr(const PrimExpr& expr) final {
+  void VisitExpr(const Expr& expr) final {
     if (!has_error_) {
       StmtExprVisitor::VisitExpr(expr);
     }
@@ -155,13 +77,13 @@ class BlockVarAccessVerifier : public StmtExprVisitor {
         if (it->second == 0) {
           TVM_FFI_THROW(InternalError)
               << "Well-formedness check failed: "
-              << "Loop iterator var " << op->name_hint << " is defined outside of any block, "
+              << "Loop iterator var " << op->name << " is defined outside of any block, "
               << "but is used inside the non-opaque current block \""
               << block_stack_.back()->name_hint << "\".";
         } else {
           TVM_FFI_THROW(InternalError)
               << "Well-formedness check failed: "
-              << "Loop iterator var " << op->name_hint << " is defined in block \""
+              << "Loop iterator var " << op->name << " is defined in block \""
               << block_stack_[it->second - 1]->name_hint << "\", "
               << "but is used inside the non-opaque current block \""
               << block_stack_.back()->name_hint << "\".";
@@ -203,7 +125,7 @@ class BlockVarAccessVerifier : public StmtExprVisitor {
                });
 
     // Step 3. Visit init and body
-    if (op->init.defined()) {
+    if (op->init.has_value()) {
       this->VisitStmt(op->init.value());
     }
     this->VisitStmt(op->body);
@@ -245,13 +167,18 @@ class UndefinedVarVerifier : public Verifier<UndefinedVarVerifier> {
     }
   }
 
+  void EnterDef(const BufferVar& buffer, AccessPath path) override {
+    Verifier::EnterDef(buffer, path);
+  }
+
   void EnterDef(const Var& var, AccessPath path) override {
     bool redefine_is_allowed = redefine_allowed_within_function_.count(var);
     {
       auto it = currently_defined_.find(var);
       auto verify = Verify(it == currently_defined_.end() || redefine_is_allowed);
-      verify << "TIR is ill-formed, "
-             << "due to multiple nested definitions of variable " << var << ".";
+      verify << "ValueError: "
+             << "TIR is ill-formed, "
+             << "due to multiple nested definitions of variable " << var->name << ".";
       if (it != currently_defined_.end()) {
         verify << " It was first defined at " << it->second << ", and was re-defined at " << path;
       }
@@ -260,8 +187,9 @@ class UndefinedVarVerifier : public Verifier<UndefinedVarVerifier> {
     {
       auto it = previously_defined_.find(var);
       auto verify = Verify(it == previously_defined_.end() || redefine_is_allowed);
-      verify << "TIR is ill-formed, "
-             << "due to multiple definitions of variable " << var << ".";
+      verify << "ValueError: "
+             << "TIR is ill-formed, "
+             << "due to multiple definitions of variable " << var->name << ".";
       if (it != previously_defined_.end()) {
         verify << " It was first defined at " << it->second << ", and was later re-defined at "
                << path;
@@ -283,7 +211,8 @@ class UndefinedVarVerifier : public Verifier<UndefinedVarVerifier> {
 
     auto active_def = currently_defined_.find(var);
     auto verify = Verify(active_def != currently_defined_.end());
-    verify << "Invalid use of undefined variable " << var << " at " << path << ".";
+    verify << "ValueError: "
+           << "Invalid use of undefined variable " << var->name << " at " << path << ".";
 
     // Check if there was a previous definition, and append the
     // location to the error message if there was.  This is to aid in
@@ -310,7 +239,7 @@ class UndefinedVarVerifier : public Verifier<UndefinedVarVerifier> {
 /*! \brief Verify that buffers with a declaration are not used outside their declared scope.
  *
  * When a buffer is declared via one of the following sites:
- *   - PrimFunc buffer_map (function parameter buffers)
+ *   - BufferType-annotated PrimFunc parameters
  *   - DeclBuffer statement
  *   - SBlock::alloc_buffers
  *   - SBlock::match_buffers
@@ -334,13 +263,13 @@ class UndefinedBufferVerifier : public Verifier<UndefinedBufferVerifier> {
     previously_defined_.clear();
   }
 
-  void EnterDef(const Buffer& buffer, AccessPath path) override {
+  void EnterDef(const BufferVar& buffer, AccessPath path) override {
     // Call the base class to visit buffer's internal vars (shape, strides, etc.)
     Verifier::EnterDef(buffer, path);
     currently_defined_.insert({buffer, path});
   }
 
-  void ExitDef(const Buffer& buffer, AccessPath path) override {
+  void ExitDef(const BufferVar& buffer, AccessPath path) override {
     auto active_def = currently_defined_.find(buffer);
     if (active_def != currently_defined_.end()) {
       currently_defined_.erase(active_def);
@@ -348,29 +277,31 @@ class UndefinedBufferVerifier : public Verifier<UndefinedBufferVerifier> {
     previously_defined_.insert({buffer, path});
   }
 
-  void VisitBufferUse(const Buffer& buffer, AccessPath path) override {
+  void VisitBufferUse(const BufferVar& buffer, AccessPath path) override {
     bool is_declared = currently_defined_.count(buffer);
     bool was_declared = previously_defined_.count(buffer);
 
     if (was_declared && !is_declared) {
-      // Buffer was previously declared but is now out of scope — always an error.
+      // BufferVar was previously declared but is now out of scope — always an error.
       auto prev_def = previously_defined_.find(buffer);
-      Verify(false) << "TIR is ill-formed: buffer " << buffer->name << " is used at " << path
+      Verify(false) << "TIR is ill-formed: buffer " << buffer.name() << " is used at " << path
                     << " but its declaration is no longer in-scope. "
                     << "It was declared at " << prev_def->second << ".";
     } else if (!is_declared && !was_declared) {
-      // Buffer was never declared — error.
-      Verify(false) << "TIR is ill-formed: buffer " << buffer->name << " is used at " << path
+      // BufferVar was never declared — error.
+      Verify(false) << "TIR is ill-formed: buffer " << buffer.name() << " is used at " << path
                     << " without a prior DeclBuffer or other declaration.";
     }
-    // Buffer fields are visited at definition site (EnterDef), not here.
+    // BufferVar fields are visited at definition site (EnterDef), not here.
     Verifier::VisitBufferUse(buffer, path);
   }
 
   // Buffers defined in the currently-visited scope.
-  std::unordered_map<Buffer, AccessPath, ObjectPtrHash, ObjectPtrEqual> currently_defined_;
+  std::unordered_map<BufferVar, AccessPath, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
+      currently_defined_;
   // Buffers that were previously defined and are now out of scope.
-  std::unordered_map<Buffer, AccessPath, ObjectPtrHash, ObjectPtrEqual> previously_defined_;
+  std::unordered_map<BufferVar, AccessPath, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
+      previously_defined_;
 };
 
 /* \brief Verify unique tirx::Var for each environment thread
@@ -396,14 +327,15 @@ class SingleEnvThreadVerifier : public Verifier<SingleEnvThreadVerifier> {
       if (auto it = env_thread_vars_.find(iter_var->thread_tag); it != env_thread_vars_.end()) {
         const auto& [prev_var, prev_path] = it->second;
         Verify(prev_var.same_as(iter_var->var))
+            << "ValueError: "
             << "PrimFunc uses multiple distinct TIR variables "
             << " for the environment thread \"" << iter_var->thread_tag << "\".  "
             << "While multiple tirx::AttrStmt may define the same environment thread, "
             << "all definitions within a single PrimFunc must share the same tirx::Var.  "
             << "Binding of environment thread \"" << iter_var->thread_tag
-            << "\" to the TIR variable " << iter_var->var << " at " << path
-            << " conflicts with the previous binding to the TIR variable " << prev_var << " at "
-            << path;
+            << "\" to the TIR variable " << iter_var->var->name << " at " << path
+            << " conflicts with the previous binding to the TIR variable " << prev_var->name
+            << " at " << path;
       } else {
         env_thread_vars_.insert({iter_var->thread_tag, {iter_var->var, path}});
       }
@@ -446,7 +378,7 @@ bool VerifyWellFormed(const IRModule& mod, bool assert_mode) {
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def(
-      "tirx.analysis.VerifyWellFormed", [](const ObjectRef& obj, bool assert_mode) {
+      "tirx.analysis.VerifyWellFormed", [](const ffi::ObjectRef& obj, bool assert_mode) {
         if (auto opt = obj.as<PrimFunc>()) {
           return VerifyWellFormed(opt.value(), assert_mode);
         } else if (auto opt = obj.as<IRModule>()) {

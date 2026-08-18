@@ -25,6 +25,7 @@
 #define TVM_TOPI_DETAIL_CONSTANT_UTILS_H_
 
 #include <tvm/arith/analyzer.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/te/operation.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/expr.h>
@@ -132,7 +133,7 @@ inline bool EqualCheck(PrimExpr lhs, PrimExpr rhs) {
   tvm::tirx::ExprDeepEqual expr_equal;
   bool result = expr_equal(lhs, rhs);
   if (!result) {
-    PrimExpr t = tvm::arith::Analyzer().Simplify(lhs - rhs);
+    PrimExpr t = tvm::arith::Analyzer()->Simplify(lhs - rhs);
     if (const IntImmNode* i = t.as<IntImmNode>()) {
       result = i->value == 0;
     }

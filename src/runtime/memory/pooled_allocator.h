@@ -24,6 +24,7 @@
 #define TVM_RUNTIME_MEMORY_POOLED_ALLOCATOR_H_
 
 #include <tvm/runtime/device_api.h>
+#include <tvm/runtime/logging.h>
 #include <tvm/runtime/memory/memory_manager.h>
 
 #include <atomic>
@@ -61,7 +62,7 @@ class PooledAllocator : public Allocator {
     buf.alloc_type = kPooled;
     try {
       buf.data = DeviceAllocDataSpace(dev, size, alignment, type_hint);
-    } catch (InternalError& err) {
+    } catch (tvm::ffi::Error& err) {
       LOG(WARNING) << "PooledAllocator got InternalError during allocation: " << err.what();
       LOG(WARNING) << "Trying to release all unused memory and reallocate...";
       ReleaseAll();

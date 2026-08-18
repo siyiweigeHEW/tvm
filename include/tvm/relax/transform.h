@@ -153,7 +153,7 @@ TVM_DLL Pass AttachGlobalSymbol();
 
 /*!
  * \brief Transform Relax IR to normal form: transform AST to A-normal form, and fill the
- * struct_info_ of expressions.
+ * ty of expressions.
  *
  * \return The Pass.
  */
@@ -198,7 +198,7 @@ TVM_DLL Pass EliminateCommonSubexpr(bool call_only = false);
  *
  * \return The Pass.
  */
-TVM_DLL Pass BindParams(ffi::String func_name, ffi::Map<Any, ObjectRef> params);
+TVM_DLL Pass BindParams(ffi::String func_name, ffi::Map<Any, ffi::ObjectRef> params);
 
 /*!
  * \brief Bind symbolic vars to constant shape values.
@@ -215,8 +215,9 @@ TVM_DLL Pass BindParams(ffi::String func_name, ffi::Map<Any, ObjectRef> params);
  *
  * \return The Pass.
  */
-TVM_DLL Pass BindSymbolicVars(ffi::Map<ffi::Variant<tirx::Var, ffi::String>, PrimExpr> binding_map,
-                              ffi::Optional<ffi::String> func_name = std::nullopt);
+TVM_DLL Pass
+BindSymbolicVars(ffi::Map<ffi::Variant<tirx::PrimVar, ffi::String>, PrimExpr> binding_map,
+                 ffi::Optional<ffi::String> func_name = std::nullopt);
 
 /*!
  * \brief Fold constant expressions within dataflow blocks.
@@ -309,7 +310,7 @@ TVM_DLL Pass SplitLayoutRewritePreproc();
  * \return The Pass.
  */
 TVM_DLL Pass
-LiftTransformParams(ffi::Variant<Bool, ffi::Array<ffi::String>> shared_transform = Bool(false));
+LiftTransformParams(ffi::Variant<bool, ffi::Array<ffi::String>> shared_transform = false);
 
 /*!
  * \brief Update virtual device.
@@ -364,7 +365,7 @@ TVM_DLL Pass FuseOps(int fuse_opt_level = -1);
  * fused, it needs to be matched with `pattern` and the `check` function needs to return
  * true.
  */
-class FusionPatternNode : public Object {
+class FusionPatternNode : public ffi::Object {
  public:
   /*!
    * \brief The name of pattern. It becomes the value of the kComposite attribute
@@ -410,10 +411,11 @@ class FusionPatternNode : public Object {
         .def_ro("check", &FusionPatternNode::check)
         .def_ro("attrs_getter", &FusionPatternNode::attrs_getter);
   }
-  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("relax.transform.FusionPattern", FusionPatternNode, Object);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("relax.transform.FusionPattern", FusionPatternNode,
+                                    ffi::Object);
 };
 
-class FusionPattern : public ObjectRef {
+class FusionPattern : public ffi::ObjectRef {
  public:
   FusionPattern(ffi::String name, DFPattern pattern,
                 ffi::Map<ffi::String, DFPattern> annotation_patterns,
@@ -422,13 +424,13 @@ class FusionPattern : public ObjectRef {
   FusionPattern(ffi::String name, DFPattern pattern)
       : FusionPattern(name, pattern, {}, std::nullopt, std::nullopt) {}
 
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(FusionPattern, ObjectRef, FusionPatternNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(FusionPattern, ffi::ObjectRef, FusionPatternNode);
 };
 
 /*!
  * \brief The input of FusionPattern::check.
  */
-class PatternCheckContextNode : public Object {
+class PatternCheckContextNode : public ffi::Object {
  public:
   /*!
    * \brief The expression that's matched with the FusionPattern::pattern.
@@ -469,17 +471,17 @@ class PatternCheckContextNode : public Object {
         .def_ro("value_to_bound_var", &PatternCheckContextNode::value_to_bound_var);
   }
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("relax.transform.PatternCheckContext", PatternCheckContextNode,
-                                    Object);
+                                    ffi::Object);
 };
 
-class PatternCheckContext : public ObjectRef {
+class PatternCheckContext : public ffi::ObjectRef {
  public:
   PatternCheckContext(Expr matched_expr, ffi::Map<ffi::String, Expr> annotated_expr,
                       ffi::Map<Var, Expr> matched_bindings,
                       ffi::Map<Var, ffi::Array<Var>> var_usages,
                       ffi::Map<Expr, Var> value_to_bound_var);
 
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(PatternCheckContext, ObjectRef,
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(PatternCheckContext, ffi::ObjectRef,
                                                 PatternCheckContextNode);
 };
 
@@ -593,16 +595,11 @@ TVM_DLL Pass DecomposeOpsForTraining(ffi::Optional<ffi::String> func_name);
  * \param op_impl_map Map from kOperatorName attr (e.g., relax.conv2d) to replacement PrimFunc
  * \param op_buffer_transforms Map from kOperatorName attr to layout transformations on each of the
  * PrimFunc i/o buffers.
- * \param axis_separators Map from kOperatorName attr to axis_separators of each buffer_transforms
- * \param input_axis_separators Map from kOperatorName attr to axis_separator for input buffer
  * \return The Pass.
  */
-TVM_DLL Pass AlterOpImpl(
-    const ffi::Map<ffi::String, tirx::PrimFunc>& op_impl_map,
-    const ffi::Map<ffi::String, ffi::Array<tirx::IndexMap>>& op_buffer_transforms,
-    const ffi::Map<ffi::String, ffi::Optional<ffi::Array<ffi::Array<IntImm>>>>& axis_separators,
-    const ffi::Map<ffi::String, ffi::Optional<ffi::Array<ffi::Array<IntImm>>>>&
-        input_axis_separators);
+TVM_DLL Pass
+AlterOpImpl(const ffi::Map<ffi::String, tirx::PrimFunc>& op_impl_map,
+            const ffi::Map<ffi::String, ffi::Array<tirx::IndexMap>>& op_buffer_transforms);
 
 /*!
  * \brief Layout conversion pass.
@@ -662,9 +659,8 @@ TVM_DLL Pass DataflowUseInplaceCalls();
  *
  * \note Mainly operates within dataflow blocks. ConvertToDataflow may need to be called first.
  */
-TVM_DLL Pass
-ToMixedPrecision(const DataType& out_dtype,
-                 ffi::Optional<ffi::Array<ffi::String>> fp16_input_names = std::nullopt);
+TVM_DLL Pass ToMixedPrecision(
+    DLDataType out_dtype, ffi::Optional<ffi::Array<ffi::String>> fp16_input_names = std::nullopt);
 
 /*!
  * \brief Rewrite a Relax module for executing with CUDA graph. This pass identifies

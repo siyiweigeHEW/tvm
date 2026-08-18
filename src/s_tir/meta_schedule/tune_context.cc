@@ -16,6 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
 
 #include <utility>
@@ -33,24 +34,24 @@ TuneContext::TuneContext(ffi::Optional<IRModule> mod, ffi::Optional<Target> targ
                          TRandState rand_state, ffi::Function logger) {
   TVM_FFI_CHECK(rand_state == -1 || rand_state >= 0, ValueError)
       << "Invalid random state: " << rand_state;
-  ObjectPtr<TuneContextNode> n = ffi::make_object<TuneContextNode>();
+  ffi::ObjectPtr<TuneContextNode> n = ffi::make_object<TuneContextNode>();
   n->mod = mod;
   n->target = target;
   n->space_generator = space_generator;
   n->search_strategy = search_strategy;
   n->task_name = task_name;
   n->num_threads = num_threads;
-  n->rand_state = support::LinearCongruentialEngine::NormalizeSeed(rand_state);
+  n->rand_state = LinearCongruentialEngine::NormalizeSeed(rand_state);
   n->logger = logger;
   data_ = std::move(n);
 }
 
 TuneContext TuneContextNode::Clone() const {
-  ObjectPtr<TuneContextNode> n = ffi::make_object<TuneContextNode>(*this);
-  if (this->space_generator.defined()) {
+  ffi::ObjectPtr<TuneContextNode> n = ffi::make_object<TuneContextNode>(*this);
+  if (this->space_generator.has_value()) {
     n->space_generator = this->space_generator.value()->Clone();
   }
-  if (this->search_strategy.defined()) {
+  if (this->search_strategy.has_value()) {
     n->search_strategy = this->search_strategy.value()->Clone();
   }
   n->rand_state = ForkSeed(&n->rand_state);
@@ -59,10 +60,10 @@ TuneContext TuneContextNode::Clone() const {
 }
 
 void TuneContextNode::Initialize() {
-  if (this->space_generator.defined()) {
+  if (this->space_generator.has_value()) {
     this->space_generator.value()->InitializeWithTuneContext(ffi::GetRef<TuneContext>(this));
   }
-  if (this->search_strategy.defined()) {
+  if (this->search_strategy.has_value()) {
     this->search_strategy.value()->InitializeWithTuneContext(ffi::GetRef<TuneContext>(this));
   }
 }

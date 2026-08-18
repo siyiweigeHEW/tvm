@@ -44,40 +44,35 @@ class ValidateBufferScopes(PyExprVisitor):  # pylint: disable=abstract-method
             pfunc = self.mod[call.args[0]]
             if not self.is_matched:
                 # All scopes should be global in before pass
-                for _, buf in pfunc.buffer_map.items():
-                    assert "global" == buf.data.type_annotation.storage_scope, (
-                        f"expected to be global scoped, but got {val.data.type_annotation.storage_scope}"
+                for buf in pfunc.params:
+                    if not tvm.tirx.is_buffer_var(buf):
+                        continue
+                    assert "global" == buf.data.ty.storage_scope, (
+                        f"expected to be global scoped, but got {val.data.ty.storage_scope}"
                     )
             else:
                 for idx, arg in enumerate(call.args[1]):
-                    arg_sinfo = arg.struct_info
-                    assert isinstance(arg_sinfo, relax.TensorStructInfo), (
-                        f"Expected TensorStructInfo but git {type(arg_sinfo)}"
+                    arg_ty = arg.ty
+                    assert isinstance(arg_ty, relax.TensorType), (
+                        f"Expected TensorType but git {type(arg_ty)}"
                     )
-                    buf = pfunc.buffer_map[pfunc.params[idx]]
-                    assert (
-                        arg_sinfo.vdevice.memory_scope == buf.data.type_annotation.storage_scope
-                    ), (
-                        f"scope mismatched after specialization {arg_sinfo.vdevice.memory_scope} vs {buf.data.type_annotation.storage_scope}"
+                    buf = pfunc.params[idx]
+                    assert arg_ty.vdevice.memory_scope == buf.data.ty.storage_scope, (
+                        f"scope mismatched after specialization {arg_ty.vdevice.memory_scope} vs {buf.data.ty.storage_scope}"
                     )
-                if isinstance(call.sinfo_args[0], relax.TensorStructInfo):
-                    buf = pfunc.buffer_map[pfunc.params[-1]]
-                    assert (
-                        call.sinfo_args[0].vdevice.memory_scope
-                        == buf.data.type_annotation.storage_scope
-                    ), (
-                        f"scope mismatched after specialization {call.sinfo_args[0].vdevice.memory_scope} vs {buf.data.type_annotation.storage_scope}"
+                if isinstance(call.ty_args[0], relax.TensorType):
+                    buf = pfunc.params[-1]
+                    assert call.ty_args[0].vdevice.memory_scope == buf.data.ty.storage_scope, (
+                        f"scope mismatched after specialization {call.ty_args[0].vdevice.memory_scope} vs {buf.data.ty.storage_scope}"
                     )
                 else:
-                    assert isinstance(call.sinfo_args[0], relax.TupleStructInfo), (
-                        f"Expected TupleStructInfo but git {type(call.sinfo_args[0])}"
+                    assert isinstance(call.ty_args[0], relax.TupleType), (
+                        f"Expected TupleType but git {type(call.ty_args[0])}"
                     )
-                    for idx, sinfo in enumerate(call.sinfo_args[0].fields):
-                        buf = pfunc.buffer_map[pfunc.params[len(call.args[1]) + idx]]
-                        assert (
-                            sinfo.vdevice.memory_scope == buf.data.type_annotation.storage_scope
-                        ), (
-                            f"scope mismatched after specialization {sinfo.vdevice.memory_scope} vs {buf.data.type_annotation.storage_scope}"
+                    for idx, ty in enumerate(call.ty_args[0].fields):
+                        buf = pfunc.params[len(call.args[1]) + idx]
+                        assert ty.vdevice.memory_scope == buf.data.ty.storage_scope, (
+                            f"scope mismatched after specialization {ty.vdevice.memory_scope} vs {buf.data.ty.storage_scope}"
                         )
 
 
@@ -88,7 +83,7 @@ def verify(input):
 
 
 def test_single_arg_return():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Input:
         I.module_global_infos(
             {
@@ -99,7 +94,7 @@ def test_single_arg_return():
             }
         )
 
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def max_pool2d_opencl(
             gv: T.Buffer((T.int64(2), T.int64(1), T.int64(26), T.int64(26), T.int64(4)), "float32"),
             pool_max: T.Buffer(
@@ -140,7 +135,7 @@ def test_single_arg_return():
                         ],
                     )
 
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def te_layout_transform(
             x: T.Buffer((T.int64(2), T.int64(4), T.int64(26), T.int64(26)), "float32"),
             te_layout_transform: T.Buffer(
@@ -161,7 +156,7 @@ def test_single_arg_return():
                         v_self, v_i0 // T.int64(4), v_i1, v_i2, v_i0 % T.int64(4)
                     ] = x[v_self, v_i0, v_i1, v_i2]
 
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def te_layout_transform2(
             lv2: T.Buffer(
                 (T.int64(2), T.int64(1), T.int64(13), T.int64(13), T.int64(4)), "float32"
@@ -191,14 +186,14 @@ def test_single_arg_return():
                 lv = R.call_tir(
                     cls.te_layout_transform,
                     (x,),
-                    out_sinfo=R.Tensor(
+                    out_ty=R.Tensor(
                         (2, 1, 26, 26, 4), dtype="float32", vdevice="opencl:0:global.texture-weight"
                     ),
                 )
                 lv2 = R.call_tir(
                     cls.max_pool2d_opencl,
                     (lv,),
-                    out_sinfo=R.Tensor(
+                    out_ty=R.Tensor(
                         (2, 1, 13, 13, 4), dtype="float32", vdevice="opencl:0:global.texture-weight"
                     ),
                 )
@@ -208,7 +203,7 @@ def test_single_arg_return():
                 gv2 = R.call_tir(
                     cls.te_layout_transform2,
                     (lv5,),
-                    out_sinfo=R.Tensor((2, 4, 13, 13), dtype="float32", vdevice="opencl:1:global"),
+                    out_ty=R.Tensor((2, 4, 13, 13), dtype="float32", vdevice="opencl:1:global"),
                 )
                 R.output(gv2)
             return gv2
@@ -217,7 +212,7 @@ def test_single_arg_return():
 
 
 def test_multi_arg_return():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class Input:
         I.module_global_infos(
             {
@@ -228,7 +223,7 @@ def test_multi_arg_return():
             }
         )
 
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def conv2d_NCHWc_OIHWo_opencl(
             lv: T.Buffer((T.int64(2), T.int64(4), T.int64(28), T.int64(28), T.int64(4)), "float32"),
             lv1: T.Buffer((T.int64(1), T.int64(16), T.int64(3), T.int64(3), T.int64(4)), "float32"),
@@ -238,7 +233,7 @@ def test_multi_arg_return():
         ):
             conv2d_NCHWc_OIHWo[0, 0, 0, 0, 0] = T.float32(0.0)
 
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def fused_relu_concatenate_split(
             gv: T.Buffer((T.int64(2), T.int64(1), T.int64(26), T.int64(26), T.int64(4)), "float32"),
             T_split_sections_intermediate: T.Buffer(
@@ -251,7 +246,7 @@ def test_multi_arg_return():
             T_split_sections_intermediate[0, 0, 0, 0, 0] = T.float32(0.0)
             T_split_sections_intermediate_1[0, 0, 0, 0, 0] = T.float32(0.0)
 
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def te_layout_transform(
             x: T.Buffer((T.int64(2), T.int64(16), T.int64(28), T.int64(28)), "float32"),
             te_layout_transform: T.Buffer(
@@ -260,7 +255,7 @@ def test_multi_arg_return():
         ):
             te_layout_transform[0, 0, 0, 0, 0] = T.float32(0.0)
 
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def te_layout_transform1(
             w: T.Buffer((T.int64(4), T.int64(16), T.int64(3), T.int64(3)), "float32"),
             te_layout_transform: T.Buffer(
@@ -269,7 +264,7 @@ def test_multi_arg_return():
         ):
             te_layout_transform[0, 0, 0, 0, 0] = T.float32(0.0)
 
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def te_layout_transform2(
             lv3: T.Buffer(
                 (T.int64(2), T.int64(1), T.int64(26), T.int64(26), T.int64(4)), "float32"
@@ -293,28 +288,28 @@ def test_multi_arg_return():
                 lv = R.call_tir(
                     cls.te_layout_transform,
                     (x,),
-                    out_sinfo=R.Tensor(
+                    out_ty=R.Tensor(
                         (2, 4, 28, 28, 4), dtype="float32", vdevice="opencl:0:global.texture-weight"
                     ),
                 )
                 lv1 = R.call_tir(
                     cls.te_layout_transform1,
                     (w,),
-                    out_sinfo=R.Tensor(
+                    out_ty=R.Tensor(
                         (1, 16, 3, 3, 4), dtype="float32", vdevice="opencl:0:global.texture-weight"
                     ),
                 )
                 gv = R.call_tir(
                     cls.conv2d_NCHWc_OIHWo_opencl,
                     (lv, lv1),
-                    out_sinfo=R.Tensor(
+                    out_ty=R.Tensor(
                         (2, 1, 26, 26, 4), dtype="float32", vdevice="opencl:0:global.texture-weight"
                     ),
                 )
                 lv_1 = R.call_tir(
                     cls.fused_relu_concatenate_split,
                     (gv,),
-                    out_sinfo=[
+                    out_ty=[
                         R.Tensor((2, 1, 26, 26, 4), dtype="float32", vdevice="opencl:1:global"),
                         R.Tensor((2, 1, 26, 26, 4), dtype="float32", vdevice="opencl:1:global"),
                     ],
@@ -325,7 +320,7 @@ def test_multi_arg_return():
                 lv4 = R.call_tir(
                     cls.te_layout_transform2,
                     (lv3,),
-                    out_sinfo=R.Tensor((2, 4, 26, 26), dtype="float32", vdevice="opencl:1:global"),
+                    out_ty=R.Tensor((2, 4, 26, 26), dtype="float32", vdevice="opencl:1:global"),
                 )
                 lv5: R.Tensor((2, 1, 26, 26, 4), dtype="float32", vdevice="opencl:1:global") = lv_1[
                     1
@@ -333,7 +328,7 @@ def test_multi_arg_return():
                 lv6 = R.call_tir(
                     cls.te_layout_transform2,
                     (lv5,),
-                    out_sinfo=R.Tensor((2, 4, 26, 26), dtype="float32", vdevice="opencl:1:global"),
+                    out_ty=R.Tensor((2, 4, 26, 26), dtype="float32", vdevice="opencl:1:global"),
                 )
                 gv4: R.Tuple(
                     R.Tensor((2, 4, 26, 26), dtype="float32", vdevice="opencl:1:global"),

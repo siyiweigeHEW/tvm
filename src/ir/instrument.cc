@@ -21,13 +21,15 @@
  * \file src/ir/instrument.cc
  * \brief Infrastructure for instrumentation.
  */
+#include <tvm/ffi/extra/dataclass.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/instrument.h>
 #include <tvm/ir/transform.h>
-#include <tvm/node/repr_printer.h>
+#include <tvm/runtime/logging.h>
 
 #include <chrono>
+#include <iomanip>
 #include <stack>
 
 namespace tvm {
@@ -190,15 +192,11 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       });
 }
 
-TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
-    .set_dispatch<BasePassInstrumentNode>([](const ObjectRef& ref, ReprPrinter* p) {
-      auto* node = static_cast<const BasePassInstrumentNode*>(ref.get());
-      p->stream << node->name;
-    });
+// Pattern A (RM): auto-default repr from reflection.
 
 /*! \brief PassProfile stores profiling information for a given pass and its sub-passes. */
 struct PassProfile {
-  // TODO(@altanh): expose PassProfile through TVM Object API
+  // TODO(@altanh): expose PassProfile through TVM ffi::Object API
   using Clock = std::chrono::steady_clock;
   using Duration = std::chrono::duration<double, std::micro>;
   using Time = std::chrono::time_point<Clock>;

@@ -19,13 +19,13 @@
 import tvm_ffi
 
 import tvm
-from tvm.runtime import Scriptable
-from tvm.runtime.object import Object
+from tvm.runtime import Object, Scriptable
 
 from . import _ffi_api
 from . import expr as _expr
 from .attrs import DictAttrs
 from .base import Node
+from .function import BaseFunc
 
 
 @tvm_ffi.register_object("ir.IRModule")
@@ -95,7 +95,7 @@ class IRModule(Node, Scriptable):
         return self._add(var, val, True)
 
     def _add(self, var, val, update=True):
-        if isinstance(val, _expr.RelaxExpr):
+        if isinstance(val, BaseFunc):
             if isinstance(var, str):
                 if _ffi_api.Module_ContainGlobalVar(self, var):
                     var = _ffi_api.Module_GetGlobalVar(self, var)
@@ -182,7 +182,7 @@ class IRModule(Node, Scriptable):
 
         Raises
         ------
-        tvm.error.TVMError if we cannot find corresponding global var.
+        RuntimeError if we cannot find corresponding global var.
         """
         return _ffi_api.Module_GetGlobalVar(self, name)
 
@@ -196,40 +196,13 @@ class IRModule(Node, Scriptable):
         """
         return _ffi_api.Module_GetGlobalVars(self)
 
-    def replace_global_vars(
-        self,
-        replacements: dict[str | _expr.GlobalVar, str | _expr.GlobalVar],
-    ) -> "IRModule":
-        """Replace GlobalVar instances within the module
-
-        Replace GlobalVars within the IRModule.  Since the IRModule
-        may contain internal references to a GlobalVar, either in TIR
-        or in Relax, this method should be used whenever replacing or
-        renaming a GlobalVar.
-
-        Parameters
-        ----------
-        replacements: Dict[Union[str, _expr.GlobalVar], Union[str, _expr.GlobalVar]]
-
-            A dictionary where each key is a GlobalVar to be replaced,
-            and the corresponding value is the GlobalVar with which to
-            replace it.
-
-        Returns
-        -------
-        IRModule
-            The updated module
-
-        """
-        return _ffi_api.Module_ReplaceGlobalVars(self, replacements)
-
     @staticmethod
     def from_expr(expr, functions=None):
         """Construct a module from a standalone expression.
 
         Parameters
         ----------
-        expr: RelaxExpr
+        expr: Expr
             The starting expression
 
         global_funcs: Optional[dict]

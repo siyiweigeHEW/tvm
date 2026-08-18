@@ -14,13 +14,12 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-# ruff: noqa: F401
 import tvm
 from tvm import s_tir
 from tvm.script import tirx as T
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def buffer_load_store_func(a: T.handle, b: T.handle) -> None:
     A = T.match_buffer(a, (128, 128), "float32")
     B = T.match_buffer(b, (128, 128), "float32")
@@ -45,7 +44,7 @@ def buffer_load_store_func(a: T.handle, b: T.handle) -> None:
                     )
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def buffer_opaque_access(b: T.handle, c: T.handle) -> None:
     B = T.match_buffer(b, [16, 16], "float32")
     C = T.match_buffer(c, [16, 16], "float32")
@@ -68,13 +67,13 @@ def buffer_opaque_access(b: T.handle, c: T.handle) -> None:
             C[vi, vj] = B[vi, vj]
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def lca_is_func_root(a: T.handle) -> None:
     A = T.match_buffer(a, [0, 0], "float32")
     A[0, 0] = 1.0
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def match_buffer_func(a: T.handle, b: T.handle) -> None:
     A = T.match_buffer(a, (128, 128), "float32")
     B = T.match_buffer(b, (128, 128), "float32")
@@ -94,7 +93,7 @@ def match_buffer_func(a: T.handle, b: T.handle) -> None:
             T.evaluate(B1.data)
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def global_buffer_with_blockidx(
     a: T.Buffer((1, 32), "int32"), b: T.Buffer((1, 32), "int32")
 ) -> None:
@@ -109,7 +108,7 @@ def global_buffer_with_blockidx(
 
 def test_buffer_load_store():
     func = buffer_load_store_func
-    A, B = [func.buffer_map[x] for x in func.params]
+    A, B = [x for x in func.params if tvm.tirx.is_buffer_var(x)]
     C, D = func.body.block.alloc_buffers
     lca = s_tir.analysis.detect_buffer_access_lca(func)
 
@@ -133,7 +132,7 @@ def test_buffer_load_store():
 
 def test_opaque_access():
     func = buffer_opaque_access
-    B, C = [func.buffer_map[x] for x in func.params]
+    B, C = [x for x in func.params if tvm.tirx.is_buffer_var(x)]
     lca = s_tir.analysis.detect_buffer_access_lca(func)
 
     # Cannot detect buffer A since it is define by low-level Allocate
@@ -148,14 +147,14 @@ def test_opaque_access():
 
 def test_lca_func_root():
     func = lca_is_func_root
-    (A,) = [func.buffer_map[x] for x in func.params]
+    (A,) = [x for x in func.params if tvm.tirx.is_buffer_var(x)]
     lca = s_tir.analysis.detect_buffer_access_lca(func)
     assert lca[A] is None
 
 
 def test_match_buffer():
     func = match_buffer_func
-    A, B = [func.buffer_map[x] for x in func.params]
+    A, B = [x for x in func.params if tvm.tirx.is_buffer_var(x)]
     lca = s_tir.analysis.detect_buffer_access_lca(func)
 
     root_block = func.body.block
@@ -171,7 +170,7 @@ def test_match_buffer():
 
 def test_global_buffer_with_blockidx():
     func = global_buffer_with_blockidx
-    A, B = [func.buffer_map[x] for x in func.params]
+    A, B = [x for x in func.params if tvm.tirx.is_buffer_var(x)]
     lca = s_tir.analysis.detect_buffer_access_lca(func)
 
     root_block = func.body.block

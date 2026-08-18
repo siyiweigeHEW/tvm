@@ -32,23 +32,13 @@ ffi::Array<tvm::runtime::Tensor> PyFeatureExtractorNode::ExtractFrom(
 }
 
 FeatureExtractor FeatureExtractor::PyFeatureExtractor(
-    PyFeatureExtractorNode::FExtractFrom f_extract_from,  //
-    PyFeatureExtractorNode::FAsString f_as_string) {
-  ObjectPtr<PyFeatureExtractorNode> n = ffi::make_object<PyFeatureExtractorNode>();
+    PyFeatureExtractorNode::FExtractFrom f_extract_from) {
+  ffi::ObjectPtr<PyFeatureExtractorNode> n = ffi::make_object<PyFeatureExtractorNode>();
   n->f_extract_from = std::move(f_extract_from);
-  n->f_as_string = std::move(f_as_string);
   return FeatureExtractor(n);
 }
 
-TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
-    .set_dispatch<PyFeatureExtractorNode>([](const ObjectRef& n, ReprPrinter* p) {
-      const auto* self = n.as<PyFeatureExtractorNode>();
-      TVM_FFI_ICHECK(self);
-      PyFeatureExtractorNode::FAsString f_as_string = (*self).f_as_string;
-      TVM_FFI_ICHECK(f_as_string != nullptr)
-          << "PyFeatureExtractor's AsString method not implemented!";
-      p->stream << f_as_string();
-    });
+// Pattern A (RM): auto-default repr from reflection.
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   FeatureExtractorNode::RegisterReflection();

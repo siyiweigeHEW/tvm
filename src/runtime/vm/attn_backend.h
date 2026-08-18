@@ -26,9 +26,10 @@
 #define TVM_RUNTIME_VM_ATTN_BACKEND_H_
 
 #include <tvm/ffi/container/array.h>
+#include <tvm/ffi/container/shape.h>
+#include <tvm/ffi/error.h>
 #include <tvm/ffi/function.h>
 #include <tvm/runtime/device_api.h>
-#include <tvm/runtime/int_tuple.h>
 #include <tvm/runtime/logging.h>
 
 #include <memory>
@@ -48,6 +49,134 @@ enum class AttnBackendKind : int {
   kFlashInfer = 1,
 };
 
+/*!
+ * \brief Return a zero-copy alias of \p t whose `byte_offset` is folded into the
+ * data pointer, so the resulting tensor has `byte_offset == 0`.
+ *
+ * FlashInfer 0.6.3 kernels read tensors from `data` directly and do NOT honor
+ * the DLPack `byte_offset` field. mlc's auxiliary index tensors (qo_indptr,
+ * kv_indptr, page_indptr, page_indices, length_info, ...) are views packed into
+ * a shared workspace and therefore carry a non-zero `byte_offset`. Passing them
+ * as-is makes FlashInfer read the wrong addresses; this helper rebases them.
+ */
+inline ffi::Tensor ZeroByteOffsetView(const Tensor& t) {
+  if (t->byte_offset == 0) return t;
+  auto* holder = new Tensor(t);  // keep the underlying storage alive
+  auto* managed = new DLManagedTensor();
+  managed->manager_ctx = holder;
+  managed->deleter = [](DLManagedTensor* self) {
+    delete[] self->dl_tensor.shape;
+    delete[] self->dl_tensor.strides;
+    delete static_cast<Tensor*>(self->manager_ctx);
+    delete self;
+  };
+  DLTensor& dl = managed->dl_tensor;
+  dl.data = static_cast<void*>(static_cast<char*>(t->data) + t->byte_offset);
+  dl.device = t->device;
+  dl.ndim = t->ndim;
+  dl.dtype = t->dtype;
+  dl.shape = new int64_t[t->ndim];
+  dl.strides = nullptr;
+  for (int i = 0; i < t->ndim; ++i) dl.shape[i] = t->shape[i];
+  if (t->strides != nullptr) {
+    dl.strides = new int64_t[t->ndim];
+    for (int i = 0; i < t->ndim; ++i) dl.strides[i] = t->strides[i];
+  }
+  dl.byte_offset = 0;
+  return tvm::ffi::Tensor::FromDLPack(managed, /*require_alignment=*/0,
+                                      /*require_contiguous=*/false);
+}
+
+/*!
+ * \brief Build a strided, zero-copy view selecting the key (which=0) or value
+ * (which=1) sub-tensor from a combined paged KV tensor of shape
+ * (num_pages, 2, num_heads, page_size, head_dim), yielding a
+ * (num_pages, num_heads, page_size, head_dim) tensor that shares storage with
+ * `pages`. FlashInfer 0.6.3 takes separate key/value paged caches and reads the
+ * tensor strides, so a strided view avoids an explicit split/copy.
+ */
+inline ffi::Tensor PagedKVCacheView(const Tensor& pages, int64_t which) {
+  TVM_FFI_ICHECK_EQ(pages->ndim, 5);
+  TVM_FFI_ICHECK_EQ(pages->shape[1], 2);
+  int64_t num_pages = pages->shape[0];
+  int64_t num_heads = pages->shape[2];
+  int64_t page_size = pages->shape[3];
+  int64_t head_dim = pages->shape[4];
+  int64_t inner = num_heads * page_size * head_dim;
+  int64_t elem_bytes = (pages->dtype.bits * pages->dtype.lanes + 7) / 8;
+
+  auto* holder = new Tensor(pages);  // keep the underlying storage alive
+  auto* managed = new DLManagedTensor();
+  managed->manager_ctx = holder;
+  managed->deleter = [](DLManagedTensor* self) {
+    delete[] self->dl_tensor.shape;
+    delete[] self->dl_tensor.strides;
+    delete static_cast<Tensor*>(self->manager_ctx);
+    delete self;
+  };
+  DLTensor& dl = managed->dl_tensor;
+  dl.data = static_cast<void*>(static_cast<char*>(pages->data) + pages->byte_offset +
+                               which * inner * elem_bytes);
+  dl.device = pages->device;
+  dl.ndim = 4;
+  dl.dtype = pages->dtype;
+  dl.shape = new int64_t[4]{num_pages, num_heads, page_size, head_dim};
+  dl.strides = new int64_t[4]{2 * inner, page_size * head_dim, head_dim, 1};
+  dl.byte_offset = 0;
+  return tvm::ffi::Tensor::FromDLPack(managed, /*require_alignment=*/0,
+                                      /*require_contiguous=*/false);
+}
+
+/*!
+ * \brief Return a strided, zero-copy view selecting the `[start, start+length)`
+ * slice along the LAST dimension of \p t, preserving all other strides and
+ * folding the slice offset into the data pointer (so `byte_offset == 0`).
+ *
+ * Used to split MLA tensors that store two head components concatenated along
+ * the last dim: the query into `q_nope`/`q_pe` and the paged cache into
+ * `ckv_cache`/`kpe_cache`. FlashInfer reads tensor strides and ignores
+ * `byte_offset`, so a strided slice avoids a copy.
+ */
+inline ffi::Tensor SliceLastDimView(const Tensor& t, int64_t start, int64_t length) {
+  int ndim = t->ndim;
+  int64_t elem_bytes = (t->dtype.bits * t->dtype.lanes + 7) / 8;
+  std::vector<int64_t> in_strides(ndim);
+  if (t->strides != nullptr) {
+    for (int i = 0; i < ndim; ++i) in_strides[i] = t->strides[i];
+  } else {
+    int64_t s = 1;
+    for (int i = ndim - 1; i >= 0; --i) {
+      in_strides[i] = s;
+      s *= t->shape[i];
+    }
+  }
+  auto* holder = new Tensor(t);  // keep the underlying storage alive
+  auto* managed = new DLManagedTensor();
+  managed->manager_ctx = holder;
+  managed->deleter = [](DLManagedTensor* self) {
+    delete[] self->dl_tensor.shape;
+    delete[] self->dl_tensor.strides;
+    delete static_cast<Tensor*>(self->manager_ctx);
+    delete self;
+  };
+  DLTensor& dl = managed->dl_tensor;
+  dl.data = static_cast<void*>(static_cast<char*>(t->data) + t->byte_offset +
+                               start * in_strides[ndim - 1] * elem_bytes);
+  dl.device = t->device;
+  dl.ndim = ndim;
+  dl.dtype = t->dtype;
+  dl.shape = new int64_t[ndim];
+  dl.strides = new int64_t[ndim];
+  for (int i = 0; i < ndim; ++i) {
+    dl.shape[i] = t->shape[i];
+    dl.strides[i] = in_strides[i];
+  }
+  dl.shape[ndim - 1] = length;
+  dl.byte_offset = 0;
+  return tvm::ffi::Tensor::FromDLPack(managed, /*require_alignment=*/0,
+                                      /*require_contiguous=*/false);
+}
+
 /*! \brief The base class of attention backends. */
 class AttnBackendFunc {
  public:
@@ -58,22 +187,6 @@ class AttnBackendFunc {
   virtual ~AttnBackendFunc() = default;
 
  protected:
-  // helper allocator class for creating strided view of a Tensor
-  // that applies byte offset to the original data pointer
-  class ViewBasedAlloc {
-   public:
-    explicit ViewBasedAlloc(Tensor source) : source_(source) {}
-    void AllocData(DLTensor* tensor, int64_t* strides, int64_t extra_byte_offset) {
-      tensor->data = static_cast<char*>(source_->data) + extra_byte_offset;
-      tensor->strides = strides;
-    }
-
-    void FreeData(DLTensor* tensor) {}
-
-   private:
-    Tensor source_;
-  };
-
   ffi::Function attn_func_;
 
  public:
@@ -150,34 +263,17 @@ class FlashInferPagedPrefillFunc : public PagedPrefillFunc {
            Tensor k_rope_pos_offset, bool causal, RoPEMode rope_mode, double rotary_scale,
            double rotary_theta, double sm_scale, Tensor attn_output, Tensor attn_lse,
            TVMStreamHandle compute_stream) final {
-    Device device = q->device;
-    TVMStreamHandle original_stream = DeviceAPI::Get(device)->GetCurrentStream(device);
-    DeviceAPI::Get(device)->SetStream(device, compute_stream);
     auto [float_workspace_buffer, int_workspace_buffer, page_locked_int_workspace_buffer,
           plan_info_vec] = cached_buffers_[depth];
     double rope_rcp_scale = 1 / rotary_scale;
     double rope_rcp_theta = 1 / rotary_theta;
-
-    TVM_FFI_ICHECK_EQ(pages.ndim(), 5);
-    int H = pages->shape[2];
-    int N = pages->shape[3];
-    int D = pages->shape[4];
-    TVM_FFI_ICHECK(pages.IsContiguous());
-    std::vector<int64_t> pages_k_v_shape = {pages->shape[0], H, N, D};
-    std::vector<int64_t> pages_k_v_strides = {2 * H * N * D, N * D, D, 1};
-    Tensor pages_k =
-        Tensor::FromNDAlloc(ViewBasedAlloc(pages), ffi::Shape(pages_k_v_shape), pages->dtype,
-                            pages->device, pages_k_v_strides.data(), pages->byte_offset);
-    Tensor pages_v = Tensor::FromNDAlloc(
-        ViewBasedAlloc(pages), ffi::Shape(pages_k_v_shape), pages->dtype, pages->device,
-        pages_k_v_strides.data(), pages->byte_offset + (H * N * D) * pages.DataType().bytes());
-
-    attn_func_(float_workspace_buffer, int_workspace_buffer, plan_info_vec, q, pages_k, pages_v,
-               qo_indptr, page_indptr, page_indices, length_info, attn_output, attn_lse,
-               /*mask_mode_code=*/static_cast<int64_t>(causal), /*layout(HND)=*/1,
-               /*window_left=*/-1, /*enable_pdl=*/false, sm_scale,
-               /*rope_rcp_scale=*/rope_rcp_scale, /*rope_rcp_theta=*/rope_rcp_theta);
-    DeviceAPI::Get(device)->SetStream(device, original_stream);
+    attn_func_(
+        float_workspace_buffer, int_workspace_buffer, plan_info_vec, q, PagedKVCacheView(pages, 0),
+        PagedKVCacheView(pages, 1), ZeroByteOffsetView(qo_indptr), ZeroByteOffsetView(page_indptr),
+        ZeroByteOffsetView(page_indices), ZeroByteOffsetView(length_info), attn_output, attn_lse,
+        /*mask_mode_code=*/static_cast<int64_t>(causal),
+        /*layout(HND)=*/1, /*window_left=*/-1, /*enable_pdl=*/false, sm_scale,
+        /*rope_rcp_scale=*/rope_rcp_scale, /*rope_rcp_theta=*/rope_rcp_theta);
   }
 
   void MLA(int depth, Tensor q, Tensor qo_indptr, Tensor pages, Tensor page_indptr,
@@ -185,43 +281,23 @@ class FlashInferPagedPrefillFunc : public PagedPrefillFunc {
            Tensor attn_output, Tensor attn_lse, TVMStreamHandle compute_stream) final {
     auto [float_workspace_buffer, int_workspace_buffer, page_locked_int_workspace_buffer,
           plan_info_vec] = cached_buffers_[depth];
-    Device device = q->device;
-    TVMStreamHandle original_stream = DeviceAPI::Get(device)->GetCurrentStream(device);
-    DeviceAPI::Get(device)->SetStream(device, compute_stream);
-    TVM_FFI_ICHECK_NE(qk_head_dim_, -1);
-    TVM_FFI_ICHECK_NE(v_head_dim_, -1);
-    int64_t H = q->shape[1];
-    int64_t page_size = pages->shape[1];
-    int64_t rope_head_dim = qk_head_dim_ - v_head_dim_;
-    int64_t nope_head_dim = q->shape[2] - rope_head_dim;
-
-    // Split q into q_nope and q_pe
-    TVM_FFI_ICHECK(q.IsContiguous());
-    std::vector<int64_t> q_nope_shape = {q->shape[0], H, nope_head_dim};
-    std::vector<int64_t> q_pe_shape = {q->shape[0], H, rope_head_dim};
-    std::vector<int64_t> q_strides = {H * q->shape[2], q->shape[2], 1};
-    Tensor q_nope = Tensor::FromNDAlloc(ViewBasedAlloc(q), ffi::Shape(q_nope_shape), q->dtype,
-                                        q->device, q_strides.data(), q->byte_offset);
-    Tensor q_pe = Tensor::FromNDAlloc(ViewBasedAlloc(q), ffi::Shape(q_pe_shape), q->dtype,
-                                      q->device, q_strides.data(),
-                                      q->byte_offset + nope_head_dim * q.DataType().bytes());
-    // Split pages into kv_nope and kv_pe
-    TVM_FFI_ICHECK(pages.IsContiguous());
-    std::vector<int64_t> kv_nope_shape = {pages->shape[0], page_size, nope_head_dim};
-    std::vector<int64_t> kv_pe_shape = {pages->shape[0], page_size, rope_head_dim};
-    std::vector<int64_t> kv_strides = {page_size * pages->shape[2], pages->shape[2], 1};
-    Tensor kv_nope =
-        Tensor::FromNDAlloc(ViewBasedAlloc(pages), ffi::Shape(kv_nope_shape), pages->dtype,
-                            pages->device, kv_strides.data(), pages->byte_offset);
-    Tensor kv_pe = Tensor::FromNDAlloc(
-        ViewBasedAlloc(pages), ffi::Shape(kv_pe_shape), pages->dtype, pages->device,
-        kv_strides.data(), pages->byte_offset + nope_head_dim * pages.DataType().bytes());
-
-    attn_func_(float_workspace_buffer, int_workspace_buffer, plan_info_vec, q_nope, q_pe, kv_nope,
-               kv_pe, page_indices, attn_output, attn_lse,
-               /*mask_mode_code=*/static_cast<int64_t>(causal),
-               /*num_heads=*/q->shape[1], /*page_size=*/pages->shape[1], sm_scale);
-    DeviceAPI::Get(device)->SetStream(device, original_stream);
+    // FlashInfer's MLA run takes the query split into its compressed (nope) and
+    // positional-embedding (pe) parts, and the paged cache split into the
+    // compressed-kv cache (ckv) and key-positional-embedding cache (kpe). Both
+    // q ([n, num_heads, ckv+kpe]) and pages ([num_pages, page_size, ckv+kpe])
+    // store the two components concatenated along the last dimension.
+    int64_t head_dim_ckv = mla_head_dim_ckv_;
+    int64_t head_dim_kpe = mla_head_dim_kpe_;
+    TVM_FFI_ICHECK_GE(head_dim_ckv, 0)
+        << "MLA head dims are unset; BeginForward must run before MLA.";
+    attn_func_(float_workspace_buffer, int_workspace_buffer, plan_info_vec,
+               SliceLastDimView(q, 0, head_dim_ckv),
+               SliceLastDimView(q, head_dim_ckv, head_dim_kpe),
+               SliceLastDimView(pages, 0, head_dim_ckv),
+               SliceLastDimView(pages, head_dim_ckv, head_dim_kpe),
+               ZeroByteOffsetView(page_indices), attn_output, attn_lse,
+               /*mask_mode_code=*/static_cast<int64_t>(causal), /*num_heads=*/q->shape[1],
+               /*page_size=*/pages->shape[1], sm_scale, /*return_lse_base_on_e=*/false);
   }
 
   void BeginForward(int depth, Tensor float_workspace_buffer, Tensor int_workspace_buffer,
@@ -230,38 +306,38 @@ class FlashInferPagedPrefillFunc : public PagedPrefillFunc {
                     int64_t batch_size, int64_t total_qo_len, int64_t page_size,
                     int64_t num_qo_heads, int64_t num_kv_heads, int64_t qk_head_dim,
                     int64_t v_head_dim, bool causal, TVMStreamHandle copy_stream) final {
-    Tensor kv_len_arr = Tensor::Empty({batch_size}, DataType::Int(32), Device{kDLCPU, 0});
-    int32_t* kv_len_arr_data = static_cast<int32_t*>(kv_len_arr.data_ptr());
+    // FlashInfer expects kv_len as an (int32) tensor rather than a shape tuple.
+    HostMemoryVector kv_len_arr(batch_size, DLDataType{kDLInt, 32, 1},
+                                qo_indptr->as_tensor()->device);
     for (int i = 0; i < static_cast<int>(batch_size); ++i) {
-      kv_len_arr_data[i] =
+      kv_len_arr.push_back(static_cast<int32_t>(
           (*page_indptr)[i + 1] != (*page_indptr)[i]
               ? ((*page_indptr)[i + 1] - (*page_indptr)[i] - 1) * page_size + (*last_page_len)[i]
-              : 0;
+              : 0));
     }
-    qk_head_dim_ = qk_head_dim;
-    v_head_dim_ = v_head_dim;
     ffi::Array<int64_t> plan_info_vec;
-    Device device = float_workspace_buffer->device;
-    TVMStreamHandle original_stream = DeviceAPI::Get(device)->GetCurrentStream(device);
-    DeviceAPI::Get(device)->SetStream(device, copy_stream);
     if (attn_kind == AttnKind::kMHA) {
       // Todo(tvm-team): enable cuda graph
       plan_info_vec =
           plan_func_(float_workspace_buffer, int_workspace_buffer, page_locked_int_workspace_buffer,
-                     qo_indptr->as_tensor(), page_indptr->as_tensor(), kv_len_arr, total_qo_len,
-                     batch_size, num_qo_heads, num_kv_heads, page_size,
+                     qo_indptr->as_tensor(), page_indptr->as_tensor(), kv_len_arr.as_tensor(),
+                     total_qo_len, batch_size, num_qo_heads, num_kv_heads, page_size,
                      /*enable_cuda_graph=*/false, qk_head_dim, v_head_dim, causal,
                      /*window_left=*/-1, /*fixed_split_size=*/-1, /*disable_split_kv=*/false,
                      /*num_colocated_ctas=*/0)
               .cast<ffi::Array<int64_t>>();
     } else if (attn_kind == AttnKind::kMLA) {
+      // For MLA the compressed-kv head dim equals the output (v) head dim, and
+      // the remaining part of qk_head_dim is the key positional embedding. Cache
+      // them for the run, which must split q/pages into ckv and kpe components.
+      mla_head_dim_ckv_ = v_head_dim;
+      mla_head_dim_kpe_ = qk_head_dim - v_head_dim;
       plan_info_vec =
           plan_func_(float_workspace_buffer, int_workspace_buffer, page_locked_int_workspace_buffer,
-                     qo_indptr->as_tensor(), page_indptr->as_tensor(), kv_len_arr, num_qo_heads,
-                     v_head_dim, causal)
+                     qo_indptr->as_tensor(), page_indptr->as_tensor(), kv_len_arr.as_tensor(),
+                     num_qo_heads, v_head_dim, causal)
               .cast<ffi::Array<int64_t>>();
     }
-    DeviceAPI::Get(device)->SetStream(device, original_stream);
 
     if (cached_buffers_.size() <= static_cast<size_t>(depth)) {
       cached_buffers_.resize(depth + 1);
@@ -272,10 +348,12 @@ class FlashInferPagedPrefillFunc : public PagedPrefillFunc {
   }
 
  private:
-  int64_t qk_head_dim_ = -1;
-  int64_t v_head_dim_ = -1;
   ffi::Function plan_func_;
   std::vector<std::tuple<Tensor, Tensor, Tensor, ffi::Array<int64_t>>> cached_buffers_;
+  // MLA-only: the compressed-kv and key-positional-embedding head dims, used to
+  // split q/pages in the run. Set during BeginForward for the kMLA attn kind.
+  int64_t mla_head_dim_ckv_ = -1;
+  int64_t mla_head_dim_kpe_ = -1;
 };
 
 /*! \brief The ragged prefill attention function base class. */
@@ -322,30 +400,25 @@ class TIRRaggedPrefillFunc : public RaggedPrefillFunc {
 class FlashInferRaggedPrefillFunc : public RaggedPrefillFunc {
  public:
   explicit FlashInferRaggedPrefillFunc(ffi::Function attn_func, ffi::Function plan_func,
-                                       AttnKind attn_kind, int64_t qk_head_dim_override,
-                                       int64_t v_head_dim_override)
+                                       AttnKind attn_kind, int64_t qk_head_dim_override = -1,
+                                       int64_t v_head_dim_override = -1)
       : RaggedPrefillFunc(std::move(attn_func), attn_kind, AttnBackendKind::kFlashInfer),
+        plan_func_(std::move(plan_func)),
         qk_head_dim_override_(qk_head_dim_override),
-        v_head_dim_override_(v_head_dim_override),
-        plan_func_(std::move(plan_func)) {}
+        v_head_dim_override_(v_head_dim_override) {}
 
   void MHA(Tensor q, Tensor k, Tensor v, Tensor qo_indptr, Tensor kv_indptr, Tensor q_rope_position,
            Tensor k_rope_pos_offset, bool causal, RoPEMode rope_mode, double rotary_scale,
            double rotary_theta, double sm_scale, Tensor attn_output, Tensor attn_lse,
            TVMStreamHandle compute_stream) final {
-    Device device = q->device;
-    TVMStreamHandle original_stream = DeviceAPI::Get(device)->GetCurrentStream(device);
-    DeviceAPI::Get(device)->SetStream(device, compute_stream);
     double rope_rcp_scale = 1 / rotary_scale;
     double rope_rcp_theta = 1 / rotary_theta;
-    attn_func_(float_workspace_buffer_, int_workspace_buffer_, plan_info_vec_, q, k, v, qo_indptr,
-               kv_indptr, attn_output, attn_lse,
+    attn_func_(float_workspace_buffer_, int_workspace_buffer_, plan_info_vec_, q, k, v,
+               ZeroByteOffsetView(qo_indptr), ZeroByteOffsetView(kv_indptr), attn_output, attn_lse,
                /*mask_mode_code=*/static_cast<int64_t>(causal),
-               /*layout(NHD)=*/0, /*window_left=*/-1,
-               /*enable_pdl=*/false, sm_scale,
+               /*layout(NHD)=*/0, /*window_left=*/-1, /*enable_pdl=*/false, sm_scale,
                /*rope_rcp_scale=*/rope_rcp_scale,
                /*rope_rcp_theta=*/rope_rcp_theta);
-    DeviceAPI::Get(device)->SetStream(device, original_stream);
   }
 
   void BeginForward(Tensor float_workspace_buffer, Tensor int_workspace_buffer,
@@ -353,43 +426,46 @@ class FlashInferRaggedPrefillFunc : public RaggedPrefillFunc {
                     HostMemoryVector* kv_indptr, int64_t batch_size, int64_t total_qo_len,
                     int64_t num_qo_heads, int64_t num_kv_heads, int64_t qk_head_dim,
                     int64_t v_head_dim, bool causal, TVMStreamHandle copy_stream) final {
-    Tensor kv_len_arr = Tensor::Empty({batch_size}, DataType::Int(32), Device{kDLCPU, 0});
-    int32_t* kv_len_arr_data = static_cast<int32_t*>(kv_len_arr.data_ptr());
-    for (int i = 0; i < static_cast<int>(batch_size); ++i) {
-      kv_len_arr_data[i] = (*kv_indptr)[i + 1] - (*kv_indptr)[i];
-    }
-    if (qk_head_dim_override_ != -1) {
-      qk_head_dim = qk_head_dim_override_;
-    }
-    if (v_head_dim_override_ != -1) {
+    // For MLA self-attention the ragged kernel operates on different head dims
+    // than the (compressed) MLA cache, so they are supplied per-function via the
+    // backend spec and override the cache-derived dims passed by the caller. MLA
+    // self-attention is full multi-head (one kv head per query head), unlike the
+    // single-head compressed cache, so the kv head count is overridden too.
+    if (qk_head_dim_override_ >= 0) qk_head_dim = qk_head_dim_override_;
+    if (v_head_dim_override_ >= 0) {
       v_head_dim = v_head_dim_override_;
+      num_kv_heads = num_qo_heads;
+    }
+    // FlashInfer expects kv_len as an (int32) tensor rather than a shape tuple.
+    HostMemoryVector kv_len_arr(batch_size, DLDataType{kDLInt, 32, 1},
+                                qo_indptr->as_tensor()->device);
+    for (int i = 0; i < static_cast<int>(batch_size); ++i) {
+      kv_len_arr.push_back(static_cast<int32_t>((*kv_indptr)[i + 1] - (*kv_indptr)[i]));
     }
     // Todo(tvm-team): enable cuda graph
     float_workspace_buffer_ = float_workspace_buffer;
     int_workspace_buffer_ = int_workspace_buffer;
     page_locked_int_workspace_buffer_ = page_locked_int_workspace_buffer;
-    Device device = float_workspace_buffer->device;
-    TVMStreamHandle original_stream = DeviceAPI::Get(device)->GetCurrentStream(device);
-    DeviceAPI::Get(device)->SetStream(device, copy_stream);
     plan_info_vec_ =
         plan_func_(float_workspace_buffer, int_workspace_buffer, page_locked_int_workspace_buffer,
-                   qo_indptr->as_tensor(), kv_indptr->as_tensor(), kv_len_arr, total_qo_len,
-                   batch_size, num_qo_heads, num_kv_heads, /*page_size=*/1,
+                   qo_indptr->as_tensor(), kv_indptr->as_tensor(), kv_len_arr.as_tensor(),
+                   total_qo_len, batch_size, num_qo_heads, num_kv_heads, /*page_size=*/1,
                    /*enable_cuda_graph=*/false, qk_head_dim, v_head_dim, causal,
                    /*window_left=*/-1, /*fixed_split_size=*/-1, /*disable_split_kv=*/false,
                    /*num_colocated_ctas=*/0)
             .cast<ffi::Array<int64_t>>();
-    DeviceAPI::Get(device)->SetStream(device, original_stream);
   }
 
  private:
-  int64_t qk_head_dim_override_;
-  int64_t v_head_dim_override_;
   ffi::Function plan_func_;
   Tensor float_workspace_buffer_;
   Tensor int_workspace_buffer_;
   Tensor page_locked_int_workspace_buffer_;
   ffi::Array<int64_t> plan_info_vec_;
+  // MLA self-attention head dims supplied via the backend spec; -1 means use the
+  // dims passed by the caller (the regular MHA case).
+  int64_t qk_head_dim_override_ = -1;
+  int64_t v_head_dim_override_ = -1;
 };
 
 /*! \brief The paged decode attention function base class. */
@@ -416,7 +492,7 @@ class PagedDecodeFunc : public AttnBackendFunc {
                             Tensor page_locked_int_workspace_buffer, HostMemoryVector* page_indptr,
                             int64_t batch_size, int64_t page_size, int64_t num_qo_heads,
                             int64_t num_kv_heads, int64_t qk_head_dim, int64_t v_head_dim,
-                            RoPEMode rope_mode, DataType q_dtype, DataType kv_dtype,
+                            RoPEMode rope_mode, DLDataType q_dtype, DLDataType kv_dtype,
                             TVMStreamHandle copy_stream) {
     // Do nothing. Subclasses can override to customize behavior.
   }
@@ -457,54 +533,37 @@ class FlashInferPagedDecodeFunc : public PagedDecodeFunc {
            Tensor length_info, Tensor k_rope_pos_offset, Tensor q_rope_position, RoPEMode rope_mode,
            double rotary_scale, double rotary_theta, double sm_scale, Tensor attn_output,
            Tensor attn_lse, TVMStreamHandle compute_stream) final {
-    Device device = q->device;
-    TVMStreamHandle original_stream = DeviceAPI::Get(device)->GetCurrentStream(device);
-    DeviceAPI::Get(device)->SetStream(device, compute_stream);
     auto [float_workspace_buffer, int_workspace_buffer, page_locked_int_workspace_buffer,
           plan_info_vec] = cached_buffers_[depth];
     double rope_rcp_scale = 1 / rotary_scale;
     double rope_rcp_theta = 1 / rotary_theta;
-
-    TVM_FFI_ICHECK_EQ(pages.ndim(), 5);
-    int H = pages->shape[2];
-    int N = pages->shape[3];
-    int D = pages->shape[4];
-    TVM_FFI_ICHECK(pages.IsContiguous());
-    std::vector<int64_t> pages_k_v_shape = {pages->shape[0], H, N, D};
-    std::vector<int64_t> pages_k_v_strides = {2 * H * N * D, N * D, D, 1};
-    Tensor pages_k =
-        Tensor::FromNDAlloc(ViewBasedAlloc(pages), ffi::Shape(pages_k_v_shape), pages->dtype,
-                            pages->device, pages_k_v_strides.data(), pages->byte_offset);
-    Tensor pages_v = Tensor::FromNDAlloc(
-        ViewBasedAlloc(pages), ffi::Shape(pages_k_v_shape), pages->dtype, pages->device,
-        pages_k_v_strides.data(), pages->byte_offset + (H * N * D) * pages.DataType().bytes());
-
-    attn_func_(float_workspace_buffer, int_workspace_buffer, plan_info_vec, q, pages_k, pages_v,
-               page_indptr, page_indices, length_info, attn_output, attn_lse,
-               /*layout(HND)=*/1, /*window_left=*/-1, /*enable_pdl=*/false, sm_scale,
+    attn_func_(float_workspace_buffer, int_workspace_buffer, plan_info_vec, q,
+               PagedKVCacheView(pages, 0), PagedKVCacheView(pages, 1),
+               ZeroByteOffsetView(page_indptr), ZeroByteOffsetView(page_indices),
+               ZeroByteOffsetView(length_info), attn_output, attn_lse, /*kv_layout_code(HND)=*/1,
+               /*window_left=*/-1, /*enable_pdl=*/false, sm_scale,
                /*rope_rcp_scale=*/rope_rcp_scale, /*rope_rcp_theta=*/rope_rcp_theta);
-    DeviceAPI::Get(device)->SetStream(device, original_stream);
   }
 
   void BeginForward(int depth, Tensor float_workspace_buffer, Tensor int_workspace_buffer,
                     Tensor page_locked_int_workspace_buffer, HostMemoryVector* page_indptr,
                     int64_t batch_size, int64_t page_size, int64_t num_qo_heads,
                     int64_t num_kv_heads, int64_t qk_head_dim, int64_t v_head_dim,
-                    RoPEMode rope_mode, DataType q_dtype, DataType kv_dtype,
+                    RoPEMode rope_mode, DLDataType q_dtype, DLDataType kv_dtype,
                     TVMStreamHandle copy_stream) final {
     // Todo(tvm-team): enable cuda graph
-    Tensor empty_qkv_data = Tensor::Empty({1}, q_dtype, Device{kDLCPU, 0});
-    Device device = float_workspace_buffer->device;
-    TVMStreamHandle original_stream = DeviceAPI::Get(device)->GetCurrentStream(device);
-    DeviceAPI::Get(device)->SetStream(device, copy_stream);
+    // FlashInfer's decode plan takes empty q/kv tensors (used only for dtype
+    // dispatch) instead of dtype scalars, adds a logits_soft_cap argument, and
+    // no longer takes the pos-encoding mode or an explicit stream.
+    DLDevice device = float_workspace_buffer->device;
+    Tensor empty_q_data = Tensor::Empty(ffi::Shape({0}), q_dtype, device);
+    Tensor empty_kv_data = Tensor::Empty(ffi::Shape({0}), kv_dtype, device);
     ffi::Array<int64_t> plan_info_vec =
         plan_func_(float_workspace_buffer, int_workspace_buffer, page_locked_int_workspace_buffer,
                    page_indptr->as_tensor(), batch_size, num_qo_heads, num_kv_heads, page_size,
-                   /*enable_cuda_graph=*/false,
-                   /*window_left=*/-1, /*logits_soft_cap=*/0.0, qk_head_dim, v_head_dim,
-                   empty_qkv_data, empty_qkv_data)
+                   /*enable_cuda_graph=*/false, /*window_left=*/-1, /*logits_soft_cap=*/0.0,
+                   qk_head_dim, v_head_dim, empty_q_data, empty_kv_data)
             .cast<ffi::Array<int64_t>>();
-    DeviceAPI::Get(device)->SetStream(device, original_stream);
 
     if (cached_buffers_.size() <= static_cast<size_t>(depth)) {
       cached_buffers_.resize(depth + 1);

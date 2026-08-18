@@ -23,6 +23,7 @@
  */
 #include "update_pointer_storage_scope.h"
 
+#include <tvm/ffi/cast.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -38,20 +39,28 @@ namespace tvm {
 namespace tirx {
 
 Var WithStorageScope(const VarNode* buffer_var, ffi::String storage_scope) {
-  auto* ptr_type = buffer_var->type_annotation.as<PointerTypeNode>();
+  auto* ptr_type = buffer_var->ty.as<PointerTypeNode>();
   TVM_FFI_ICHECK(ptr_type) << "The provided variable is not of pointer type";
-  return Var(buffer_var->name_hint, PointerType(ptr_type->element_type, storage_scope),
+  return Var(buffer_var->name, PointerType(ptr_type->element_type, storage_scope),
              buffer_var->span);
 }
 
 UpdatePointerStorageScope::UpdatePointerStorageScope(
     const std::unordered_map<const VarNode*, ffi::String>& new_storage_scopes) {
   for (auto& kv : new_storage_scopes) {
-    new_var_remap_[kv.first] = WithStorageScope(kv.first, kv.second);
+    if (kv.first->ty.as<BufferTypeNode>()) {
+      BufferVar buffer = GetBufferVar(kv.first);
+      auto type = CopyBufferType(buffer);
+      type->storage_scope = kv.second;
+      BufferVar replacement = RebuildBufferVar(buffer, std::move(type));
+      new_var_remap_[kv.first] = replacement.var();
+    } else {
+      new_var_remap_[kv.first] = WithStorageScope(kv.first, kv.second);
+    }
   }
 }
 
-PrimExpr UpdatePointerStorageScope::VisitExpr_(const VarNode* op) {
+Expr UpdatePointerStorageScope::VisitExpr_(const VarNode* op) {
   auto it = new_var_remap_.find(op);
   if (it == new_var_remap_.end()) {
     return ffi::GetRef<Var>(op);
@@ -69,43 +78,31 @@ Node UpdatePointerStorageScope::UpdateBufferAccess(Node node) {
   return node;
 }
 
-Buffer UpdatePointerStorageScope::GetUpdatedBuffer(Buffer buf) {
-  // Use the cached buffer, if it exists.
-  auto key = buf.get();
-  auto it = new_buffer_remap_.find(key);
-  if (it != new_buffer_remap_.end()) {
-    return it->second;
+BufferVar UpdatePointerStorageScope::GetUpdatedBuffer(BufferVar buf) {
+  auto it = new_var_remap_.find(buf.get());
+  if (it != new_var_remap_.end()) {
+    return BufferVar(it->second);
   }
-
-  // Update the buffer's var, if needed.
-  auto remapped = Downcast<Var>(StmtExprMutator::VisitExpr(buf->data));
-  if (!remapped.same_as(buf->data)) {
-    auto writer = buf.CopyOnWrite();
-    writer->data = remapped;
-  }
-
-  // Update the cache and return
-  new_buffer_remap_[key] = buf;
   return buf;
 }
 
 Stmt UpdatePointerStorageScope::VisitStmt_(const AllocBufferNode* op) {
-  auto node = Downcast<AllocBuffer>(StmtExprMutator::VisitStmt_(op));
+  auto node = StmtExprMutator::VisitStmt_(op).as_or_throw<AllocBuffer>();
   return UpdateBufferAccess(node);
 }
 
 Stmt UpdatePointerStorageScope::VisitStmt_(const DeclBufferNode* op) {
-  auto node = Downcast<DeclBuffer>(StmtExprMutator::VisitStmt_(op));
+  auto node = StmtExprMutator::VisitStmt_(op).as_or_throw<DeclBuffer>();
   return UpdateBufferAccess(node);
 }
 
-PrimExpr UpdatePointerStorageScope::VisitExpr_(const BufferLoadNode* op) {
-  auto node = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
+Expr UpdatePointerStorageScope::VisitExpr_(const BufferLoadNode* op) {
+  auto node = StmtExprMutator::VisitExpr_(op).as_or_throw<BufferLoad>();
   return UpdateBufferAccess(node);
 }
 
 Stmt UpdatePointerStorageScope::VisitStmt_(const BufferStoreNode* op) {
-  auto node = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
+  auto node = StmtExprMutator::VisitStmt_(op).as_or_throw<BufferStore>();
   return UpdateBufferAccess(node);
 }
 

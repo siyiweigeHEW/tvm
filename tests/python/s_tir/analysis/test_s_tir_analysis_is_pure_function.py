@@ -40,61 +40,61 @@ class CheckImpureFunction:
 
 
 class TestNoOp(CheckPureFunction):
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def func():
         pass
 
 
 class TestReturnValue(CheckPureFunction):
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def func() -> T.int32:
-        T.ret(42)
+        return 42
 
 
 class TestComputeValueAndReturn(CheckPureFunction):
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def func(N: T.int32, M: T.int32) -> T.int32:
-        T.ret(N * M)
+        return N * M
 
 
 class TestReadBufferArgument(CheckPureFunction):
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def func(A: T.Buffer(16, "float32")) -> T.float32:
-        T.ret(A[0])
+        return A[0]
 
 
 class TestWriteToBufferArgument(CheckImpureFunction):
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def func(A: T.Buffer(16, "float32"), B: T.Buffer(16, "float32")):
         for i in range(16):
             B[i] = A[i]
 
 
 class TestWriteToInternalAllocation(CheckPureFunction):
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def func(A: T.Buffer([16, 16], "float32")) -> T.float32:
         Sum = T.decl_buffer([], "float32")
         Sum[()] = 0.0
         for i, j in T.grid(16, 16):
             Sum[()] = Sum[()] + A[i, j]
 
-        T.ret(Sum[()])
+        return Sum[()]
 
 
 class TestCallPureBuiltin(CheckPureFunction):
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def func(x: T.float32) -> T.float32:
-        T.ret(T.cos(x))
+        return T.cos(x)
 
 
 class TestCallPureExtern(CheckPureFunction):
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def func():
         T.call_pure_extern("some_pure_extern_func_name", dtype="void")
 
 
 class TestCallImpureExtern(CheckImpureFunction):
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def func():
         T.call_extern("some_impure_extern_func_name", dtype="void")
 

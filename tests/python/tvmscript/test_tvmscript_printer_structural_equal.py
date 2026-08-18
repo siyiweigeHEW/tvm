@@ -36,13 +36,31 @@ and rhs at {objpath2}:
 {func2.script(path_to_underline=[objpath2], syntax_sugar=False)}"""
 
 
-def test_prim_func_buffer_map():
-    @T.prim_func
+def test_prim_type_hidden_path_exact_message():
+    with pytest.raises(ValueError) as exc_info:
+        assert_structural_equal(tvm.ir.PrimType("int32"), tvm.ir.PrimType("float32"))
+
+    assert str(exc_info.value) == (
+        "StructuralEqual check failed, caused by lhs at <root>.dtype:\n"
+        "Access path: <root>.dtype\n"
+        "Note: The underlined object is the nearest visible parent of this path.\n\n"
+        "T.int32\n"
+        "^^^^^^^\n"
+        "and rhs at <root>.dtype:\n"
+        "Access path: <root>.dtype\n"
+        "Note: The underlined object is the nearest visible parent of this path.\n\n"
+        "T.float32\n"
+        "^^^^^^^^^"
+    )
+
+
+def test_prim_func_buffer_param():
+    @T.prim_func(s_tir=True)
     def func1(a: T.handle, b: T.handle):
         A = T.match_buffer(a, (128, 128))
         B = T.match_buffer(b, (128, 128))
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def func2(a: T.handle, b: T.handle):
         A = T.match_buffer(a, (128, 128))
         B = T.match_buffer(b, (128, 256))
@@ -56,14 +74,16 @@ def test_prim_func_buffer_map():
         func1,
         func2,
         AccessPath.root()
-        .attr("buffer_map")
-        .map_item(func1.params[1])
+        .attr("params")
+        .array_item(1)
+        .attr("ty")
         .attr("shape")
         .array_item(1)
         .attr("value"),
         AccessPath.root()
-        .attr("buffer_map")
-        .map_item(func2.params[1])
+        .attr("params")
+        .array_item(1)
+        .attr("ty")
         .attr("shape")
         .array_item(1)
         .attr("value"),
@@ -71,15 +91,15 @@ def test_prim_func_buffer_map():
 
 
 def test_evaluate():
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class module1:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def func():
             T.evaluate(0)
 
-    @I.ir_module
+    @I.ir_module(s_tir=True)
     class module2:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def func():
             T.evaluate(1)
 
@@ -104,11 +124,11 @@ def test_evaluate():
 
 
 def test_allocate():
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def func1():
         a = T.alloc_buffer((128, 128), dtype="float32")
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def func2():
         a = T.alloc_buffer((256, 128), dtype="float32")
 
@@ -121,19 +141,31 @@ def test_allocate():
     assert _error_message(ve.value) == _expected_result(
         func1,
         func2,
-        AccessPath.root().attr("body").attr("buffer").attr("shape").array_item(0).attr("value"),
-        AccessPath.root().attr("body").attr("buffer").attr("shape").array_item(0).attr("value"),
+        AccessPath.root()
+        .attr("body")
+        .attr("buffer")
+        .attr("ty")
+        .attr("shape")
+        .array_item(0)
+        .attr("value"),
+        AccessPath.root()
+        .attr("body")
+        .attr("buffer")
+        .attr("ty")
+        .attr("shape")
+        .array_item(0)
+        .attr("value"),
     )
 
 
 def test_for():
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def func1():
         for i, j in T.grid(128, 128):
             with T.sblock():
                 pass
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def func2():
         for i, j, k in T.grid(128, 128, 128):
             with T.sblock():

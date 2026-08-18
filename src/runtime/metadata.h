@@ -27,8 +27,8 @@
 #include <tvm/ffi/container/array.h>
 #include <tvm/ffi/container/map.h>
 #include <tvm/ffi/extra/json.h>
+#include <tvm/ffi/extra/module.h>
 #include <tvm/ffi/function.h>
-#include <tvm/runtime/module.h>
 #include <tvm/runtime/tensor.h>
 #include <tvm/support/io.h>
 #include <tvm/support/serializer.h>
@@ -61,25 +61,83 @@ constexpr const char* kUseCooperativeLaunch = "tirx.use_cooperative_launch";
 enum class ArgExtraTags : int { kNone = 0, kTensorMap = 1 };
 
 /*! \brief function information needed by device */
-class FunctionInfoObj : public Object {
+class FunctionInfoObj : public ffi::Object {
  public:
   ffi::String name;
   ffi::Array<DLDataType> arg_types;
   ffi::Array<ffi::String> launch_param_tags;
   ffi::Array<ArgExtraTags> arg_extra_tags;
 
-  ffi::json::Value SaveToJSON() const;
-  void LoadFromJSON(ffi::json::Object src);
+  ffi::json::Value SaveToJSON() const {
+    namespace json = ::tvm::ffi::json;
+    json::Object obj;
+    obj.Set("name", name);
+    json::Array sarg_types;
+    for (const auto& t : arg_types) {
+      sarg_types.push_back(ffi::String(ffi::DLDataTypeToString(t)));
+    }
+    obj.Set("arg_types", std::move(sarg_types));
+    {
+      json::Array tags;
+      for (const auto& s : launch_param_tags) tags.push_back(s);
+      obj.Set("launch_param_tags", std::move(tags));
+    }
+    json::Array iarg_extra_tags;
+    for (const auto& t : arg_extra_tags) {
+      iarg_extra_tags.push_back(static_cast<int64_t>(t));
+    }
+    obj.Set("arg_extra_tags", std::move(iarg_extra_tags));
+    return obj;
+  }
 
-  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("runtime.FunctionInfo", FunctionInfoObj, Object);
+  void LoadFromJSON(ffi::json::Object src) {
+    namespace json = ::tvm::ffi::json;
+    name = src.at("name").cast<ffi::String>();
+    auto sarg_types_arr = src.at("arg_types").cast<json::Array>();
+    arg_types = ffi::Array<DLDataType>();
+    for (size_t i = 0; i < sarg_types_arr.size(); ++i) {
+      arg_types.push_back(
+          ffi::StringToDLDataType(std::string(sarg_types_arr[i].cast<ffi::String>())));
+    }
+    auto lt = src.find("launch_param_tags");
+    if (lt != src.end()) {
+      auto arr = (*lt).second.cast<json::Array>();
+      launch_param_tags = ffi::Array<ffi::String>();
+      for (const auto& elem : arr) launch_param_tags.push_back(elem.cast<ffi::String>());
+    } else {
+      auto tt = src.find("thread_axis_tags");
+      if (tt != src.end()) {
+        auto arr = (*tt).second.cast<json::Array>();
+        launch_param_tags = ffi::Array<ffi::String>();
+        for (const auto& elem : arr) launch_param_tags.push_back(elem.cast<ffi::String>());
+      }
+    }
+    auto et = src.find("arg_extra_tags");
+    if (et != src.end()) {
+      auto earr = (*et).second.cast<json::Array>();
+      arg_extra_tags = ffi::Array<ArgExtraTags>();
+      for (size_t i = 0; i < earr.size(); ++i) {
+        arg_extra_tags.push_back(static_cast<ArgExtraTags>(earr[i].cast<int64_t>()));
+      }
+    }
+  }
+
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("runtime.FunctionInfo", FunctionInfoObj, ffi::Object);
 };
 
-class FunctionInfo : public ObjectRef {
+class FunctionInfo : public ffi::ObjectRef {
  public:
   FunctionInfo(ffi::String name, ffi::Array<DLDataType> arg_types,
-               ffi::Array<ffi::String> launch_param_tags, ffi::Array<ArgExtraTags> arg_extra_tags);
+               ffi::Array<ffi::String> launch_param_tags, ffi::Array<ArgExtraTags> arg_extra_tags) {
+    auto n = ffi::make_object<FunctionInfoObj>();
+    n->name = std::move(name);
+    n->arg_types = std::move(arg_types);
+    n->launch_param_tags = std::move(launch_param_tags);
+    n->arg_extra_tags = std::move(arg_extra_tags);
+    data_ = std::move(n);
+  }
 
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(FunctionInfo, ObjectRef, FunctionInfoObj);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(FunctionInfo, ffi::ObjectRef, FunctionInfoObj);
 };
 
 }  // namespace runtime

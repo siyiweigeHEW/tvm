@@ -36,11 +36,11 @@ namespace s_tir {
 using namespace tvm::tirx;
 namespace lwp {
 
-TVM_REGISTER_PASS_CONFIG_OPTION("s_tir.lwp_disable_func_prof", Bool);
-TVM_REGISTER_PASS_CONFIG_OPTION("s_tir.lwp_max_depth", Integer);
-TVM_REGISTER_PASS_CONFIG_OPTION("s_tir.lwp_min_height", Integer);
-TVM_REGISTER_PASS_CONFIG_OPTION("s_tir.instr_siblings", Bool);
-TVM_REGISTER_PASS_CONFIG_OPTION("s_tir.reset_start_id", Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION("s_tir.lwp_disable_func_prof", bool);
+TVM_REGISTER_PASS_CONFIG_OPTION("s_tir.lwp_max_depth", int64_t);
+TVM_REGISTER_PASS_CONFIG_OPTION("s_tir.lwp_min_height", int64_t);
+TVM_REGISTER_PASS_CONFIG_OPTION("s_tir.instr_siblings", bool);
+TVM_REGISTER_PASS_CONFIG_OPTION("s_tir.reset_start_id", bool);
 
 static int32_t start_id = 0;
 
@@ -203,8 +203,10 @@ class InstrumentIntrin : public StmtMutator {
       return stmt;
     }
     PrimExpr id = static_cast<int32_t>(loop_info.id);
-    PrimExpr start_call = Call(DataType::Handle(), builtin::start_profile_intrinsic(), {id});
-    PrimExpr end_call = Call(DataType::Handle(), builtin::end_profile_intrinsic(), {id});
+    PrimExpr start_call =
+        Call(PrimType::Void(), builtin::start_profile_intrinsic(), {id}).as_or_throw<PrimExpr>();
+    PrimExpr end_call =
+        Call(PrimType::Void(), builtin::end_profile_intrinsic(), {id}).as_or_throw<PrimExpr>();
     const Stmt start_profile = Evaluate(start_call);
     const Stmt end_profile = Evaluate(end_call);
     Stmt new_stmt = SeqStmt({start_profile, stmt, end_profile});
@@ -243,8 +245,10 @@ PrimFunc AddProfileBuiltins(PrimFunc func, int32_t max_instr_depth, int32_t min_
 
   PrimExpr e = start_id++;
   if (!disable_func_instrumentation) {
-    PrimExpr start_call = Call(DataType::Handle(), builtin::start_profile_intrinsic(), {e});
-    PrimExpr end_call = Call(DataType::Handle(), builtin::end_profile_intrinsic(), {e});
+    PrimExpr start_call =
+        Call(PrimType::Void(), builtin::start_profile_intrinsic(), {e}).as_or_throw<PrimExpr>();
+    PrimExpr end_call =
+        Call(PrimType::Void(), builtin::end_profile_intrinsic(), {e}).as_or_throw<PrimExpr>();
     const Stmt start_profile = Evaluate(start_call);
     const Stmt end_profile = Evaluate(end_call);
     func_ptr->body = SeqStmt({start_profile, std::move(func_ptr->body), end_profile});
@@ -267,19 +271,18 @@ Pass InstrumentProfileIntrinsics() {
     // In addition, loops with siblings are also instrumented provided
     // their loop depth is >= min_instr_height. This is done to avoid
     // instrumenting inner-most loops.
-    auto max_instr_depth = ctx->GetConfig<Integer>("s_tir.lwp_max_depth", Integer(0)).value();
-    auto min_instr_height = ctx->GetConfig<Integer>("s_tir.lwp_min_height", Integer(1)).value();
-    bool instr_siblings = ctx->GetConfig<Bool>("s_tir.instr_siblings", Bool(true)).value();
+    auto max_instr_depth = ctx->GetConfig<int64_t>("s_tir.lwp_max_depth", 0).value();
+    auto min_instr_height = ctx->GetConfig<int64_t>("s_tir.lwp_min_height", 1).value();
+    bool instr_siblings = ctx->GetConfig<bool>("s_tir.instr_siblings", true).value();
     bool disable_func_instrumentation =
-        ctx->GetConfig<Bool>("s_tir.lwp_disable_func_prof", Bool(false)).value();
-    bool reset_start_id = ctx->GetConfig<Bool>("s_tir.reset_start_id", Bool(false)).value();
+        ctx->GetConfig<bool>("s_tir.lwp_disable_func_prof", false).value();
+    bool reset_start_id = ctx->GetConfig<bool>("s_tir.reset_start_id", false).value();
     if (reset_start_id) lwp::start_id = 0;
     std::vector<std::pair<GlobalVar, PrimFunc>> updates;
     for (const auto& kv : mptr->functions) {
       if (auto func = kv.second.as<PrimFunc>()) {
-        auto updated_func = lwp::AddProfileBuiltins(func.value(), max_instr_depth.IntValue(),
-                                                    min_instr_height.IntValue(), instr_siblings,
-                                                    disable_func_instrumentation);
+        auto updated_func = lwp::AddProfileBuiltins(func.value(), max_instr_depth, min_instr_height,
+                                                    instr_siblings, disable_func_instrumentation);
         updates.push_back({kv.first, updated_func});
       }
     }

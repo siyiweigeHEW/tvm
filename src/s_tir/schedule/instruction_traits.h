@@ -45,26 +45,26 @@ using namespace tvm::tirx;
  *   static constexpr bool kIsPure = false;
  *
  *   // Convertible to `InstructionKindNode::FInstructionApply`
- *   static ffi::Array<ObjectRef> ApplyToSchedule(
+ *   static ffi::Array<ffi::ObjectRef> ApplyToSchedule(
  *      const s_tir::Schedule& sch,
- *      const ffi::Array<ObjectRef>& inputs,
- *      const ffi::Array<ObjectRef>& attrs,
- *      const ffi::Optional<ObjectRef>& decision);
+ *      const ffi::Array<ffi::ObjectRef>& inputs,
+ *      const ffi::Array<ffi::ObjectRef>& attrs,
+ *      const ffi::Optional<ffi::ObjectRef>& decision);
  *
  *   // Convertible to `InstructionKindNode::FInstructionAsPython`
  *   static ffi::String AsPython(
  *      const ffi::Array<ffi::String>& inputs,
- *      const ffi::Array<ObjectRef>& attrs,
- *      const ffi::Optional<ObjectRef>& decision,
+ *      const ffi::Array<ffi::ObjectRef>& attrs,
+ *      const ffi::Optional<ffi::ObjectRef>& decision,
  *      const ffi::Array<ffi::String>& outputs);
  *
  *   // Convertible to `InstructionKindNode::FInstructionAttrsAsJSON`
- *   static ObjectRef AttrsAsJSON(
- *      const ffi::Array<ObjectRef>& attrs);
+ *   static ffi::ObjectRef AttrsAsJSON(
+ *      const ffi::Array<ffi::ObjectRef>& attrs);
  *
  *   // Convertible to `InstructionKindNode::FInstructionAttrsFromJSON`
- *   static ffi::Array<ObjectRef> AttrsFromJSON(
- *      const ObjectRef& attrs_record);
+ *   static ffi::Array<ffi::ObjectRef> AttrsFromJSON(
+ *      const ffi::ObjectRef& attrs_record);
  * };
  *
  * TVM_REGISTER_INST_KIND_TRAITS(SomeInstructionKindTraits);
@@ -104,7 +104,7 @@ using namespace tvm::tirx;
  *   static constexpr size_t kNumDecisions = 1;
  *
  *   // Calling convention:
- *   // - All the arguments must be ObjectRef
+ *   // - All the arguments must be ffi::ObjectRef
  *   // - The 1st argument is Schedule
  *   // - The next `kNumInputs` arguments are input random variables
  *   // - The next `kNumAttrs` arguments are attributes
@@ -112,14 +112,14 @@ using namespace tvm::tirx;
  *   static ffi::Array<Var> UnpackedApplyToSchedule(
  *      Schedule sch,
  *      LoopRV loop_rv,
- *      Integer n,
- *      Integer max_innermost_factor,
- *      ffi::Optional<ffi::Array<Integer>> decision) {
+ *      IntImm n,
+ *      IntImm max_innermost_factor,
+ *      ffi::Optional<ffi::Array<int64_t>> decision) {
  *     return sch->SamplePerfectTile(loop_rv, n->value, max_innermost_factor->value, decision);
  *   }
  *
  *   // Calling convention:
- *   // - All the arguments must be ObjectRef
+ *   // - All the arguments must be ffi::ObjectRef
  *   // - The 1st argument is an array containing names of output random variables
  *   // - The next `kNumInputs` arguments are names of input random variables
  *   // - The next `kNumAttrs` arguments are attributes
@@ -127,9 +127,9 @@ using namespace tvm::tirx;
  *   static ffi::String UnpackedAsPython(
  *      ffi::Array<ffi::String> outputs,
  *      ffi::String loop_rv,
- *      Integer n,
- *      Integer max_innermost_factor,
- *      ffi::Optional<ffi::Array<Integer>> decision) {
+ *      IntImm n,
+ *      IntImm max_innermost_factor,
+ *      ffi::Optional<ffi::Array<int64_t>> decision) {
  *     PythonAPICall py("sample_perfect_tile");
  *     py.Input("loop", loop_rv);
  *     py.Input("n", n->value);
@@ -172,12 +172,12 @@ struct UnpackedInstTraits {
 
  protected:
   template <size_t index_offset>
-  static TVM_ALWAYS_INLINE void _SetInputs(AnyView* packed_args, const ffi::Array<Any>& inputs);
+  TVM_FFI_INLINE static void _SetInputs(AnyView* packed_args, const ffi::Array<Any>& inputs);
   template <size_t index_offset>
-  static TVM_ALWAYS_INLINE void _SetAttrs(AnyView* packed_args, const ffi::Array<Any>& attrs);
+  TVM_FFI_INLINE static void _SetAttrs(AnyView* packed_args, const ffi::Array<Any>& attrs);
   template <size_t index_offset>
-  static TVM_ALWAYS_INLINE void _SetDecision(AnyView* packed_args, const Any& decision);
-  static TVM_ALWAYS_INLINE ffi::Array<Any> _ConvertOutputs(const ffi::Any& rv);
+  TVM_FFI_INLINE static void _SetDecision(AnyView* packed_args, const Any& decision);
+  TVM_FFI_INLINE static ffi::Array<Any> _ConvertOutputs(const ffi::Any& rv);
 };
 
 /*!
@@ -250,7 +250,7 @@ struct _ArgsPacker<> {
 template <typename TObjectRef, typename... Args>
 struct _ArgsPacker<TObjectRef, Args...> {
   static constexpr bool checked =
-      std::is_base_of<ObjectRef, TObjectRef>::value && _ArgsPacker<Args...>::checked;
+      std::is_base_of<ffi::ObjectRef, TObjectRef>::value && _ArgsPacker<Args...>::checked;
 };
 
 template <typename T>
@@ -363,8 +363,8 @@ ffi::String UnpackedInstTraits<TTraits>::AsPython(const ffi::Array<Any>& inputs,
 
 template <class TTraits>
 template <size_t index_offset>
-TVM_ALWAYS_INLINE void UnpackedInstTraits<TTraits>::_SetInputs(AnyView* packed_args,
-                                                               const ffi::Array<Any>& inputs) {
+TVM_FFI_INLINE void UnpackedInstTraits<TTraits>::_SetInputs(AnyView* packed_args,
+                                                            const ffi::Array<Any>& inputs) {
   constexpr size_t kNumInputs = TTraits::kNumInputs;
   TVM_FFI_CHECK_EQ(kNumInputs, inputs.size(), ValueError)
       << "Incorrect kNumInputs for instruction: " << TTraits::kName;
@@ -375,8 +375,8 @@ TVM_ALWAYS_INLINE void UnpackedInstTraits<TTraits>::_SetInputs(AnyView* packed_a
 
 template <class TTraits>
 template <size_t index_offset>
-TVM_ALWAYS_INLINE void UnpackedInstTraits<TTraits>::_SetAttrs(AnyView* packed_args,
-                                                              const ffi::Array<Any>& attrs) {
+TVM_FFI_INLINE void UnpackedInstTraits<TTraits>::_SetAttrs(AnyView* packed_args,
+                                                           const ffi::Array<Any>& attrs) {
   constexpr size_t kNumAttrs = TTraits::kNumAttrs;
   TVM_FFI_CHECK_EQ(kNumAttrs, attrs.size(), ValueError)
       << "Incorrect kNumAttrs for instruction: " << TTraits::kName;
@@ -387,8 +387,8 @@ TVM_ALWAYS_INLINE void UnpackedInstTraits<TTraits>::_SetAttrs(AnyView* packed_ar
 
 template <class TTraits>
 template <size_t index_offset>
-TVM_ALWAYS_INLINE void UnpackedInstTraits<TTraits>::_SetDecision(AnyView* packed_args,
-                                                                 const Any& decision) {
+TVM_FFI_INLINE void UnpackedInstTraits<TTraits>::_SetDecision(AnyView* packed_args,
+                                                              const Any& decision) {
   constexpr size_t kNumDecisions = TTraits::kNumDecisions;
   static_assert(kNumDecisions <= 1, "an instruction is supposed to have at most 1 decision");
   if (kNumDecisions == 1) {
@@ -399,7 +399,7 @@ TVM_ALWAYS_INLINE void UnpackedInstTraits<TTraits>::_SetDecision(AnyView* packed
 }
 
 template <class TTraits>
-TVM_ALWAYS_INLINE ffi::Array<Any> UnpackedInstTraits<TTraits>::_ConvertOutputs(const ffi::Any& rv) {
+TVM_FFI_INLINE ffi::Array<Any> UnpackedInstTraits<TTraits>::_ConvertOutputs(const ffi::Any& rv) {
   using method_type = decltype(TTraits::UnpackedApplyToSchedule);
   using return_type = details::ReturnType<method_type>;
   constexpr int is_array = details::IsTVMArray<return_type>;

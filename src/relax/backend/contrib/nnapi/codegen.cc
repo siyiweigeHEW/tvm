@@ -17,6 +17,7 @@
  * under the License.
  */
 
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/module.h>
@@ -57,7 +58,7 @@ class CollectFromCompositeFunctionBody : public ExprVisitor {
     if (permute_dims_attr->axes) {
       ffi::Array<int64_t> axes;
       for (auto axis : permute_dims_attr->axes.value()) {
-        axes.push_back(axis.IntValue());
+        axes.push_back(axis);
       }
       node_->SetAttr("axes", std::move(axes));
     }
@@ -66,18 +67,18 @@ class CollectFromCompositeFunctionBody : public ExprVisitor {
   void SetAstypeAttribute(const CallNode* call_node) {
     const auto* astype_attrs = call_node->attrs.as<AstypeAttrs>();
     TVM_FFI_ICHECK(astype_attrs);
-    node_->SetAttr("astype_dtype", ffi::String(runtime::DLDataTypeToString(astype_attrs->dtype)));
+    node_->SetAttr("astype_dtype", ffi::String(ffi::DLDataTypeToString(astype_attrs->dtype)));
   }
 
   void SetMeanAttribute(const CallNode* call_node) {
     const auto* mean_attrs = call_node->attrs.as<StatisticalAttrs>();
     TVM_FFI_ICHECK(mean_attrs);
-    TVM_FFI_ICHECK(mean_attrs->axis.defined());
+    TVM_FFI_ICHECK(mean_attrs->axis.has_value());
 
     {
       ffi::Array<int64_t> axis;
       for (auto dim : mean_attrs->axis.value()) {
-        axis.push_back(dim->value);
+        axis.push_back(dim);
       }
       node_->SetAttr("axis", std::move(axis));
     }
@@ -151,7 +152,7 @@ class NNAPIJSONSerializer : public JSONSerializer {
   std::vector<JSONGraphNodeEntry> VisitExpr_(const CallNode* call_node) final {
     const auto* fn_var = call_node->op.as<VarNode>();
     TVM_FFI_ICHECK(fn_var);
-    const auto fn = Downcast<Function>(bindings_[ffi::GetRef<Var>(fn_var)]);
+    const auto fn = bindings_[ffi::GetRef<Var>(fn_var)].as_or_throw<Function>();
     TVM_FFI_ICHECK(fn.defined()) << "Expects the callee to be a function.";
 
     auto composite_opt = fn->GetAttr<ffi::String>(attr::kComposite);

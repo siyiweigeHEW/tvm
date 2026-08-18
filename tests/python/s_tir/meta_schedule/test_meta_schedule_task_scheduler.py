@@ -24,6 +24,7 @@ import pytest
 
 import tvm
 import tvm.testing
+from tvm.ir.utils import derived_object
 from tvm.s_tir import Schedule
 from tvm.s_tir import meta_schedule as ms
 from tvm.s_tir.meta_schedule.testing.dummy_object import DummyBuilder, DummyRunner
@@ -34,7 +35,7 @@ from tvm.script import tirx as T
 
 @tvm.script.ir_module
 class MatmulModule:
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def main(  # type: ignore
         a: T.handle,
         b: T.handle,
@@ -54,7 +55,7 @@ class MatmulModule:
 
 @tvm.script.ir_module
 class MatmulReluModule:
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def main(  # type: ignore
         a: T.handle,
         b: T.handle,
@@ -79,7 +80,7 @@ class MatmulReluModule:
 
 @tvm.script.ir_module
 class BatchMatmulModule:
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def main(  # type: ignore
         a: T.handle,
         b: T.handle,
@@ -119,7 +120,7 @@ def _schedule_batch_matmul(sch: Schedule):
     sch.reorder(i_0, j_0, i_1, j_1, k_0, i_2, j_2, k_1, i_3, j_3, t_0, t_1)
 
 
-@ms.derived_object
+@derived_object
 class MyTaskScheduler(ms.task_scheduler.PyTaskScheduler):
     done: set = set()
 
@@ -148,6 +149,14 @@ class MyTaskScheduler(ms.task_scheduler.PyTaskScheduler):
 
 
 def test_meta_schedule_task_scheduler_single():
+    device_types: list[str] = []
+
+    @derived_object
+    class RecordingRunner(ms.runner.PyRunner):
+        def run(self, runner_inputs: list[ms.runner.RunnerInput]) -> list[ms.runner.RunnerFuture]:
+            device_types.extend(str(runner_input.device_type) for runner_input in runner_inputs)
+            return DummyRunner().run(runner_inputs)
+
     num_trials_per_iter = 3
     max_trials_per_task = 10
     database = ms.database.MemoryDatabase()
@@ -156,6 +165,7 @@ def test_meta_schedule_task_scheduler_single():
         [
             ms.TuneContext(
                 MatmulModule,
+                num_threads=1,
                 target=tvm.target.Target("llvm"),
                 space_generator=_schedule_matmul,
                 search_strategy=ms.search_strategy.ReplayTrace(),
@@ -168,12 +178,13 @@ def test_meta_schedule_task_scheduler_single():
         max_trials_per_task=max_trials_per_task,
         num_trials_per_iter=64,
         builder=DummyBuilder(),
-        runner=DummyRunner(),
+        runner=RecordingRunner(),
         database=database,
         measure_callbacks=[ms.measure_callback.AddToDatabase()],
         cost_model=None,
     )
     assert len(database) == max_trials_per_task
+    assert device_types == ["cpu"] * max_trials_per_task
 
 
 def test_meta_schedule_task_scheduler_multiple():
@@ -182,6 +193,7 @@ def test_meta_schedule_task_scheduler_multiple():
     tasks = [
         ms.TuneContext(
             MatmulModule,
+            num_threads=1,
             target=tvm.target.Target("llvm"),
             space_generator=_schedule_matmul,
             search_strategy=ms.search_strategy.ReplayTrace(),
@@ -190,6 +202,7 @@ def test_meta_schedule_task_scheduler_multiple():
         ),
         ms.TuneContext(
             MatmulReluModule,
+            num_threads=1,
             target=tvm.target.Target("llvm"),
             space_generator=_schedule_matmul,
             search_strategy=ms.search_strategy.ReplayTrace(),
@@ -198,6 +211,7 @@ def test_meta_schedule_task_scheduler_multiple():
         ),
         ms.TuneContext(
             BatchMatmulModule,
+            num_threads=1,
             target=tvm.target.Target("llvm"),
             space_generator=_schedule_batch_matmul,
             search_strategy=ms.search_strategy.ReplayTrace(),
@@ -233,7 +247,7 @@ def test_meta_schedule_task_scheduler_multiple():
 
 
 def test_meta_schedule_task_scheduler_NIE():  # pylint: disable=invalid-name
-    @ms.derived_object
+    @derived_object
     class NIETaskScheduler(ms.task_scheduler.PyTaskScheduler):
         pass
 
@@ -254,6 +268,7 @@ def test_meta_schedule_task_scheduler_override_next_task_id_only():  # pylint: d
     tasks = [
         ms.TuneContext(
             MatmulModule,
+            num_threads=1,
             target=tvm.target.Target("llvm"),
             space_generator=_schedule_matmul,
             search_strategy=ms.search_strategy.ReplayTrace(),
@@ -262,6 +277,7 @@ def test_meta_schedule_task_scheduler_override_next_task_id_only():  # pylint: d
         ),
         ms.TuneContext(
             MatmulReluModule,
+            num_threads=1,
             target=tvm.target.Target("llvm"),
             space_generator=_schedule_matmul,
             search_strategy=ms.search_strategy.ReplayTrace(),
@@ -270,6 +286,7 @@ def test_meta_schedule_task_scheduler_override_next_task_id_only():  # pylint: d
         ),
         ms.TuneContext(
             BatchMatmulModule,
+            num_threads=1,
             target=tvm.target.Target("llvm"),
             space_generator=_schedule_batch_matmul,
             search_strategy=ms.search_strategy.ReplayTrace(),
@@ -309,6 +326,7 @@ def test_meta_schedule_task_scheduler_multiple_gradient_based():
     tasks = [
         ms.TuneContext(
             MatmulModule,
+            num_threads=1,
             target=tvm.target.Target("llvm"),
             space_generator=_schedule_matmul,
             search_strategy=ms.search_strategy.ReplayTrace(),
@@ -317,6 +335,7 @@ def test_meta_schedule_task_scheduler_multiple_gradient_based():
         ),
         ms.TuneContext(
             MatmulReluModule,
+            num_threads=1,
             target=tvm.target.Target("llvm"),
             space_generator=_schedule_matmul,
             search_strategy=ms.search_strategy.ReplayTrace(),
@@ -325,6 +344,7 @@ def test_meta_schedule_task_scheduler_multiple_gradient_based():
         ),
         ms.TuneContext(
             BatchMatmulModule,
+            num_threads=1,
             target=tvm.target.Target("llvm"),
             space_generator=_schedule_batch_matmul,
             search_strategy=ms.search_strategy.ReplayTrace(),
@@ -360,7 +380,7 @@ def test_meta_schedule_task_scheduler_gradient_based_with_null_search_strategy()
     the scheduler should continue working as normal for other tasks
     """
 
-    @ms.derived_object
+    @derived_object
     class NullSearchStrategy(ms.search_strategy.PySearchStrategy):
         def __init__(self, rounds_with_empty_candidates):
             self.rounds_with_empty_candidates = rounds_with_empty_candidates
@@ -393,6 +413,7 @@ def test_meta_schedule_task_scheduler_gradient_based_with_null_search_strategy()
     tasks = [
         ms.TuneContext(
             MatmulModule,
+            num_threads=1,
             target=tvm.target.Target("llvm"),
             space_generator=_schedule_matmul,
             search_strategy=NullSearchStrategy(rounds_with_empty_candidates=5),
@@ -401,6 +422,7 @@ def test_meta_schedule_task_scheduler_gradient_based_with_null_search_strategy()
         ),
         ms.TuneContext(
             BatchMatmulModule,
+            num_threads=1,
             target=tvm.target.Target("llvm"),
             space_generator=_schedule_batch_matmul,
             search_strategy=NullSearchStrategy(rounds_with_empty_candidates=0),
@@ -409,6 +431,7 @@ def test_meta_schedule_task_scheduler_gradient_based_with_null_search_strategy()
         ),
         ms.TuneContext(
             MatmulReluModule,
+            num_threads=1,
             target=tvm.target.Target("llvm"),
             space_generator=_schedule_matmul,
             search_strategy=ms.search_strategy.ReplayTrace(),

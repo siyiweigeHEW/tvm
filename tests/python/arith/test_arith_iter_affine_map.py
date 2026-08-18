@@ -139,8 +139,8 @@ def test_trivial():
 def test_fuse():
     x = tvm.tirx.Var("x", "int32")
     y = tvm.tirx.Var("y", "int32")
-    c = tvm.tirx.SizeVar("c", "int32")
-    c0 = tvm.tirx.SizeVar("c0", "int32")
+    c = tvm.tirx.Var("c", "int32")
+    c0 = tvm.tirx.Var("c0", "int32")
 
     assert_iter_sum_pattern({y * 3 + 1 + c + x: (12, 1 + c)}, var_dom([(x, 3), (y, 4)]))
 
@@ -168,8 +168,8 @@ def test_fuse():
 def test_split():
     x = tvm.tirx.Var("x", "int32")
     y = tvm.tirx.Var("y", "int32")
-    c0 = tvm.tirx.SizeVar("c0", "int32")
-    c1 = tvm.tirx.SizeVar("c1", "int32")
+    c0 = tvm.tirx.Var("c0", "int32")
+    c1 = tvm.tirx.Var("c1", "int32")
     fld = tvm.tirx.floordiv
     flm = tvm.tirx.floormod
 
@@ -199,6 +199,21 @@ def test_split():
     assert_iter_sum_pattern(
         {fld(flm(x, 49) + y, 49): (1, fld(flm(x, 49) + y, 49))}, var_dom([(y, 1)])
     )
+
+
+def test_split_simplified_modulo():
+    # regression for #19825: simplifying the modulo must not break the fused split
+    i = tvm.tirx.Var("i", "int32")
+    j = tvm.tirx.Var("j", "int32")
+    dom = var_dom([(i, 64), (j, 192)])
+    analyzer = tvm.arith.Analyzer()
+
+    for flat in [i * 192 + j, j + i * 192]:
+        lane = analyzer.simplify(floormod(flat, 128))
+        quotient = floordiv(flat, 128)
+        res = tvm.arith.detect_iter_map([lane, quotient], dom, check_level="bijective")
+        assert len(res.errors) == 0, res.errors
+        assert len(res.indices) == 2
 
 
 def test_compound():
@@ -538,7 +553,7 @@ def test_subspace_division():
     x = tvm.tirx.Var("x", "int32")
     y = tvm.tirx.Var("y", "int32")
     z = tvm.tirx.Var("z", "int32")
-    c = tvm.tirx.SizeVar("c", "int32")
+    c = tvm.tirx.Var("c", "int32")
 
     # simple 1.1
     res = tvm.arith.subspace_divide(
@@ -730,6 +745,25 @@ def test_subspace_division():
     )
     res = convert_division(res)
     assert len(res) == 0
+
+
+def test_subspace_divide_accepts_external_analyzer():
+    i = tvm.tirx.Var("i", "int32")
+    j = tvm.tirx.Var("j", "int32")
+    tile = tvm.tirx.Var("tile", "int32")
+    root_iters = {i: tvm.ir.Range(0, 4), j: tvm.ir.Range(0, tile)}
+    bindings = [j * tile + i]
+
+    assert len(tvm.arith.subspace_divide(bindings, root_iters, [i])) == 0
+
+    analyzer = tvm.arith.Analyzer()
+    analyzer.bind(tile, T.int32(4))
+    res = tvm.arith.subspace_divide(bindings, root_iters, [i], analyzer=analyzer)
+    res = convert_division(res)
+
+    assert len(res) == 2
+    tvm.ir.assert_structural_equal(res[0][0], j)
+    tvm.ir.assert_structural_equal(res[0][1], i)
 
 
 def test_subspace_divide_trivial_iters():
@@ -1145,7 +1179,7 @@ def test_iter_map_simplify_symbolic_case():
     y = tvm.tirx.Var("y", "int64")
     z = x * 32 + y
 
-    n = tvm.tirx.SizeVar("n", "int64")
+    n = tvm.tirx.Var("n", "int64")
 
     def simple_fuse0(x):
         return (x // n) * n + x % n
@@ -1179,7 +1213,7 @@ def test_iter_map_simplify_symbolic_predicate():
     x = tvm.tirx.Var("x", "int64")
     y = tvm.tirx.Var("y", "int64")
 
-    n = tvm.tirx.SizeVar("n", "int64")
+    n = tvm.tirx.Var("n", "int64")
 
     def simple_fuse0(x):
         return (x // n) * n + x % n
@@ -1252,15 +1286,15 @@ def assert_normalize_to_iter_sum(index, input_iters, args, base):
 
     Parameters
     ----------
-    index : tvm.tirx.PrimExpr
+    index : tvm.tirx.Expr
         The index to be normalized
     input_iters : Mapping[Var, Range]
         The input iterators
-    args : List[Union[tvm.arith.IterSplitExpr, Tuple[PrimExpr, PrimExpr]]]
+    args : List[Union[tvm.arith.IterSplitExpr, Tuple[Expr, Expr]]]
         The expected result. Ordered list of args of the expected IterSumExpr. Each arg can be
-        either IterSplitExpr or a tuple of (PrimExpr, PrimExpr) where the first element is the
-        iterator normalized to PrimExpr and the second element is the scale.
-    base : tvm.tirx.PrimExpr
+        either IterSplitExpr or a tuple of (Expr, Expr) where the first element is the
+        iterator normalized to Expr and the second element is the scale.
+    base : tvm.tirx.Expr
         The expected base
     """
     res = tvm.arith.normalize_to_iter_sum(index, input_iters)
@@ -1349,6 +1383,20 @@ def test_normalize_to_iter_sum():
     )
 
 
+def test_normalize_to_iter_sum_accepts_external_analyzer():
+    i = tvm.tirx.Var("i", "int32")
+    tile = tvm.tirx.Var("tile", "int32")
+    input_iters = {i: tvm.ir.Range(0, 16)}
+
+    analyzer = tvm.arith.Analyzer()
+    analyzer.bind(tile, T.int32(4))
+    res = tvm.arith.normalize_to_iter_sum(i // tile, input_iters, analyzer=analyzer)
+
+    assert len(res.args) == 1
+    tvm.testing.assert_prim_expr_equal(res.args[0].lower_factor, tile)
+    tvm.testing.assert_prim_expr_equal(res.args[0].extent, T.int32(4))
+
+
 def test_detect_iter_map_with_bufferload_recursion():
     n = tvm.tirx.Var("n", "int32")
     m = tvm.tirx.Var("m", "int32")
@@ -1367,6 +1415,31 @@ def test_detect_iter_map_with_bufferload_recursion():
 
     result = tvm.arith.detect_iter_map(indices, iter_vars)
     assert len(result.indices) == 0
+
+
+def test_detect_iter_map_accepts_external_analyzer():
+    i = tvm.tirx.Var("i", "int32")
+    tile = tvm.tirx.Var("tile", "int32")
+    iter_vars = {i: tvm.ir.Range(0, 16)}
+
+    # Without knowing `tile`, the floormod cannot be recognized as an iterator.
+    assert len(tvm.arith.detect_iter_map([i % tile], iter_vars).indices) == 0
+
+    analyzer = tvm.arith.Analyzer()
+    analyzer.bind(tile, T.int32(4))
+    # The external analyzer supplies `tile == 4`, allowing detection to succeed.
+    assert len(tvm.arith.detect_iter_map([i % tile], iter_vars, analyzer=analyzer).indices) == 1
+
+
+def test_iter_map_simplify_accepts_external_analyzer():
+    i = tvm.tirx.Var("i", "int32")
+    tile = tvm.tirx.Var("tile", "int32")
+    iter_vars = {i: tvm.ir.Range(0, 32)}
+
+    analyzer = tvm.arith.Analyzer()
+    analyzer.bind(tile, T.int32(8))
+    simplified = tvm.arith.iter_map_simplify([i % tile], iter_vars, analyzer=analyzer)
+    tvm.ir.assert_structural_equal(simplified, [i % 8])
 
 
 if __name__ == "__main__":

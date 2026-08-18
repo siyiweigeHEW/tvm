@@ -17,10 +17,16 @@
 # ruff: noqa: E501, E741
 import enum
 import itertools
+import json
 
 import numpy as np
 import pytest
+
+pytest.importorskip("scipy")
+
 import scipy.special
+import tvm_ffi
+from tvm_ffi import Shape
 
 import tvm
 import tvm.testing
@@ -38,7 +44,6 @@ from tvm.relax.frontend.nn.llm.kv_cache import (
     tree_attn_cpu,
     tree_attn_with_paged_kv_cache_cpu,
 )
-from tvm.runtime import ShapeTuple
 from tvm.s_tir import dlight as dl
 
 reserved_nseq = 32
@@ -66,6 +71,7 @@ fbegin_forward = None
 fend_forward = None
 fcommit_accepted_token_tree_nodes = None
 fattention_with_fuse_qkv = None
+fattention_with_shared_kv = None
 fis_empty = None
 fdebug_get_kv = None
 
@@ -84,11 +90,13 @@ fattention_rotary = None
 fcopy_single_page = None
 fcompact_copy = None
 
+_COMPILED_KERNEL_CACHE = {}
 
-def set_global_func(head_dim, dtype):
+
+def set_global_func(head_dim, dtype, layer_sliding_window_size=1024):
     global fclear, fadd_sequence, fremove_sequence, ffork_sequence, fenable_sliding_window_for_seq
     global fpopn, fbegin_forward, fend_forward, fcommit_accepted_token_tree_nodes
-    global fattention_with_fuse_qkv, fis_empty, fdebug_get_kv
+    global fattention_with_fuse_qkv, fattention_with_shared_kv, fis_empty, fdebug_get_kv
     global ftranspose_append, fcopy_cache, fattn_prefill, fattn_decode
     global \
         fattn_prefill_ragged, \
@@ -113,37 +121,67 @@ def set_global_func(head_dim, dtype):
     fattention_with_fuse_qkv = tvm.get_global_func(
         "vm.builtin.attention_kv_cache_attention_with_fused_qkv"
     )
+    fattention_with_shared_kv = tvm.get_global_func(
+        "vm.builtin.attention_kv_cache_attention_with_shared_kv"
+    )
     fis_empty = tvm.get_global_func("vm.builtin.attention_kv_cache_empty")
     fdebug_get_kv = tvm.get_global_func("vm.builtin.attention_kv_cache_debug_get_kv")
 
     target = tvm.target.Target.from_device(device)
-    builts = []
-    for tir_func in [
-        _kv_cache_transpose_append(num_kv_heads, head_dim, dtype),
-        _kv_cache_debug_get_kv(num_layers, num_kv_heads, head_dim, dtype),
-        _attention_prefill_cpu(num_kv_heads, num_qo_heads, head_dim, dtype, False, rope_scaling),
-        _attention_decode_cpu(num_kv_heads, num_qo_heads, head_dim, dtype, False, rope_scaling),
-        _attention_prefill_cpu(num_kv_heads, num_qo_heads, head_dim, dtype, True, rope_scaling),
-        _attention_decode_cpu(num_kv_heads, num_qo_heads, head_dim, dtype, True, rope_scaling),
-        _attention_prefill_ragged_cpu(
-            num_kv_heads, num_qo_heads, head_dim, head_dim, dtype, rope_scaling
-        ),
-        tree_attn_cpu(num_kv_heads, num_qo_heads, head_dim, dtype, rope_scaling),
-        tree_attn_with_paged_kv_cache_cpu(
-            num_kv_heads, num_qo_heads, head_dim, dtype, rope_scaling
-        ),
-        _merge_state_inplace_cpu(dtype),
-        llama_rope_with_position_map(
-            rope_theta, rope_scale, head_dim, num_qo_heads, num_kv_heads, dtype, rope_scaling
-        ),
-        _copy_single_page_cpu(num_kv_heads, page_size, head_dim, dtype),
-        _compact_kv_copy_cpu(num_kv_heads, head_dim, dtype),
-    ]:
-        mod = tvm.IRModule({"main": tir_func})
-        with target:
-            mod = dl.ApplyDefaultSchedule(dl.gpu.Fallback())(mod)
-        f = tvm.tirx.build(mod["main"], target=target)
-        builts.append(f.main)
+    cache_key = (
+        str(target),
+        num_layers,
+        num_qo_heads,
+        num_kv_heads,
+        head_dim,
+        page_size,
+        dtype,
+        rope_scale,
+        rope_theta,
+        json.dumps(rope_scaling, sort_keys=True),
+        layer_sliding_window_size,
+    )
+    builts = _COMPILED_KERNEL_CACHE.get(cache_key)
+    if builts is None:
+        builts = []
+        for tir_func in [
+            _kv_cache_transpose_append(num_kv_heads, head_dim, dtype),
+            _kv_cache_debug_get_kv(num_layers, num_kv_heads, head_dim, dtype),
+            _attention_prefill_cpu(
+                num_kv_heads, num_qo_heads, head_dim, dtype, False, rope_scaling
+            ),
+            _attention_decode_cpu(num_kv_heads, num_qo_heads, head_dim, dtype, False, rope_scaling),
+            _attention_prefill_cpu(
+                num_kv_heads,
+                num_qo_heads,
+                head_dim,
+                dtype,
+                True,
+                rope_scaling,
+                sliding_window_size=layer_sliding_window_size,
+            ),
+            _attention_decode_cpu(num_kv_heads, num_qo_heads, head_dim, dtype, True, rope_scaling),
+            _attention_prefill_ragged_cpu(
+                num_kv_heads, num_qo_heads, head_dim, head_dim, dtype, rope_scaling
+            ),
+            tree_attn_cpu(num_kv_heads, num_qo_heads, head_dim, dtype, rope_scaling),
+            tree_attn_with_paged_kv_cache_cpu(
+                num_kv_heads, num_qo_heads, head_dim, dtype, rope_scaling
+            ),
+            _merge_state_inplace_cpu(dtype),
+            llama_rope_with_position_map(
+                rope_theta, rope_scale, head_dim, num_qo_heads, num_kv_heads, dtype, rope_scaling
+            ),
+            _copy_single_page_cpu(num_kv_heads, page_size, head_dim, dtype),
+            _compact_kv_copy_cpu(num_kv_heads, head_dim, dtype),
+        ]:
+            mod = tvm.IRModule({"main": tir_func})
+            with target:
+                mod = dl.ApplyDefaultSchedule(dl.gpu.Fallback())(mod)
+            f = tvm.tirx.build(mod["main"], target=target)
+            builts.append(f.main)
+        builts = tuple(builts)
+        _COMPILED_KERNEL_CACHE[cache_key] = builts
 
     (
         ftranspose_append,
@@ -162,24 +200,34 @@ def set_global_func(head_dim, dtype):
     ) = builts
 
 
-def create_kv_cache(head_dim, dtype, rope_mode, support_sliding_window):
+def create_kv_cache(
+    head_dim,
+    dtype,
+    rope_mode,
+    support_sliding_window,
+    layer_sliding_window_size=None,
+    attn_kinds=None,
+):
     fcreate = tvm.get_global_func("vm.builtin.paged_attention_kv_cache_create")
+    cache_config = [
+        reserved_nseq,
+        maximum_total_seq_length,
+        prefill_chunk_size,
+        page_size,
+        int(support_sliding_window),
+    ]
+    if layer_sliding_window_size is not None:
+        cache_config.append(layer_sliding_window_size)
+    if attn_kinds is None:
+        attn_kinds = [int(AttnKind.MHA) for _ in range(num_layers)]
     cache = fcreate(
-        tvm.runtime.ShapeTuple(
-            [
-                reserved_nseq,
-                maximum_total_seq_length,
-                prefill_chunk_size,
-                page_size,
-                int(support_sliding_window),
-            ]
-        ),
-        tvm.runtime.ShapeTuple([0, num_layers]),
+        tvm_ffi.Shape(cache_config),
+        tvm_ffi.Shape([0, num_layers]),
         num_qo_heads,
         num_kv_heads,
         head_dim,
         head_dim,  # v_head_dim
-        tvm.runtime.ShapeTuple([int(AttnKind.MHA) for _ in range(num_layers)]),
+        tvm_ffi.Shape(attn_kinds),
         False,  # enable_kv_transfer
         rope_mode,
         rope_scale,
@@ -337,10 +385,10 @@ def apply_attention(
 
     fbegin_forward(
         kv_cache,
-        ShapeTuple(seq_ids),
-        ShapeTuple(append_lengths),
+        Shape(seq_ids),
+        Shape(append_lengths),
         (
-            ShapeTuple(flattened_token_tree_parent_ptr)
+            Shape(flattened_token_tree_parent_ptr)
             if flattened_token_tree_parent_ptr is not None
             else None
         ),
@@ -490,9 +538,7 @@ def apply_attention(
 
     if accepted_leaf_indices is not None:
         seq_ids = [seq_id for seq_id, _ in batch]
-        fcommit_accepted_token_tree_nodes(
-            kv_cache, ShapeTuple(seq_ids), ShapeTuple(accepted_leaf_indices)
-        )
+        fcommit_accepted_token_tree_nodes(kv_cache, Shape(seq_ids), Shape(accepted_leaf_indices))
         for i, (accepted_leaf_idx, (seq_id, append_length)) in enumerate(
             zip(accepted_leaf_indices, batch)
         ):
@@ -545,6 +591,116 @@ def apply_attention(
 
     # Verify
     verify_cached_kv(kv_cache, seq_ids, cached_k, cached_v)
+
+
+def _causal_attention_reference(q, k, v, past_length, sliding_window_size=None):
+    k = np.repeat(k, num_qo_heads // num_kv_heads, axis=1)
+    v = np.repeat(v, num_qo_heads // num_kv_heads, axis=1)
+    scores = np.einsum("qhd,khd->hqk", q.astype("float32"), k.astype("float32")) * sm_scale
+    query_positions = past_length + np.arange(q.shape[0])
+    key_positions = np.arange(k.shape[0])
+    mask = key_positions[None, :] <= query_positions[:, None]
+    if sliding_window_size is not None:
+        mask &= key_positions[None, :] > query_positions[:, None] - sliding_window_size
+    scores = np.where(mask[None, :, :], scores, np.finfo("float32").min)
+    probabilities = scipy.special.softmax(scores, axis=-1)
+    return np.einsum("hqk,khd->qhd", probabilities, v.astype("float32"))
+
+
+def test_per_layer_sliding_window():
+    global head_dim, sm_scale, dtype
+    head_dim = 64
+    sm_scale = head_dim ** (-0.5)
+    dtype = "float32"
+    layer_window_size = 3
+    set_global_func(head_dim, dtype, layer_window_size)
+    kv_cache = create_kv_cache(
+        head_dim,
+        dtype,
+        RopeMode.NONE,
+        False,
+        layer_sliding_window_size=layer_window_size,
+        attn_kinds=[int(AttnKind.MHA_SLIDING)] + [int(AttnKind.MHA)] * (num_layers - 1),
+    )
+    fadd_sequence(kv_cache, 0)
+
+    rng = np.random.default_rng(0)
+    cached_k = np.empty((0, num_kv_heads, head_dim), dtype=dtype)
+    cached_v = np.empty((0, num_kv_heads, head_dim), dtype=dtype)
+    for append_length in [3, 2, 1]:
+        past_length = cached_k.shape[0]
+        q = rng.standard_normal((append_length, num_qo_heads, head_dim)).astype(dtype)
+        current_k = rng.standard_normal((append_length, num_kv_heads, head_dim)).astype(dtype)
+        current_v = rng.standard_normal((append_length, num_kv_heads, head_dim)).astype(dtype)
+
+        fbegin_forward(kv_cache, Shape([0]), Shape([append_length]), None)
+        qkv = tvm.runtime.tensor(np.concatenate([q, current_k, current_v], axis=1), device)
+        output = tvm.runtime.empty(q.shape, dtype, device=device)
+        fattention_with_fuse_qkv(kv_cache, 0, sm_scale, qkv, output)
+
+        cached_k = np.concatenate([cached_k, current_k], axis=0)
+        cached_v = np.concatenate([cached_v, current_v], axis=0)
+        expected = _causal_attention_reference(
+            q, cached_k, cached_v, past_length, layer_window_size
+        )
+        tvm.testing.assert_allclose(output.numpy(), expected, rtol=1e-3, atol=1e-3)
+        fend_forward(kv_cache)
+
+
+@pytest.mark.parametrize(
+    ("source_attn_kind", "layer_window_size"),
+    [(AttnKind.MHA, None), (AttnKind.MHA_SLIDING, 3)],
+)
+def test_attention_with_shared_kv(source_attn_kind, layer_window_size):
+    global head_dim, sm_scale, dtype
+    head_dim = 64
+    sm_scale = head_dim ** (-0.5)
+    dtype = "float32"
+    set_global_func(head_dim, dtype, layer_window_size or 1024)
+    attn_kinds = [int(source_attn_kind)] + [int(AttnKind.MHA)] * (num_layers - 1)
+    kv_cache = create_kv_cache(
+        head_dim,
+        dtype,
+        RopeMode.NONE,
+        False,
+        layer_sliding_window_size=layer_window_size or 1024,
+        attn_kinds=attn_kinds,
+    )
+    fadd_sequence(kv_cache, 0)
+
+    rng = np.random.default_rng(0)
+    cached_k = np.empty((0, num_kv_heads, head_dim), dtype=dtype)
+    cached_v = np.empty((0, num_kv_heads, head_dim), dtype=dtype)
+    for append_length in [3, 2, 1]:
+        past_length = cached_k.shape[0]
+        source_q = rng.standard_normal((append_length, num_qo_heads, head_dim)).astype(dtype)
+        current_k = rng.standard_normal((append_length, num_kv_heads, head_dim)).astype(dtype)
+        current_v = rng.standard_normal((append_length, num_kv_heads, head_dim)).astype(dtype)
+        shared_q = rng.standard_normal((append_length, num_qo_heads, head_dim)).astype(dtype)
+
+        fbegin_forward(kv_cache, Shape([0]), Shape([append_length]), None)
+        qkv = tvm.runtime.tensor(np.concatenate([source_q, current_k, current_v], axis=1), device)
+        source_output = tvm.runtime.empty(source_q.shape, dtype, device=device)
+        fattention_with_fuse_qkv(kv_cache, 0, sm_scale, qkv, source_output)
+
+        shared_output = tvm.runtime.empty(shared_q.shape, dtype, device=device)
+        fattention_with_shared_kv(
+            kv_cache,
+            0,
+            sm_scale,
+            tvm.runtime.tensor(shared_q, device),
+            tvm.runtime.tensor(current_k, device),
+            tvm.runtime.tensor(current_v, device),
+            shared_output,
+        )
+
+        cached_k = np.concatenate([cached_k, current_k], axis=0)
+        cached_v = np.concatenate([cached_v, current_v], axis=0)
+        expected = _causal_attention_reference(
+            shared_q, cached_k, cached_v, past_length, layer_window_size
+        )
+        tvm.testing.assert_allclose(shared_output.numpy(), expected, rtol=1e-3, atol=1e-3)
+        fend_forward(kv_cache)
 
 
 def test_paged_attention_kv_cache_prefill_and_decode(kv_cache_and_config):

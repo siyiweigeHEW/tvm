@@ -20,12 +20,13 @@
 import logging
 
 from tvm import te, tirx, topi
+from tvm.ir import Call
 from tvm.script.ir_builder import IRBuilder
 from tvm.script.ir_builder import tirx as T
-from tvm.script.ir_builder.tirx.utils import buffer_proxy
+from tvm.tirx.script.builder.utils import buffer_proxy
 
 from ...block_builder import BlockBuilder
-from ...expr import Call, Expr
+from ...expr import Expr
 from .common import register_legalize
 
 
@@ -219,7 +220,7 @@ def _grad_take_backward(bb: BlockBuilder, call: Call) -> Expr:
                 return ib.get()
 
         shape = x.shape
-        out_buf = tirx.decl_buffer(shape, x.dtype, "out_buf")
+        out_buf = tirx.decl_buffer(shape, x.dtype, "out_buf", layout=None)
 
         return te.extern(
             [shape],

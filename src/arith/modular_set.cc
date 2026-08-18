@@ -22,6 +22,7 @@
  * \brief Modular set analysis
  */
 #include <tvm/arith/analyzer.h>
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/builtin.h>
@@ -49,12 +50,8 @@ ModularSet::ModularSet(int64_t coeff, int64_t base) {
   data_ = std::move(node);
 }
 
-TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
-    .set_dispatch<ModularSetNode>([](const ObjectRef& node, ReprPrinter* p) {
-      auto* op = static_cast<const ModularSetNode*>(node.get());
-      p->stream << "ModularSet("
-                << "coeff=" << op->coeff << ", base=" << op->base << ')';
-    });
+// Pattern A (RM): auto-default repr from reflection produces
+// "arith.ModularSet(coeff=..., base=...)"
 
 ModularSet MakeModularSet(int64_t coeff, int64_t base) { return ModularSet(coeff, base); }
 
@@ -100,9 +97,9 @@ struct ModularSetAnalyzer::Entry {
   }
 };
 
-class ModularSetAnalyzer::Impl : public ExprFunctor<ModularSetAnalyzer::Entry(const PrimExpr&)> {
+class ModularSetAnalyzer::Impl : public ExprFunctor<ModularSetAnalyzer::Entry(const Expr&)> {
  public:
-  explicit Impl(Analyzer* parent) : parent_(parent) {}
+  explicit Impl(AnalyzerObj* parent) : parent_(parent) {}
 
   void Update(const Var& var, const ModularSet& info, bool allow_override) {
     if (!allow_override) {
@@ -135,7 +132,7 @@ class ModularSetAnalyzer::Impl : public ExprFunctor<ModularSetAnalyzer::Entry(co
   }
 
   // Override visitor behaviors
-  Entry VisitExprDefault_(const Object* op) final { return Everything(); }
+  Entry VisitExprDefault_(const ffi::Object* op) final { return Everything(); }
 
   Entry VisitExpr_(const LetNode* op) final {
     auto it = var_map_.find(op->var);
@@ -267,6 +264,8 @@ class ModularSetAnalyzer::Impl : public ExprFunctor<ModularSetAnalyzer::Entry(co
       return VisitRightShift(op);
     } else if (op->op.same_as(tirx::builtin::bitwise_and())) {
       return VisitBitwiseAnd(op);
+    } else if (op->op.same_as(tirx::builtin::shift_left())) {
+      return VisitLeftShift(op);
     } else {
       return Everything();
     }
@@ -282,29 +281,42 @@ class ModularSetAnalyzer::Impl : public ExprFunctor<ModularSetAnalyzer::Entry(co
     }
   }
 
+  Entry VisitLeftShift(const CallNode* op) {
+    Entry a = VisitExpr(op->args[0].as_or_throw<PrimExpr>());
+    Entry b = VisitExpr(op->args[1].as_or_throw<PrimExpr>());
+    if (b.is_const()) {
+      return Entry(a.coeff << b.base, a.base << b.base);
+    }
+    return Everything();
+  }
+
   Entry VisitRightShift(const CallNode* op) {
-    Entry b = VisitExpr(op->args[1]);
+    Entry b = VisitExpr(op->args[1].as_or_throw<PrimExpr>());
     // a c x  / c -> a x
     if (b.is_const()) {
-      return DivByConst(op->args[0], static_cast<int64_t>(1) << b.base, true);
+      return DivByConst(op->args[0].as_or_throw<PrimExpr>(), static_cast<int64_t>(1) << b.base,
+                        true);
     }
     return Everything();
   }
 
   Entry VisitBitwiseAnd(const CallNode* op) {
-    Entry b = VisitExpr(op->args[1]);
+    Entry b = VisitExpr(op->args[1].as_or_throw<PrimExpr>());
     if (b.is_const()) {
       int shift;
-      if (is_const_power_of_two_integer(Integer(b.base + 1), &shift)) {
-        return ModByConst(op->args[0], static_cast<int64_t>(1) << shift, true);
+      if (is_const_power_of_two_integer(IntImm::Int32(b.base + 1), &shift)) {
+        return ModByConst(op->args[0].as_or_throw<PrimExpr>(), static_cast<int64_t>(1) << shift,
+                          true);
       }
     }
     return Everything();
   }
 
+  void CopyFrom(const Impl& other) { var_map_ = other.var_map_; }
+
  private:
   /*! \brief pointer to parent. */
-  Analyzer* parent_{nullptr};
+  AnalyzerObj* parent_{nullptr};
   // internal variable map
   std::unordered_map<Var, Entry> var_map_;
   /*!
@@ -395,9 +407,13 @@ std::function<void()> ModularSetAnalyzer::EnterConstraint(const PrimExpr& constr
   return impl_->EnterConstraint(constraint);
 }
 
-ModularSetAnalyzer::ModularSetAnalyzer(Analyzer* parent) : impl_(new Impl(parent)) {}
+ModularSetAnalyzer::ModularSetAnalyzer(AnalyzerObj* parent) : impl_(new Impl(parent)) {}
 
 ModularSetAnalyzer::~ModularSetAnalyzer() { delete impl_; }
+
+void ModularSetAnalyzer::CopyFrom(const ModularSetAnalyzer& other) {
+  impl_->CopyFrom(*other.impl_);
+}
 
 }  // namespace arith
 }  // namespace tvm

@@ -27,7 +27,6 @@
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ffi/string.h>
 #include <tvm/ir/expr.h>
-#include <tvm/runtime/object.h>
 #include <tvm/s_tir/schedule/schedule.h>
 
 namespace tvm {
@@ -38,7 +37,7 @@ class TuneContext;
 class ScheduleRule;
 
 /*! \brief Rules to modify a block in a schedule. */
-class ScheduleRuleNode : public runtime::Object {
+class ScheduleRuleNode : public ffi::Object {
  public:
   /*! \brief Virtual destructor. */
   virtual ~ScheduleRuleNode() = default;
@@ -71,14 +70,14 @@ class ScheduleRuleNode : public runtime::Object {
   virtual ScheduleRule Clone() const = 0;
 
   static constexpr const bool _type_mutable = true;
-  TVM_FFI_DECLARE_OBJECT_INFO("s_tir.meta_schedule.ScheduleRule", ScheduleRuleNode, Object);
+  TVM_FFI_DECLARE_OBJECT_INFO("s_tir.meta_schedule.ScheduleRule", ScheduleRuleNode, ffi::Object);
 };
 
 /*!
  * \brief Managed reference to ScheduleRuleNode
  * \sa ScheduleRuleNode
  */
-class ScheduleRule : public runtime::ObjectRef {
+class ScheduleRule : public ffi::ObjectRef {
  public:
   /*!
    * \brief The function type of `InitializeWithTuneContext` method.
@@ -93,11 +92,6 @@ class ScheduleRule : public runtime::ObjectRef {
    */
   using FApply = ffi::TypedFunction<ffi::Array<s_tir::Schedule>(const s_tir::Schedule&,
                                                                 const s_tir::SBlockRV&)>;
-  /*!
-   * \brief Get the schedule rule as string with name.
-   * \return The string of the schedule rule.
-   */
-  using FAsString = ffi::TypedFunction<ffi::String()>;
   /*!
    * \brief The function type of `Clone` method.
    * \return The cloned schedule rule.
@@ -161,8 +155,8 @@ class ScheduleRule : public runtime::ObjectRef {
   TVM_DLL static ScheduleRule MultiLevelTiling(
       ffi::String structure,                                      //
       ffi::Optional<ffi::Array<ffi::String>> tile_binds,          //
-      ffi::Optional<Integer> max_innermost_factor,                //
-      ffi::Optional<ffi::Array<Integer>> vector_load_lens,        //
+      ffi::Optional<int64_t> max_innermost_factor,                //
+      ffi::Optional<ffi::Array<int64_t>> vector_load_lens,        //
       ffi::Optional<ffi::Map<ffi::String, ffi::Any>> reuse_read,  //
       ffi::Optional<ffi::Map<ffi::String, ffi::Any>> reuse_write,
       ffi::Optional<ffi::Function> filter_fn = std::nullopt);
@@ -187,8 +181,8 @@ class ScheduleRule : public runtime::ObjectRef {
   TVM_DLL static ScheduleRule MultiLevelTilingWithIntrin(
       ffi::String intrin_name, ffi::String structure,
       ffi::Optional<ffi::Array<ffi::String>> tile_binds,
-      ffi::Optional<Integer> max_innermost_factor,
-      ffi::Optional<ffi::Array<Integer>> vector_load_lens,
+      ffi::Optional<int64_t> max_innermost_factor,
+      ffi::Optional<ffi::Array<int64_t>> vector_load_lens,
       ffi::Optional<ffi::Map<ffi::String, ffi::Any>> reuse_read,
       ffi::Optional<ffi::Map<ffi::String, ffi::Any>> reuse_write);
 
@@ -215,8 +209,8 @@ class ScheduleRule : public runtime::ObjectRef {
   TVM_DLL static ScheduleRule MultiLevelTilingTensorCore(
       ffi::Array<ffi::Map<ffi::String, ffi::String>> intrin_groups, ffi::String structure,
       ffi::Optional<ffi::Array<ffi::String>> tile_binds,
-      ffi::Optional<Integer> max_innermost_factor,
-      ffi::Optional<ffi::Array<Integer>> vector_load_lens,
+      ffi::Optional<int64_t> max_innermost_factor,
+      ffi::Optional<ffi::Array<int64_t>> vector_load_lens,
       ffi::Optional<ffi::Map<ffi::String, ffi::Any>> reuse_read,
       ffi::Optional<ffi::Map<ffi::String, ffi::Any>> reuse_write, bool use_software_pipeline);
 
@@ -232,8 +226,8 @@ class ScheduleRule : public runtime::ObjectRef {
    * \return The schedule rule created
    */
   TVM_DLL static ScheduleRule MultiLevelTilingWideVector(
-      ffi::String structure, Integer vector_length_in_bits,
-      ffi::Optional<Integer> max_innermost_factor,
+      ffi::String structure, int64_t vector_length_in_bits,
+      ffi::Optional<int64_t> max_innermost_factor,
       ffi::Optional<ffi::Map<ffi::String, ffi::Any>> reuse_read,
       ffi::Optional<ffi::Map<ffi::String, ffi::Any>> reuse_write);
 
@@ -246,14 +240,14 @@ class ScheduleRule : public runtime::ObjectRef {
    * limit \return The schedule rule created
    */
   TVM_DLL static ScheduleRule AddRFactor(int max_jobs_per_core,  //
-                                         ffi::Optional<Integer> max_innermost_factor);
+                                         ffi::Optional<int64_t> max_innermost_factor);
   /*!
    * \brief Create a schedule rule which applies cross-thread reduction to some reduction blocks
    * correspondingly when needed
    * \param thread_extents Candidates of thread axis extent (values are required to be positive).
    * \return The schedule rule created
    */
-  TVM_DLL static ScheduleRule CrossThreadReduction(ffi::Array<Integer> thread_extents);
+  TVM_DLL static ScheduleRule CrossThreadReduction(ffi::Array<int64_t> thread_extents);
   /*!
    * \brief A rule that randomly select a compute-at location for a free block
    * \return The schedule rule created
@@ -274,7 +268,7 @@ class ScheduleRule : public runtime::ObjectRef {
    */
   TVM_DLL static ScheduleRule ParallelizeVectorizeUnroll(int max_jobs_per_core,                 //
                                                          int max_vectorize_extent,              //
-                                                         ffi::Array<Integer> unroll_max_steps,  //
+                                                         ffi::Array<int64_t> unroll_max_steps,  //
                                                          bool unroll_explicit);
   /*!
    * \brief Auto bind loops around the block to BlockIdx and ThreadIdx
@@ -284,21 +278,19 @@ class ScheduleRule : public runtime::ObjectRef {
    * when this schedule rule is created.
    * \return The schedule rule created
    */
-  TVM_DLL static ScheduleRule AutoBind(int max_threadblocks, ffi::Array<Integer> thread_extents,
+  TVM_DLL static ScheduleRule AutoBind(int max_threadblocks, ffi::Array<int64_t> thread_extents,
                                        int max_threads_per_block = -1);
   /*!
    * \brief Create a schedule rule with customized methods on the python-side.
    * \param f_initialize_with_tune_context The packed function of `InitializeWithTuneContext`.
    * \param f_apply The packed function of `Apply`.
    * \param f_clone The packed function of `Clone`.
-   * \param f_as_string The packed function of `AsString`.
    * \return The schedule rule created.
    */
   TVM_DLL static ScheduleRule PyScheduleRule(
       FInitializeWithTuneContext f_initialize_with_tune_context,  //
       FApply f_apply,                                             //
-      FClone f_clone,                                             //
-      FAsString f_as_string);
+      FClone f_clone);
 
   /*! \brief Create default schedule rules for LLVM */
   TVM_DLL static ffi::Array<ScheduleRule, void> DefaultLLVM();
@@ -315,7 +307,7 @@ class ScheduleRule : public runtime::ObjectRef {
   /*! \brief Create default schedule rules for RISCV CPU (RVV) */
   TVM_DLL static ffi::Array<ScheduleRule, void> DefaultRISCV(int vlen);
 
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ScheduleRule, ObjectRef, ScheduleRuleNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ScheduleRule, ffi::ObjectRef, ScheduleRuleNode);
 };
 
 /*! \brief The schedule rule with customized methods on the python-side. */
@@ -324,21 +316,17 @@ class PyScheduleRuleNode : public ScheduleRuleNode {
   using FInitializeWithTuneContext = ScheduleRule::FInitializeWithTuneContext;
   using FApply = ScheduleRule::FApply;
   using FClone = ScheduleRule::FClone;
-  using FAsString = ScheduleRule::FAsString;
 
   /*! \brief The packed function to the `InitializeWithTuneContext` function. */
   FInitializeWithTuneContext f_initialize_with_tune_context;
   /*! \brief The packed function to the `Apply` function. */
   FApply f_apply;
-  /*! \brief The packed function to the `AsString` function. */
-  FAsString f_as_string;
   /*! \brief The packed function to the `Clone` function. */
   FClone f_clone;
 
   static void RegisterReflection() {
     // `f_initialize_with_tune_context` is not registered
     // `f_apply` is not registered
-    // `f_as_string` is not registered
     // `f_clone` is not registered
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<PyScheduleRuleNode>();

@@ -37,10 +37,10 @@
  */
 #include <tvm/ffi/container/array.h>
 #include <tvm/ffi/container/shape.h>
+#include <tvm/ffi/error.h>
 #include <tvm/ffi/memory.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/device_api.h>
-#include <tvm/runtime/logging.h>
 #include <tvm/runtime/memory/memory_manager.h>
 #include <tvm/runtime/tensor.h>
 #include <tvm/runtime/vm/vm.h>
@@ -61,7 +61,7 @@ namespace vm {
 /*!
  * \brief An object representing an attention kv cache.
  */
-class AttentionKVCacheLegacyObj : public Object {
+class AttentionKVCacheLegacyObj : public ffi::Object {
  public:
   /*!
    * \brief Underlying support data.
@@ -231,11 +231,11 @@ class AttentionKVCacheLegacyObj : public Object {
 
   static constexpr const bool _type_mutable = true;
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("relax.vm.AttentionKVCacheLegacy", AttentionKVCacheLegacyObj,
-                                    Object);
+                                    ffi::Object);
 };
 
 /*! \brief reference to closure. */
-class AttentionKVCacheLegacy : public ObjectRef {
+class AttentionKVCacheLegacy : public ffi::ObjectRef {
  public:
   /*!
    * \brief Create the attention kv cache.
@@ -254,7 +254,7 @@ class AttentionKVCacheLegacy : public ObjectRef {
     return AttentionKVCacheLegacy(n);
   }
 
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(AttentionKVCacheLegacy, ObjectRef,
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(AttentionKVCacheLegacy, ffi::ObjectRef,
                                              AttentionKVCacheLegacyObj);
 };
 
@@ -362,7 +362,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
 // NOTE this is a built-in highly related to LM so we put it here.
 int SampleTopPFromLogits(Tensor logits, double temperature, double top_p, double uniform_sample) {
   TVM_FFI_ICHECK(logits.IsContiguous());
-  TVM_FFI_ICHECK(logits.DataType() == DataType::Float(32));
+  TVM_FFI_ICHECK((logits.DataType() == DLDataType{kDLFloat, 32, 1}));
 
   if (logits->device.device_type != kDLCPU) {
     logits = logits.CopyTo(DLDevice{kDLCPU, 0});
@@ -428,7 +428,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
 
 int SampleTopPFromProb(Tensor prob, double top_p, double uniform_sample) {
   TVM_FFI_ICHECK(prob.IsContiguous());
-  TVM_FFI_ICHECK(prob.DataType() == DataType::Float(32));
+  TVM_FFI_ICHECK((prob.DataType() == DLDataType{kDLFloat, 32, 1}));
 
   if (prob->device.device_type != kDLCPU) {
     prob = prob.CopyTo(DLDevice{kDLCPU, 0});
@@ -543,7 +543,8 @@ Tensor MultinomialFromUniform(Tensor prob, Tensor uniform_sample) {
   int64_t vocab_size = prob->shape[prob->ndim - 1];
   const float* pprob = static_cast<float*>(prob->data);
   const float* psample = static_cast<float*>(uniform_sample->data);
-  Tensor new_array = Tensor::Empty({batch_size, 1}, DataType::Int(64), uniform_sample->device);
+  Tensor new_array =
+      Tensor::Empty({batch_size, 1}, DLDataType{kDLInt, 64, 1}, uniform_sample->device);
   int64_t* parray = static_cast<int64_t*>(new_array->data);
   for (int64_t i = 0; i < batch_size; ++i) {
     float cum_sum_prob = 0.0f;
@@ -569,8 +570,9 @@ TVM_FFI_STATIC_INIT_BLOCK() {
 void ApplyRepetitionPenalty(Tensor logits, Tensor token_ids, double penalty) {
   TVM_FFI_ICHECK(logits.IsContiguous());
   TVM_FFI_ICHECK(token_ids.IsContiguous());
-  TVM_FFI_ICHECK(logits.DataType() == DataType::Float(32)) << "Logits data type is not float32!";
-  TVM_FFI_ICHECK(token_ids.DataType() == DataType::Int(32)) << "token ids must be int32!";
+  TVM_FFI_ICHECK((logits.DataType() == DLDataType{kDLFloat, 32, 1}))
+      << "Logits data type is not float32!";
+  TVM_FFI_ICHECK((token_ids.DataType() == DLDataType{kDLInt, 32, 1})) << "token ids must be int32!";
   TVM_FFI_ICHECK(logits->device.device_type == kDLCPU) << "logits device must be CPU!";
   TVM_FFI_ICHECK(token_ids->device.device_type == kDLCPU) << "token_ids device must be CPU!";
   float* logits_raw_data = static_cast<float*>(logits->data);
@@ -606,9 +608,11 @@ void ApplyPresenceAndFrequencyPenalty(Tensor logits, Tensor token_ids, Tensor to
   TVM_FFI_ICHECK(logits.IsContiguous());
   TVM_FFI_ICHECK(token_ids.IsContiguous());
   TVM_FFI_ICHECK(token_freqs.IsContiguous());
-  TVM_FFI_ICHECK(logits.DataType() == DataType::Float(32)) << "Logits data type is not float32!";
-  TVM_FFI_ICHECK(token_ids.DataType() == DataType::Int(32)) << "token ids must be int32!";
-  TVM_FFI_ICHECK(token_freqs.DataType() == DataType::Int(32)) << "token freqs must be int32!";
+  TVM_FFI_ICHECK((logits.DataType() == DLDataType{kDLFloat, 32, 1}))
+      << "Logits data type is not float32!";
+  TVM_FFI_ICHECK((token_ids.DataType() == DLDataType{kDLInt, 32, 1})) << "token ids must be int32!";
+  TVM_FFI_ICHECK((token_freqs.DataType() == DLDataType{kDLInt, 32, 1}))
+      << "token freqs must be int32!";
   TVM_FFI_ICHECK(logits->device.device_type == kDLCPU) << "logits device must be CPU!";
   TVM_FFI_ICHECK(token_ids->device.device_type == kDLCPU) << "token_ids device must be CPU!";
   TVM_FFI_ICHECK(token_freqs->device.device_type == kDLCPU) << "token_ids device must be CPU!";
@@ -633,7 +637,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
 // This is an inplace operation.
 void ApplySoftmaxWithTemperature(Tensor logits, double temperature) {
   TVM_FFI_ICHECK(logits.IsContiguous());
-  TVM_FFI_ICHECK(logits.DataType() == DataType::Float(32)) << "Logits data type is not float32!";
+  TVM_FFI_ICHECK((logits.DataType() == DLDataType{kDLFloat, 32, 1}))
+      << "Logits data type is not float32!";
   TVM_FFI_ICHECK(logits->device.device_type == kDLCPU) << "logits device must be CPU!";
   int vocab_size = logits->shape[logits->ndim - 1];
   float* logits_raw_data = static_cast<float*>(logits->data);

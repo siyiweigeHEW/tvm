@@ -47,12 +47,12 @@ class TargetInternal {
   static void EnterScope(Target target) { target.EnterWithScope(); }
   static void ExitScope(Target target) { target.ExitWithScope(); }
   static ffi::Map<ffi::String, ffi::Any> ToConfig(Target target) { return target->ToConfig(); }
-  static ObjectPtr<TargetNode> FromString(const ffi::String& tag_or_config_or_target_str);
-  static ObjectPtr<TargetNode> FromConfigString(const ffi::String& config_str);
-  static ObjectPtr<TargetNode> FromConfig(ffi::Map<ffi::String, ffi::Any> config);
+  static ffi::ObjectPtr<TargetNode> FromString(const ffi::String& tag_or_config_or_target_str);
+  static ffi::ObjectPtr<TargetNode> FromConfigString(const ffi::String& config_str);
+  static ffi::ObjectPtr<TargetNode> FromConfig(ffi::Map<ffi::String, ffi::Any> config);
   static void ConstructorDispatcher(ffi::PackedArgs args, ffi::Any* rv);
   static Target WithHost(const Target& target, const Target& target_host) {
-    ObjectPtr<TargetNode> n = ffi::make_object<TargetNode>(*target.get());
+    ffi::ObjectPtr<TargetNode> n = ffi::make_object<TargetNode>(*target.get());
     n->host = target_host;
     return (Target)n;
   }
@@ -92,7 +92,7 @@ static std::vector<ffi::String> DeduplicateKeys(const std::vector<ffi::String>& 
 
 static TargetKind GetTargetKind(const ffi::String& name) {
   ffi::Optional<TargetKind> kind = TargetKind::Get(name);
-  if (!kind.defined()) {
+  if (!kind.has_value()) {
     TVM_FFI_THROW(TypeError) << "Target kind \"" + name + "\" is not defined";
   }
   return kind.value();
@@ -108,36 +108,36 @@ const std::string& TargetNode::str() const {
 /**********  Small member methods  **********/
 
 Target::Target(const ffi::String& tag_or_config_or_target_str) {
-  ObjectPtr<Object> target;
+  ffi::ObjectPtr<ffi::Object> target;
   try {
     target = TargetInternal::FromString(tag_or_config_or_target_str);
-  } catch (const Error& e) {
+  } catch (const ffi::Error& e) {
     std::ostringstream os;
     os << ". Target creation from string failed: " << tag_or_config_or_target_str;
-    throw Error("ValueError", e.message() + os.str(), e.backtrace());
+    throw ffi::Error("ValueError", e.message() + os.str(), e.backtrace());
   }
   data_ = std::move(target);
 }
 
 Target::Target(const ffi::Map<ffi::String, ffi::Any>& config) {
-  ObjectPtr<Object> target;
+  ffi::ObjectPtr<ffi::Object> target;
   try {
     target = TargetInternal::FromConfig(config);
-  } catch (const Error& e) {
+  } catch (const ffi::Error& e) {
     std::ostringstream os;
     os << ". Target creation from config dict failed: " << config;
-    throw Error("ValueError", std::string(e.message()) + os.str(), e.backtrace());
+    throw ffi::Error("ValueError", std::string(e.message()) + os.str(), e.backtrace());
   }
   data_ = std::move(target);
 }
 
 Target::Target(Target target, Target host) {
-  ObjectPtr<TargetNode> n = ffi::make_object<TargetNode>(*target.get());
+  ffi::ObjectPtr<TargetNode> n = ffi::make_object<TargetNode>(*target.get());
   n->host = std::move(host);
   data_ = std::move(n);
 }
 
-Target::Target(TargetKind kind, ffi::Optional<ObjectRef> host, ffi::String tag,
+Target::Target(TargetKind kind, ffi::Optional<ffi::ObjectRef> host, ffi::String tag,
                ffi::Array<ffi::String> keys, ffi::Map<ffi::String, ffi::Any> attrs) {
   auto data = ffi::make_object<TargetNode>();
   data->kind = std::move(kind);
@@ -154,7 +154,7 @@ ffi::Map<ffi::String, ffi::Any> TargetNode::ToConfig() const {
       {"tag", this->tag},
       {"keys", this->keys},
   };
-  if (this->host.defined()) {
+  if (this->host.has_value()) {
     result.Set("host", this->GetHost().value_or(Target())->ToConfig());
   }
   for (const auto& kv : attrs) {
@@ -176,8 +176,8 @@ Target Target::WithoutHost() const {
 }
 
 int TargetNode::GetTargetDeviceType() const {
-  if (ffi::Optional<Integer> device_type = GetAttr<Integer>("target_device_type")) {
-    return Downcast<Integer>(device_type)->value;
+  if (ffi::Optional<int64_t> device_type = GetAttr<int64_t>("target_device_type")) {
+    return static_cast<int>(device_type.value());
   }
   return kind->default_device_type;
 }
@@ -251,7 +251,8 @@ void TargetInternal::ConstructorDispatcher(ffi::PackedArgs args, ffi::Any* rv) {
                             << args.size();
 }
 
-ObjectPtr<TargetNode> TargetInternal::FromString(const ffi::String& tag_or_config_or_target_str) {
+ffi::ObjectPtr<TargetNode> TargetInternal::FromString(
+    const ffi::String& tag_or_config_or_target_str) {
   if (ffi::Optional<Target> target = TargetTag::Get(tag_or_config_or_target_str)) {
     Target value = target.value();
     return ffi::details::ObjectUnsafe::ObjectPtrFromObjectRef<TargetNode>(value);
@@ -270,7 +271,7 @@ ObjectPtr<TargetNode> TargetInternal::FromString(const ffi::String& tag_or_confi
   return TargetInternal::FromConfig(ffi::Map<ffi::String, ffi::Any>{{"kind", ffi::String(s)}});
 }
 
-ObjectPtr<TargetNode> TargetInternal::FromConfigString(const ffi::String& config_str) {
+ffi::ObjectPtr<TargetNode> TargetInternal::FromConfigString(const ffi::String& config_str) {
   ffi::String error_msg;
   ffi::json::Value parsed = ffi::json::Parse(config_str, &error_msg);
   if (error_msg.size() > 0) {
@@ -283,14 +284,14 @@ ObjectPtr<TargetNode> TargetInternal::FromConfigString(const ffi::String& config
   return TargetInternal::FromConfig(config.value());
 }
 
-ObjectPtr<TargetNode> TargetInternal::FromConfig(ffi::Map<ffi::String, ffi::Any> config) {
+ffi::ObjectPtr<TargetNode> TargetInternal::FromConfig(ffi::Map<ffi::String, ffi::Any> config) {
   const ffi::String kKind = "kind";
   const ffi::String kTag = "tag";
   const ffi::String kKeys = "keys";
   const ffi::String kDeviceName = "device";
   const ffi::String kHost = "host";
   const ffi::String kFromDevice = "from_device";
-  ObjectPtr<TargetNode> target = ffi::make_object<TargetNode>();
+  ffi::ObjectPtr<TargetNode> target = ffi::make_object<TargetNode>();
 
   // Step 0: If "tag" is present without "kind", look up the tag config and merge overrides on top
   if (!config.count(kKind) && config.count(kTag)) {
@@ -375,7 +376,7 @@ ObjectPtr<TargetNode> TargetInternal::FromConfig(ffi::Map<ffi::String, ffi::Any>
     std::vector<ffi::String> keys;
     bool has_keys = resolved.count(kKeys);
     if (has_keys) {
-      ffi::Array<ffi::String> cfg_keys = Downcast<ffi::Array<ffi::String>>(resolved.at(kKeys));
+      ffi::Array<ffi::String> cfg_keys = resolved.at(kKeys).as_or_throw<ffi::Array<ffi::String>>();
       for (const ffi::String& key : cfg_keys) {
         keys.push_back(key);
       }
@@ -488,9 +489,6 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       [](Target target, ffi::Function) -> ffi::String { return target->str(); });
 }
 
-TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
-    .set_dispatch<TargetNode>([](const ObjectRef& obj, ReprPrinter* p) {
-      p->stream << Downcast<Target>(obj)->str();
-    });
+// AC: kRepr already registered above at refl::TypeAttrDef<TargetNode>().def(kRepr, ...)
 
 }  // namespace tvm

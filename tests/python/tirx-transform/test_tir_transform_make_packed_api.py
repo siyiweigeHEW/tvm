@@ -46,7 +46,7 @@ def _find_compute_scope(func):
 def test_no_op_when_global_symbol_is_absent(use_global_symbol):
     func_attr = {"target": tvm.target.Target("llvm", host="llvm")}
 
-    @T.prim_func(private=True)
+    @T.prim_func(private=True, s_tir=True)
     def before():
         T.func_attr(func_attr)
         T.evaluate(0)
@@ -73,7 +73,7 @@ def test_target_host_removed():
 
     @I.ir_module
     class before:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(A: T.Buffer(1, "float32")):
             T.func_attr({"global_symbol": "main", "target": T.target("cuda", host=host)})
             T.evaluate(0)
@@ -94,13 +94,13 @@ def test_internal_subroutine_call():
 
     @I.ir_module
     class before:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(A: T.Buffer(1, "float32")):
             T.func_attr({"target": T.target("llvm", host="llvm")})
             before.subroutine(A.data)
 
         # this test fails if it's made public
-        @T.prim_func(private=True)
+        @T.prim_func(private=True, s_tir=True)
         def subroutine(A_data: T.handle("float32")):
             T.func_attr({"target": T.target("llvm")})
             T.evaluate(A_data)
@@ -127,12 +127,12 @@ def test_subroutine_call_to_externally_visible_subroutine():
 
     @I.ir_module
     class before:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(A: T.Buffer(1, "float32")):
             T.func_attr({"global_symbol": "main", "target": T.target("llvm", host="llvm")})
             before.subroutine(A.data)
 
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def subroutine(A_data: T.handle("float32")):
             T.func_attr({"global_symbol": "subroutine", "target": T.target("llvm", host="llvm")})
             T.evaluate(A_data)
@@ -159,14 +159,14 @@ def test_zero_arg_function():
 
     @I.ir_module
     class Before:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def func_without_arg() -> T.int64:
             T.func_attr({"target": T.target("llvm", host="llvm")})
             return T.int64(42)
 
     @I.ir_module
     class Expected:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def func_without_arg(
             self_handle: T.handle,
             args: T.handle,
@@ -195,12 +195,49 @@ def test_zero_arg_function():
     tvm.ir.assert_structural_equal(After, Expected)
 
 
+def test_pointer_return():
+    """Pointer returns are stored as an opaque pointer in TVMFFIAny."""
+
+    @I.ir_module
+    class Before:
+        @T.prim_func(s_tir=True)
+        def main(arg: T.handle) -> T.handle:
+            T.func_attr({"target": T.target("llvm", host="llvm")})
+            return arg
+
+    after = tvm.tirx.transform.MakePackedAPI()(Before)["main"]
+    return_type_indices = []
+
+    def collect(node):
+        if not isinstance(node, tvm.ir.Call) or node.op.name != "tirx.tvm_struct_set":
+            return
+        field = node.args[2]
+        if isinstance(field, tvm.tirx.IntImm) and int(field) == 13:
+            return_type_indices.append(int(node.args[3]))
+
+    tvm.tirx.stmt_functor.post_order_visit(after.body, collect)
+    assert 4 in return_type_indices  # ffi::TypeIndex::kTVMFFIOpaquePtr
+
+
+def test_return_from_parallel_scope_is_rejected():
+    """A parallel loop cannot return from its enclosing function."""
+
+    i = tirx.Var("i", "int32")
+    body = tirx.For(i, 0, 1, tirx.ForKind.PARALLEL, tirx.Return(i))
+    func = tirx.PrimFunc([], body, tvm.ir.PrimType("int32"))
+    func = func.with_attr("global_symbol", "main")
+    func = func.with_attr("target", tvm.target.Target("llvm", host="llvm"))
+
+    with pytest.raises(tvm.error.InternalError, match="Return cannot be used in parallel scope"):
+        tvm.tirx.transform.MakePackedAPI()(tvm.IRModule({"main": func}))
+
+
 def test_int_parameter():
     """Int parameter emits type check accepting int or bool."""
 
     @I.ir_module
     class Before:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(arg: T.int32) -> T.int32:
             T.func_attr({"target": T.target("llvm", host="llvm")})
             if arg > 0:
@@ -210,7 +247,7 @@ def test_int_parameter():
 
     @I.ir_module
     class Expected:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(
             self_handle: T.handle,
             args: T.handle,
@@ -232,7 +269,7 @@ def test_int_parameter():
                 "TypeError",
                 ["args pointer is NULL", " when calling:\n  `", "main(arg: int32)", "`"],
             )
-            arg_type_index: T.int32 = T.tvm_struct_get(args, 0, 13, "int32")
+            arg_type_index: T.let[T.int32] = T.tvm_struct_get(args, 0, 13, "int32")
             assert arg_type_index == 1 or arg_type_index == 2, (
                 "TypeError",
                 [
@@ -244,7 +281,7 @@ def test_int_parameter():
                     "int",
                 ],
             )
-            arg: T.int32 = T.Cast("int32", T.tvm_struct_get(args, 0, 15, "int64"))
+            arg: T.let[T.int32] = T.Cast("int32", T.tvm_struct_get(args, 0, 15, "int64"))
             with T.attr(0, "compute_scope", "main_compute_"):
                 if arg > 0:
                     T.tvm_struct_set(result, 0, 13, 1)
@@ -267,7 +304,7 @@ def test_bool_parameter():
 
     @I.ir_module
     class Before:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(arg: T.bool) -> T.int32:
             T.func_attr({"target": T.target("llvm", host="llvm")})
             if arg:
@@ -277,7 +314,7 @@ def test_bool_parameter():
 
     @I.ir_module
     class Expected:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(
             self_handle: T.handle,
             args: T.handle,
@@ -299,7 +336,7 @@ def test_bool_parameter():
                 "TypeError",
                 ["args pointer is NULL", " when calling:\n  `", "main(arg: bool)", "`"],
             )
-            arg_type_index: T.int32 = T.tvm_struct_get(args, 0, 13, "int32")
+            arg_type_index: T.let[T.int32] = T.tvm_struct_get(args, 0, 13, "int32")
             assert arg_type_index == 2 or arg_type_index == 1, (
                 "TypeError",
                 [
@@ -311,7 +348,7 @@ def test_bool_parameter():
                     "boolean",
                 ],
             )
-            arg: T.bool = T.Cast("bool", T.tvm_struct_get(args, 0, 15, "int64"))
+            arg: T.let[T.bool] = T.Cast("bool", T.tvm_struct_get(args, 0, 15, "int64"))
             with T.attr(0, "compute_scope", "main_compute_"):
                 if arg:
                     T.tvm_struct_set(result, 0, 13, 1)
@@ -334,7 +371,7 @@ def test_float_parameter():
 
     @I.ir_module
     class Before:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(arg: T.float32) -> T.int32:
             T.func_attr({"target": T.target("llvm", host="llvm")})
             if arg > T.float32(0):
@@ -344,7 +381,7 @@ def test_float_parameter():
 
     @I.ir_module
     class Expected:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(
             self_handle: T.handle,
             args: T.handle,
@@ -366,7 +403,7 @@ def test_float_parameter():
                 "TypeError",
                 ["args pointer is NULL", " when calling:\n  `", "main(arg: float32)", "`"],
             )
-            arg_type_index: T.int32 = T.tvm_struct_get(args, 0, 13, "int32")
+            arg_type_index: T.let[T.int32] = T.tvm_struct_get(args, 0, 13, "int32")
             assert arg_type_index == 3 or arg_type_index == 1 or arg_type_index == 2, (
                 "TypeError",
                 [
@@ -378,7 +415,7 @@ def test_float_parameter():
                     "float",
                 ],
             )
-            arg: T.float32 = T.Select(
+            arg: T.let[T.float32] = T.Select(
                 arg_type_index == 3,
                 T.Cast("float32", T.tvm_struct_get(args, 0, 15, "float64")),
                 T.Cast("float32", T.tvm_struct_get(args, 0, 15, "int64")),
@@ -411,7 +448,7 @@ def test_forward_reference_symbolic_variable():
 
     @I.ir_module
     class Before:
-        @T.prim_func
+        @T.prim_func(s_tir=True)
         def main(a: T.handle, b: T.handle):
             T.func_attr({"target": T.target("llvm", host="llvm")})
             batch_size = T.int64()
@@ -423,6 +460,31 @@ def test_forward_reference_symbolic_variable():
     # Should not raise "variable batch_size has been used before definition"
     After = tvm.tirx.transform.MakePackedAPI()(Before)
     assert len(After["main"].params) == 4
+
+
+def test_buffer_alignment_attached_to_buffer_var():
+    """Packed ABI alignment metadata remains keyed by the logical BufferVar."""
+
+    @I.ir_module
+    class Before:
+        @T.prim_func(s_tir=True)
+        def main(A: T.Buffer((16,), "float32", align=64)):
+            T.func_attr({"global_symbol": "main", "target": T.target("llvm", host="llvm")})
+            T.evaluate(A[0])
+
+    after = tvm.tirx.transform.MakePackedAPI()(Before)["main"]
+    alignment_nodes = []
+    declared_buffers = []
+
+    def collect(node):
+        if isinstance(node, tirx.AttrStmt) and node.attr_key == "storage_alignment":
+            alignment_nodes.append(node.node)
+        if isinstance(node, tirx.DeclBuffer):
+            declared_buffers.append(node.buffer)
+
+    tirx.stmt_functor.post_order_visit(after.body, collect)
+    assert len(alignment_nodes) == 1
+    assert any(alignment_nodes[0].same_as(buffer) for buffer in declared_buffers)
 
 
 if __name__ == "__main__":

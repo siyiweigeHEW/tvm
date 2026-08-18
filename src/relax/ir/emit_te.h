@@ -43,8 +43,7 @@ class RXPlaceholderOpNode : public te::PlaceholderOpNode {
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
-    refl::ObjectDef<RXPlaceholderOpNode>()
-        .def_ro("value", &RXPlaceholderOpNode::value);
+    refl::ObjectDef<RXPlaceholderOpNode>().def_ro("value", &RXPlaceholderOpNode::value);
   }
 
   // FFI system configuration for structural equality and hashing
@@ -57,7 +56,7 @@ class RXPlaceholderOpNode : public te::PlaceholderOpNode {
 /*!
  * \brief Create a TE tensor from relax expression, with TIR variables in the
  * tensor shape substituted by the given mapping.
- * \param value The relax expression, which is required to have TensorStructInfo.
+ * \param value The relax expression, which is required to have TensorType.
  * \param tir_var_map The mapping to substitute the TIR variables appeared in the
  * shape of the input Expr.
  * \param name The name of the created tensor.

@@ -19,9 +19,9 @@
 #ifndef TVM_S_TIR_SCHEDULE_SCHEDULE_H_
 #define TVM_S_TIR_SCHEDULE_SCHEDULE_H_
 
+#include <tvm/s_tir/random_engine.h>
 #include <tvm/s_tir/schedule/state.h>
 #include <tvm/s_tir/schedule/trace.h>
-#include <tvm/support/random_engine.h>
 #include <tvm/tirx/index_map.h>
 
 namespace tvm {
@@ -49,47 +49,47 @@ enum class BufferIndexType : int32_t {
 /**************** Random variable: SBlockRV ****************/
 
 /*! \brief A random variable that evaluates to a TensorIR block */
-class SBlockRVNode : public runtime::Object {
+class SBlockRVNode : public ffi::Object {
  public:
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<SBlockRVNode>();
   }
-  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("s_tir.SBlockRV", SBlockRVNode, runtime::Object);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("s_tir.SBlockRV", SBlockRVNode, ffi::Object);
 };
 
 /*!
  * \brief Managed reference to SBlockRVNode
  * \sa SBlockRVNode
  */
-class SBlockRV : public runtime::ObjectRef {
+class SBlockRV : public ffi::ObjectRef {
  public:
   /*! \brief Constructor */
   TVM_DLL SBlockRV();
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(SBlockRV, runtime::ObjectRef, SBlockRVNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(SBlockRV, ffi::ObjectRef, SBlockRVNode);
 };
 
 /**************** Random variable: LoopRV ****************/
 
 /*! \brief A random variable that evaluates to a TensorIR for loop */
-class LoopRVNode : public runtime::Object {
+class LoopRVNode : public ffi::Object {
  public:
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<LoopRVNode>();
   }
-  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("s_tir.LoopRV", LoopRVNode, runtime::Object);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("s_tir.LoopRV", LoopRVNode, ffi::Object);
 };
 
 /*!
  * \brief Managed reference to LoopRVNode
  * \sa LoopRVNode
  */
-class LoopRV : public runtime::ObjectRef {
+class LoopRV : public ffi::ObjectRef {
  public:
   /*! \brief Constructor */
   TVM_DLL LoopRV();
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(LoopRV, runtime::ObjectRef, LoopRVNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(LoopRV, ffi::ObjectRef, LoopRVNode);
 };
 
 /**************** Random variable: ExprRV ****************/
@@ -97,21 +97,21 @@ class LoopRV : public runtime::ObjectRef {
 /*! \brief An expr random variable */
 using ExprRV = PrimExpr;
 
-using ExprRVNode = PrimExprNode;
+using ExprRVNode = ExprNode;
 
 /**************** The Schedule class ****************/
 
 class Schedule;
 
 /*! \brief The user-facing schedule class */
-class ScheduleNode : public runtime::Object {
+class ScheduleNode : public ffi::Object {
   friend class Schedule;
 
  public:
   virtual ~ScheduleNode() = default;
 
   static constexpr const bool _type_mutable = true;
-  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("s_tir.Schedule", ScheduleNode, runtime::Object);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("s_tir.Schedule", ScheduleNode, ffi::Object);
 
  public:
   /*! \brief Get the IRModule associated with this schedule. */
@@ -150,9 +150,9 @@ class ScheduleNode : public runtime::Object {
    * \brief Seed the randomness
    * \param seed The new random seed, -1 if use device random, otherwise non-negative
    */
-  virtual void Seed(support::LinearCongruentialEngine::TRandState seed) = 0;
+  virtual void Seed(LinearCongruentialEngine::TRandState seed) = 0;
   /*! \brief Fork the random state */
-  virtual support::LinearCongruentialEngine::TRandState ForkSeed() = 0;
+  virtual LinearCongruentialEngine::TRandState ForkSeed() = 0;
 
  public:
   /******** Lookup/Remove random variables ********/
@@ -229,9 +229,9 @@ class ScheduleNode : public runtime::Object {
    * \param decision The sampling decision
    * \return The random variable sampled from candidates
    */
-  virtual ExprRV SampleCategorical(const ffi::Array<Integer>& candidates,
+  virtual ExprRV SampleCategorical(const ffi::Array<int64_t>& candidates,
                                    const ffi::Array<FloatImm>& probs,
-                                   ffi::Optional<Integer> decision = std::nullopt) = 0;
+                                   ffi::Optional<int64_t> decision = std::nullopt) = 0;
   /*!
    * \brief Sample the factors to perfect tile a specific loop
    * \param loop_rv The loop to be tiled
@@ -242,7 +242,7 @@ class ScheduleNode : public runtime::Object {
    */
   virtual ffi::Array<ExprRV> SamplePerfectTile(
       const LoopRV& loop_rv, int n, int max_innermost_factor,
-      ffi::Optional<ffi::Array<Integer>> decision = std::nullopt) = 0;
+      ffi::Optional<ffi::Array<int64_t>> decision = std::nullopt) = 0;
   /*!
    * \brief Sample the factors to a partitioned tile for a specific loop
    *
@@ -260,7 +260,7 @@ class ScheduleNode : public runtime::Object {
    */
   virtual ffi::Array<ExprRV> SamplePartitionedTile(
       const LoopRV& loop_rv, int n, int partition_pos, int innerpart_factor,
-      ffi::Optional<ffi::Array<Integer>> decision = std::nullopt) = 0;
+      ffi::Optional<ffi::Array<int64_t>> decision = std::nullopt) = 0;
   /*!
    * \brief Sample a compute-at location of the given block
    * \param block_rv The block whose compute-at location is to be sampled
@@ -268,7 +268,7 @@ class ScheduleNode : public runtime::Object {
    * \return The sampled loop where the input block is to be computed at
    */
   virtual LoopRV SampleComputeLocation(const SBlockRV& block_rv,
-                                       ffi::Optional<Integer> decision = std::nullopt) = 0;
+                                       ffi::Optional<int64_t> decision = std::nullopt) = 0;
 
   /******** Schedule: Get blocks & loops ********/
   /*!
@@ -397,7 +397,7 @@ class ScheduleNode : public runtime::Object {
    * \param new_order The new itervar order.
    */
   virtual void ReorderBlockIterVar(const SBlockRV& block_rv,
-                                   const ffi::Array<Integer> new_order) = 0;
+                                   const ffi::Array<int64_t> new_order) = 0;
   /*!
    * \brief Create a new unit loop on top of the specific block.
    * \param block_rv The block above which the new loop is created
@@ -796,18 +796,6 @@ class ScheduleNode : public runtime::Object {
    */
   virtual void TransformBlockLayout(const SBlockRV& block_rv, const IndexMap& index_map) = 0;
 
-  /*!
-   * \brief Set the axis separator of a buffer, where the buffer is specified by a block and a read
-   * or write index
-   * \param block_rv The block that accesses the target buffer.
-   * \param buffer_index The index of the buffer in block's read or write region.
-   * \param buffer_index_type The type of the buffer index, kRead or kWrite.
-   * \param axis_separators The axis separator of the buffer
-   */
-  virtual void SetAxisSeparator(const SBlockRV& block_rv, int buffer_index,
-                                BufferIndexType buffer_index_type,
-                                const ffi::Array<IntImm>& axis_separators) = 0;
-
   /******** Schedule: Padding ********/
   /*!
    * \brief Decompose a padding block into a block filling const pad values and a block
@@ -835,7 +823,7 @@ class ScheduleNode : public runtime::Object {
    * The size of the producer buffers are infered from the padding size of the Einsum computation.
    * The producer buffers are padded by the initial value of the corresponding reduction.
    */
-  virtual void PadEinsum(const SBlockRV& block_rv, const ffi::Array<Integer>& padding) = 0;
+  virtual void PadEinsum(const SBlockRV& block_rv, const ffi::Array<int64_t>& padding) = 0;
 
   /******** Schedule: Buffer transformation ********/
   /*!
@@ -894,7 +882,7 @@ class ScheduleNode : public runtime::Object {
  *
  * \sa ScheduleNode
  */
-class Schedule : public runtime::ObjectRef {
+class Schedule : public ffi::ObjectRef {
  public:
   /*!
    * \brief Construct a concrete TensorIR schedule from an IRModule
@@ -909,7 +897,7 @@ class Schedule : public runtime::ObjectRef {
    * \sa ScheduleDebugMask
    * \note The checks performed includes: 1) VerifySRefTree 2) VerifyCachedFlags
    */
-  TVM_DLL static Schedule Concrete(IRModule mod, support::LinearCongruentialEngine::TRandState seed,
+  TVM_DLL static Schedule Concrete(IRModule mod, LinearCongruentialEngine::TRandState seed,
                                    int debug_mask, ScheduleErrorRenderLevel error_render_level,
                                    bool enable_check = true);
   /*!
@@ -926,10 +914,10 @@ class Schedule : public runtime::ObjectRef {
    * 1) VerifySRefTree
    * 2) VerifyCachedFlags
    */
-  TVM_DLL static Schedule Traced(IRModule mod, support::LinearCongruentialEngine::TRandState seed,
+  TVM_DLL static Schedule Traced(IRModule mod, LinearCongruentialEngine::TRandState seed,
                                  int debug_mask, ScheduleErrorRenderLevel error_render_level,
                                  bool enable_check = true);
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Schedule, runtime::ObjectRef, ScheduleNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Schedule, ffi::ObjectRef, ScheduleNode);
 };
 
 }  // namespace s_tir

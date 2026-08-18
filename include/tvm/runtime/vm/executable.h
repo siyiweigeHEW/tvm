@@ -23,9 +23,8 @@
 #ifndef TVM_RUNTIME_VM_EXECUTABLE_H_
 #define TVM_RUNTIME_VM_EXECUTABLE_H_
 
+#include <tvm/ffi/extra/module.h>
 #include <tvm/ffi/function.h>
-#include <tvm/runtime/module.h>
-#include <tvm/runtime/object.h>
 #include <tvm/support/io.h>
 #include <tvm/support/serializer.h>
 
@@ -87,7 +86,7 @@ struct VMFuncInfo {
  * The executable contains information (e.g. data in different memory regions)
  * to run in a virtual machine.
  */
-class VMExecutable : public ffi::ModuleObj {
+class TVM_RUNTIME_DLL VMExecutable : public ffi::ModuleObj {
  public:
   /*! \brief Get the property of the runtime module .*/
   int GetPropertyMask() const final { return ffi::Module::kBinarySerializable; };
@@ -140,8 +139,6 @@ class VMExecutable : public ffi::ModuleObj {
   void WriteToFile(const ffi::String& file_name, const ffi::String& format) const final;
   /*! \brief Create a Relax virtual machine and load `this` as the executable. */
   ffi::Module VMLoadExecutable() const;
-  /*! \brief Create a Relax virtual machine with profiler and load `this` as the executable. */
-  ffi::Module VMProfilerLoadExecutable() const;
   /*! \brief Check if the VMExecutable contains a specific function. */
   bool HasFunction(const ffi::String& name) const;
   /*!
@@ -166,14 +163,14 @@ class VMExecutable : public ffi::ModuleObj {
 
   virtual ~VMExecutable() {}
 
-  TVM_MODULE_VTABLE_BEGIN("relax.VMExecutable");
-  TVM_MODULE_VTABLE_ENTRY("stats", &VMExecutable::Stats);
-  TVM_MODULE_VTABLE_ENTRY("as_text", &VMExecutable::AsText);
-  TVM_MODULE_VTABLE_ENTRY("as_python", &VMExecutable::AsPython);
-  TVM_MODULE_VTABLE_ENTRY("vm_load_executable", &VMExecutable::VMLoadExecutable);
-  TVM_MODULE_VTABLE_ENTRY("vm_profiler_load_executable", &VMExecutable::VMProfilerLoadExecutable);
-  TVM_MODULE_VTABLE_ENTRY("has_function", &VMExecutable::HasFunction);
-  TVM_MODULE_VTABLE_END();
+  /*! \brief Module type key. */
+  const char* kind() const final;
+  /*!
+   * \brief Look up an exported function by name.
+   * \param name The function name.
+   * \return The function if found, otherwise std::nullopt.
+   */
+  ffi::Optional<ffi::Function> GetFunction(const ffi::String& name) override;
 
  private:
   /*!

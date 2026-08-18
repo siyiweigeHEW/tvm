@@ -21,12 +21,13 @@
  * \brief TIR statements.
  */
 // Acknowledgement: Many low-level stmts originate from Halide.
-#ifndef TVM_TIR_STMT_H_
-#define TVM_TIR_STMT_H_
+#ifndef TVM_TIRX_STMT_H_
+#define TVM_TIRX_STMT_H_
 
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/node/script_printer.h>
+#include <tvm/tirx/exec_scope.h>
 #include <tvm/tirx/expr.h>
+#include <tvm/tirx/layout.h>
 
 #include <optional>
 #include <string>
@@ -37,7 +38,7 @@ namespace tvm {
 namespace tirx {
 
 /*! \brief Base node of all statements. */
-class StmtNode : public Object {
+class StmtNode : public ffi::Object {
  public:
   /*!
    * \brief Span that points to the original source code.
@@ -50,21 +51,20 @@ class StmtNode : public Object {
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
-    refl::ObjectDef<StmtNode>().def_ro("span", &StmtNode::span);
+    refl::ObjectDef<StmtNode>().def_ro("span", &StmtNode::span,
+                                       refl::AttachFieldFlag::SEqHashIgnore());
   }
-
-  TVM_OBJECT_ENABLE_SCRIPT_PRINTER();
 
   static constexpr TVMFFISEqHashKind _type_s_eq_hash_kind = kTVMFFISEqHashKindTreeNode;
 
   static constexpr const uint32_t _type_child_slots = 15;
-  TVM_FFI_DECLARE_OBJECT_INFO("tirx.Stmt", StmtNode, Object);
+  TVM_FFI_DECLARE_OBJECT_INFO("tirx.Stmt", StmtNode, ffi::Object);
 };
 
 /*! \brief Container of all statements */
-class Stmt : public ObjectRef {
+class Stmt : public ffi::ObjectRef {
  public:
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Stmt, ObjectRef, StmtNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Stmt, ffi::ObjectRef, StmtNode);
 };
 
 /*!
@@ -79,12 +79,13 @@ class BindNode : public StmtNode {
   /*! \brief The variable being bound. */
   Var var;
   /*! \brief The value to bind to the variable. */
-  PrimExpr value;
+  Expr value;
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<BindNode>()
-        .def_ro("var", &BindNode::var, refl::AttachFieldFlag::SEqHashDef())
+        // TODO(tqchen): use SEqHashDefNonRecursive after the next pypi tvm-ffi release
+        .def_ro("var", &BindNode::var, refl::AttachFieldFlag::SEqHashDefRecursive())
         .def_ro("value", &BindNode::value);
   }
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tirx.Bind", BindNode, StmtNode);
@@ -96,7 +97,7 @@ class BindNode : public StmtNode {
  */
 class Bind : public Stmt {
  public:
-  TVM_DLL Bind(Var var, PrimExpr value, Span span = Span());
+  TVM_DLL Bind(Var var, Expr value, Span span = Span());
 
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Bind, Stmt, BindNode);
   TVM_DEFINE_OBJECT_REF_COW_METHOD(BindNode);
@@ -201,7 +202,7 @@ class AssertStmt : public Stmt {
 class BufferStoreNode : public StmtNode {
  public:
   /*! \brief The buffer variable. */
-  Buffer buffer;
+  BufferVar buffer;
   /*! \brief The value to be stored. */
   PrimExpr value;
   /*! \brief The indices location to be stored. */
@@ -212,7 +213,7 @@ class BufferStoreNode : public StmtNode {
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<BufferStoreNode>()
-        .def_ro("buffer", &BufferStoreNode::buffer)
+        .def_ro("buffer", &BufferStoreNode::buffer, refl::AttachFieldFlag::SEqHashDefRecursive())
         .def_ro("value", &BufferStoreNode::value)
         .def_ro("indices", &BufferStoreNode::indices)
         .def_ro("predicate", &BufferStoreNode::predicate);
@@ -226,7 +227,7 @@ class BufferStoreNode : public StmtNode {
  */
 class BufferStore : public Stmt {
  public:
-  TVM_DLL explicit BufferStore(Buffer buffer, PrimExpr value, ffi::Array<PrimExpr> indices,
+  TVM_DLL explicit BufferStore(BufferVar buffer, PrimExpr value, ffi::Array<PrimExpr> indices,
                                ffi::Optional<PrimExpr> predicate = std::nullopt,
                                Span span = Span());
 
@@ -238,11 +239,15 @@ class BufferStore : public Stmt {
 class DeclBufferNode : public StmtNode {
  public:
   /*! \brief The buffer being declared */
-  Buffer buffer;
+  BufferVar buffer;
+  /*! \brief Physical pointer expression backing the declaration. */
+  Expr data;
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
-    refl::ObjectDef<DeclBufferNode>().def_ro("buffer", &DeclBufferNode::buffer);
+    refl::ObjectDef<DeclBufferNode>()
+        .def_ro("buffer", &DeclBufferNode::buffer, refl::AttachFieldFlag::SEqHashDefRecursive())
+        .def_ro("data", &DeclBufferNode::data);
   }
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tirx.DeclBuffer", DeclBufferNode, StmtNode);
 };
@@ -250,7 +255,7 @@ class DeclBufferNode : public StmtNode {
 /*! \brief Managed reference to DeclBufferNode */
 class DeclBuffer : public Stmt {
  public:
-  TVM_DLL DeclBuffer(Buffer buffer, Span span = Span());
+  TVM_DLL DeclBuffer(BufferVar buffer, Expr data, Span span = Span());
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(DeclBuffer, Stmt, DeclBufferNode);
   TVM_DEFINE_OBJECT_REF_COW_METHOD(DeclBufferNode);
 };
@@ -259,7 +264,7 @@ class DeclBuffer : public Stmt {
 class AllocBufferNode : public StmtNode {
  public:
   /*! \brief The buffer being allocated and declared */
-  Buffer buffer;
+  BufferVar buffer;
   /*!
    * \brief Additional annotations about the allocation.
    *
@@ -271,7 +276,8 @@ class AllocBufferNode : public StmtNode {
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<AllocBufferNode>()
-        .def_ro("buffer", &AllocBufferNode::buffer, refl::AttachFieldFlag::SEqHashDef())
+        // TODO(tqchen): use SEqHashDefNonRecursive after the next pypi tvm-ffi release
+        .def_ro("buffer", &AllocBufferNode::buffer, refl::AttachFieldFlag::SEqHashDefRecursive())
         .def_ro("annotations", &AllocBufferNode::annotations);
   }
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tirx.AllocBuffer", AllocBufferNode, StmtNode);
@@ -281,7 +287,7 @@ class AllocBufferNode : public StmtNode {
 class AllocBuffer : public Stmt {
  public:
   TVM_DLL AllocBuffer(
-      Buffer buffer,
+      BufferVar buffer,
       ffi::Map<ffi::String, ffi::Any> annotations = ffi::Map<ffi::String, ffi::Any>(),
       Span span = Span());
   /*!
@@ -336,7 +342,7 @@ class SeqStmtNode : public StmtNode {
 class EvaluateNode : public StmtNode {
  public:
   /*! \brief The expression to be evaluated. */
-  PrimExpr value;
+  Expr value;
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
@@ -351,7 +357,7 @@ class EvaluateNode : public StmtNode {
  */
 class Evaluate : public Stmt {
  public:
-  TVM_DLL explicit Evaluate(PrimExpr value, Span span = Span());
+  TVM_DLL explicit Evaluate(Expr value, Span span = Span());
 
   explicit Evaluate(int value, Span span = Span()) : Evaluate(PrimExpr(value), span) {}
 
@@ -586,7 +592,7 @@ enum class ForKind : int {
 class ForNode : public StmtNode {
  public:
   /*! \brief The loop variable. */
-  Var loop_var;
+  PrimVar loop_var;
   /*! \brief The minimum value of iteration. */
   PrimExpr min;
   /*! \brief The extent of the iteration. */
@@ -617,7 +623,7 @@ class ForNode : public StmtNode {
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<ForNode>()
-        .def_ro("loop_var", &ForNode::loop_var, refl::AttachFieldFlag::SEqHashDef())
+        .def_ro("loop_var", &ForNode::loop_var, refl::AttachFieldFlag::SEqHashDefRecursive())
         .def_ro("min", &ForNode::min)
         .def_ro("extent", &ForNode::extent)
         .def_ro("kind", &ForNode::kind)
@@ -639,7 +645,7 @@ class ForNode : public StmtNode {
  */
 class For : public Stmt {
  public:
-  TVM_DLL For(Var loop_var, PrimExpr min, PrimExpr extent, ForKind kind, Stmt body,
+  TVM_DLL For(PrimVar loop_var, PrimExpr min, PrimExpr extent, ForKind kind, Stmt body,
               ffi::Optional<IterVar> thread_binding = std::nullopt,
               ffi::Map<ffi::String, ffi::Any> annotations = {},
               ffi::Optional<PrimExpr> step = std::nullopt, Span span = Span());
@@ -687,19 +693,97 @@ class While : public Stmt {
 };
 
 /*!
+ * \brief A return from the current function.
+ */
+class ReturnNode : public StmtNode {
+ public:
+  /*! \brief The value to return. */
+  Expr value;
+
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<ReturnNode>().def_ro("value", &ReturnNode::value);
+  }
+
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tirx.Return", ReturnNode, StmtNode);
+};
+
+/*!
+ * \brief Managed reference to ReturnNode.
+ * \sa ReturnNode
+ */
+class Return : public Stmt {
+ public:
+  TVM_DLL explicit Return(Expr value, Span span = Span());
+
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Return, Stmt, ReturnNode);
+  TVM_DEFINE_OBJECT_REF_COW_METHOD(ReturnNode);
+};
+
+/*!
+ * \brief A Break in control flow.
+ */
+class BreakNode : public StmtNode {
+ public:
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<BreakNode>();
+  }
+
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tirx.Break", BreakNode, StmtNode);
+};
+
+/*!
+ * \brief Managed reference to BreakNode.
+ * \sa BreakNode
+ */
+class Break : public Stmt {
+ public:
+  TVM_DLL explicit Break(Span span);
+
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Break, Stmt, BreakNode);
+  TVM_DEFINE_OBJECT_REF_COW_METHOD(BreakNode);
+};
+
+/*!
+ * \brief A Continue in control flow.
+ */
+class ContinueNode : public StmtNode {
+ public:
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<ContinueNode>();
+  }
+
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tirx.Continue", ContinueNode, StmtNode);
+};
+
+/*!
+ * \brief Managed reference to ContinueNode.
+ * \sa ContinueNode
+ */
+class Continue : public Stmt {
+ public:
+  TVM_DLL explicit Continue(Span span);
+
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Continue, Stmt, ContinueNode);
+  TVM_DEFINE_OBJECT_REF_COW_METHOD(ContinueNode);
+};
+
+/*!
  * \brief Representing the region of multi-dimensional buffer access.
  */
 class BufferRegionNode : public PrimExprConvertibleNode {
  public:
   /*! \brief The buffer of the buffer region. */
-  Buffer buffer;
+  BufferVar buffer;
   /*! \brief The region array of the buffer region. */
   ffi::Array<Range> region;
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<BufferRegionNode>()
-        .def_ro("buffer", &BufferRegionNode::buffer)
+        .def_ro("buffer", &BufferRegionNode::buffer, refl::AttachFieldFlag::SEqHashDefRecursive())
         .def_ro("region", &BufferRegionNode::region);
   }
 
@@ -715,14 +799,14 @@ class BufferRegionNode : public PrimExprConvertibleNode {
  */
 class BufferRegion : public PrimExprConvertible {
  public:
-  TVM_DLL explicit BufferRegion(Buffer buffer, ffi::Array<Range> region);
+  TVM_DLL explicit BufferRegion(BufferVar buffer, ffi::Array<Range> region);
 
   /*!
    * \brief Create a BufferRegion which is full region of the given buffer.
    * \param buffer The buffer to generate full BufferRegion.
    * \return The BufferRegion which covers all region of the given buffer
    */
-  TVM_DLL static BufferRegion FullRegion(Buffer buffer);
+  TVM_DLL static BufferRegion FullRegion(BufferVar buffer);
 
   /*!
    * \brief Create a BufferRegion which is a single point of the given buffer.
@@ -730,7 +814,7 @@ class BufferRegion : public PrimExprConvertible {
    * \param indices The access point indices of the buffer
    * \return The BufferRegion which is the single point of the given buffer.
    */
-  TVM_DLL static BufferRegion FromPoint(Buffer buffer, ffi::Array<PrimExpr> indices);
+  TVM_DLL static BufferRegion FromPoint(BufferVar buffer, ffi::Array<PrimExpr> indices);
 
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(BufferRegion, PrimExprConvertible, BufferRegionNode);
   TVM_DEFINE_OBJECT_REF_COW_METHOD(BufferRegionNode);
@@ -745,33 +829,35 @@ class BufferRegion : public PrimExprConvertible {
  * low-level hardware primitives in the IR and defer the check after the sequence of
  * transformations.
  */
-class MatchBufferRegionNode : public Object {
+class MatchBufferRegionNode : public ffi::Object {
  public:
   /*! \brief The target buffer. */
-  Buffer buffer;
+  BufferVar buffer;
   /*! \brief The source buffer region. */
   BufferRegion source;
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<MatchBufferRegionNode>()
-        .def_ro("buffer", &MatchBufferRegionNode::buffer)
+        .def_ro("buffer", &MatchBufferRegionNode::buffer,
+                refl::AttachFieldFlag::SEqHashDefRecursive())
         .def_ro("source", &MatchBufferRegionNode::source);
   }
 
   static constexpr TVMFFISEqHashKind _type_s_eq_hash_kind = kTVMFFISEqHashKindTreeNode;
-  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tirx.MatchBufferRegion", MatchBufferRegionNode, Object);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tirx.MatchBufferRegion", MatchBufferRegionNode, ffi::Object);
 };
 
 /*!
  * \brief Managed reference to MatchBufferRegionNode.
  * \sa MatchBufferRegionNode
  */
-class MatchBufferRegion : public ObjectRef {
+class MatchBufferRegion : public ffi::ObjectRef {
  public:
-  TVM_DLL explicit MatchBufferRegion(Buffer buffer, BufferRegion source);
+  TVM_DLL explicit MatchBufferRegion(BufferVar buffer, BufferRegion source);
 
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(MatchBufferRegion, ObjectRef, MatchBufferRegionNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(MatchBufferRegion, ffi::ObjectRef,
+                                             MatchBufferRegionNode);
   TVM_DEFINE_OBJECT_REF_COW_METHOD(MatchBufferRegionNode);
 };
 
@@ -807,7 +893,7 @@ class SBlockNode : public StmtNode {
   /*! \brief The name_hint of the block. */
   ffi::String name_hint;
   /*! \brief The buffer allocated in the block. */
-  ffi::Array<Buffer> alloc_buffers;
+  ffi::Array<BufferVar> alloc_buffers;
   /*! \brief The match buffer regions. */
   ffi::Array<MatchBufferRegion> match_buffers;
   /*! \brief The annotation of the block. */
@@ -826,11 +912,12 @@ class SBlockNode : public StmtNode {
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<SBlockNode>()
-        .def_ro("iter_vars", &SBlockNode::iter_vars, refl::AttachFieldFlag::SEqHashDef())
+        .def_ro("iter_vars", &SBlockNode::iter_vars, refl::AttachFieldFlag::SEqHashDefRecursive())
         .def_ro("reads", &SBlockNode::reads)
         .def_ro("writes", &SBlockNode::writes)
         .def_ro("name_hint", &SBlockNode::name_hint, refl::AttachFieldFlag::SEqHashIgnore())
-        .def_ro("alloc_buffers", &SBlockNode::alloc_buffers)
+        .def_ro("alloc_buffers", &SBlockNode::alloc_buffers,
+                refl::AttachFieldFlag::SEqHashDefRecursive())
         .def_ro("match_buffers", &SBlockNode::match_buffers)
         .def_ro("annotations", &SBlockNode::annotations)
         .def_ro("init", &SBlockNode::init)
@@ -849,10 +936,14 @@ class SBlock : public Stmt {
       ffi::Array<IterVar> iter_vars, ffi::Array<BufferRegion> reads,
       ffi::Array<BufferRegion> writes, ffi::String name_hint, Stmt body,
       ffi::Optional<Stmt> init = std::nullopt,
-      ffi::Array<Buffer> alloc_buffers = ffi::Array<Buffer>(),
+      ffi::Array<BufferVar> alloc_buffers = ffi::Array<BufferVar>(),
       ffi::Array<MatchBufferRegion> match_buffers = ffi::Array<MatchBufferRegion>(),
       ffi::Map<ffi::String, ffi::Any> annotations = ffi::Map<ffi::String, ffi::Any>(),
       Span span = Span());
+
+  TVM_DLL explicit SBlock(ffi::String name_hint, Stmt body,
+                          ffi::Array<BufferVar> alloc_buffers = ffi::Array<BufferVar>(),
+                          Span span = Span());
 
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(SBlock, Stmt, SBlockNode);
   TVM_DEFINE_OBJECT_REF_COW_METHOD(SBlockNode);
@@ -896,10 +987,37 @@ class SBlockRealize : public Stmt {
   TVM_DEFINE_OBJECT_REF_COW_METHOD(SBlockRealizeNode);
 };
 
+/*!
+ * \brief Standalone statement that declares a scope-id binding (e.g. cta_id,
+ * warp_id, lane_id). Carries a ``ScopeIdDef`` value.
+ *
+ * Each declaration is a flat stmt within the device-region body. The declared
+ * ``Var``\ s are visible in subsequent stmts in the same enclosing scope
+ * (the AttrStmt ``kDeviceEntry`` body), analogous to ``BindNode``.
+ */
+class ScopeIdDefStmtNode : public StmtNode {
+ public:
+  /*! \brief The scope-id definition (Vars + extents + binding). */
+  ScopeIdDef def;
+
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<ScopeIdDefStmtNode>().def_ro("def", &ScopeIdDefStmtNode::def);
+  }
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tirx.ScopeIdDefStmt", ScopeIdDefStmtNode, StmtNode);
+};
+
+/*! \brief Managed reference to ScopeIdDefStmtNode. */
+class ScopeIdDefStmt : public Stmt {
+ public:
+  TVM_DLL ScopeIdDefStmt(ScopeIdDef def, Span span = Span());
+
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ScopeIdDefStmt, Stmt, ScopeIdDefStmtNode);
+  TVM_DEFINE_OBJECT_REF_COW_METHOD(ScopeIdDefStmtNode);
+};
+
 /*! \brief namespace of possible attributes in AttrStmt.attr_key */
 namespace attr {
-/*! \brief Mark stores/loads with their bounds. */
-constexpr const char* buffer_bound = "buffer_bound";
 /*!
  * \brief Mark the scope as when computation start to happen.
  *  This can hint some code generator to create a new function for compute.
@@ -923,10 +1041,6 @@ constexpr const char* pragma_auto_unroll_max_step = "pragma_auto_unroll_max_step
 constexpr const char* pragma_import_c = "pragma_import_c";
 /*! \brief Import llvm source or file into the final code gen module */
 constexpr const char* pragma_import_llvm = "pragma_import_llvm";
-/*! \brief Mark region is guarded by the pragma extension */
-constexpr const char* pragma_scope_prefix = "pragma_";
-/*! \brief Try to modify the AST to support Tensor Core */
-constexpr const char* pragma_tensor_core = "pragma_tensor_core";
 /*! \brief Pragma: unroll explicit */
 constexpr const char* pragma_unroll_explicit = "pragma_unroll_explicit";
 /*! \brief Mark storage alignment requirement of buffers */
@@ -935,6 +1049,24 @@ constexpr const char* storage_alignment = "storage_alignment";
 constexpr const char* thread_extent = "thread_extent";
 /*! \brief Annotation key on AllocBuffer marking the allocation as volatile. */
 constexpr const char* kVolatile = "tirx.volatile";
+/*! \brief Mark buffer initial addr alignment in bytes */
+constexpr const char* buffer_data_alignment = "buffer_data_alignment";
+/*! \brief Mark buffer allocated addr in bytes */
+constexpr const char* buffer_allocated_addr = "buffer_allocated_addr";
+constexpr const char* tensorized_nki_instruction = "tensorized_nki_instruction";
+
+/*!
+ * \brief Mark the kernel as persistent.
+ */
+constexpr const char* kPersistentKernel = "tirx.persistent_kernel";
+
+/*!
+ * \brief Mark the device-region entry within a PrimFunc body. The
+ * ``AttrStmt`` so-keyed has a body that is the device-side region; anything
+ * before the marker (within the PrimFunc body) is host code. Value is
+ * ``IntImm("bool", 1)`` -- a boolean marker, similar to ``kPersistentKernel``.
+ */
+constexpr const char* kDeviceEntry = "tirx.device_entry";
 
 /*!
  * \brief Check if attr_key is a pragma key extension
@@ -952,7 +1084,7 @@ inline bool IsPragmaKey(const std::string& attr_key) {
  * \param span The location of this object in the source code.
  * \return Expr a expression with dtype.
  */
-TVM_DLL PrimExpr TypeAnnotation(DataType dtype, Span span = Span());
+TVM_DLL PrimExpr TypeAnnotation(PrimType dtype, Span span = Span());
 
 // overload printing of for type.
 TVM_DLL std::ostream& operator<<(std::ostream& os, ForKind kind);

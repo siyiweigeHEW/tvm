@@ -17,12 +17,13 @@
 # pylint: disable=invalid-name
 """Default legalization function for quantize/dequantize operators."""
 
-from typing import Union
 import tvm
 from tvm import te, tirx
+from tvm.ir import Call
+from tvm.runtime import DataTypeCode
 
 from ...block_builder import BlockBuilder
-from ...expr import Call, Expr
+from ...expr import Expr
 from .common import _try_convert_to_scalar_const, register_legalize
 
 
@@ -59,8 +60,8 @@ def _quantize(bb: BlockBuilder, call: Call) -> Expr:
 
     def te_quantize(
         data: te.Tensor,
-        scale: Union[te.Tensor, tirx.IntImm, tirx.FloatImm],
-        zp: Union[te.Tensor, tirx.IntImm, tirx.FloatImm],
+        scale: te.Tensor | tirx.IntImm | tirx.FloatImm,
+        zp: te.Tensor | tirx.IntImm | tirx.FloatImm,
     ):
         scale_singleton = _is_singleton_qparam(scale) if isinstance(scale, te.Tensor) else False
         zp_singleton = _is_singleton_qparam(zp) if isinstance(zp, te.Tensor) else False
@@ -121,8 +122,8 @@ def _dequantize(bb: BlockBuilder, call: Call) -> Expr:
 
     def te_dequantize(
         data: te.Tensor,
-        scale: Union[te.Tensor, tirx.IntImm, tirx.FloatImm],
-        zp: Union[te.Tensor, tirx.IntImm, tirx.FloatImm],
+        scale: te.Tensor | tirx.IntImm | tirx.FloatImm,
+        zp: te.Tensor | tirx.IntImm | tirx.FloatImm,
     ):
         scale_singleton = _is_singleton_qparam(scale) if isinstance(scale, te.Tensor) else False
         zp_singleton = _is_singleton_qparam(zp) if isinstance(zp, te.Tensor) else False
@@ -141,9 +142,13 @@ def _dequantize(bb: BlockBuilder, call: Call) -> Expr:
                 zp_value = zp[(0,) * len(zp.shape)]
             else:
                 zp_value = zp[indices[axis]]
-            dtype = "float32" if "float" in data.dtype else "int32"
-            sub = te.subtract(data[indices].astype(dtype), zp_value)
-            out = te.multiply(sub, scale_value.astype("float32"))
+            dtype = (
+                "float32"
+                if data.dtype.matches_code(DataTypeCode.FLOAT, DataTypeCode.BFLOAT)
+                else "int32"
+            )
+            sub = data[indices].astype(dtype) - zp_value
+            out = sub * scale_value.astype("float32")
             if out_dtype == "float32":
                 return out
             return clip_cast(out, out_dtype)

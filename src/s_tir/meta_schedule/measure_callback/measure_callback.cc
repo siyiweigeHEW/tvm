@@ -30,15 +30,13 @@ void PyMeasureCallbackNode::Apply(const TaskScheduler& task_scheduler,          
                                   const ffi::Array<BuilderResult>& builds,                 //
                                   const ffi::Array<RunnerResult>& results) {
   TVM_FFI_ICHECK(f_apply != nullptr) << "PyMeasureCallback's Apply method not implemented!";
-  auto _ = Profiler::TimedScope("MeasureCallback/" + this->f_as_string());
+  auto _ = Profiler::TimedScope("MeasureCallback/PyMeasureCallback");
   return f_apply(task_scheduler, task_id, measure_candidates, builds, results);
 }
 
-MeasureCallback MeasureCallback::PyMeasureCallback(PyMeasureCallbackNode::FApply f_apply,  //
-                                                   PyMeasureCallbackNode::FAsString f_as_string) {
-  ObjectPtr<PyMeasureCallbackNode> n = ffi::make_object<PyMeasureCallbackNode>();
+MeasureCallback MeasureCallback::PyMeasureCallback(PyMeasureCallbackNode::FApply f_apply) {
+  ffi::ObjectPtr<PyMeasureCallbackNode> n = ffi::make_object<PyMeasureCallbackNode>();
   n->f_apply = std::move(f_apply);
-  n->f_as_string = std::move(f_as_string);
   return MeasureCallback(n);
 }
 
@@ -50,15 +48,7 @@ ffi::Array<MeasureCallback, void> MeasureCallback::Default() {
   };
 }
 
-TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
-    .set_dispatch<PyMeasureCallbackNode>([](const ObjectRef& n, ReprPrinter* p) {
-      const auto* self = n.as<PyMeasureCallbackNode>();
-      TVM_FFI_ICHECK(self);
-      PyMeasureCallbackNode::FAsString f_as_string = (*self).f_as_string;
-      TVM_FFI_ICHECK(f_as_string != nullptr)
-          << "PyMeasureCallback's AsString method not implemented!";
-      p->stream << f_as_string();
-    });
+// Pattern A (RM): auto-default repr from reflection.
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   MeasureCallbackNode::RegisterReflection();

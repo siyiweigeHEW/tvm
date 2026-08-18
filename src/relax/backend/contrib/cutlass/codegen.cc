@@ -21,13 +21,15 @@
  * \file src/relax/backend/contrib/cutlass/codegen.cc
  * \brief Implementation of the CUTLASS code generator for Relax.
  */
+#include <tvm/ffi/cast.h>
+#include <tvm/ffi/extra/module.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/module.h>
-#include <tvm/ir/name_supply.h>
+#include <tvm/ir/unique_name_supply.h>
 #include <tvm/relax/analysis.h>
 #include <tvm/relax/attrs/nn.h>
 #include <tvm/relax/type.h>
-#include <tvm/runtime/module.h>
+#include <tvm/runtime/logging.h>
 
 #include <memory>
 #include <string>
@@ -75,7 +77,7 @@ ffi::Module Finalize(const std::string& code, const ffi::Array<ffi::String>& fun
       .cast<ffi::Module>();
 }
 
-class CodegenResultNode : public Object {
+class CodegenResultNode : public ffi::Object {
  public:
   ffi::String code;
   ffi::Array<ffi::String> headers;
@@ -86,10 +88,11 @@ class CodegenResultNode : public Object {
         .def_ro("code", &CodegenResultNode::code)
         .def_ro("headers", &CodegenResultNode::headers);
   }
-  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("contrib.cutlass.CodegenResult", CodegenResultNode, Object);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("contrib.cutlass.CodegenResult", CodegenResultNode,
+                                    ffi::Object);
 };
 
-class CodegenResult : public ObjectRef {
+class CodegenResult : public ffi::ObjectRef {
  public:
   CodegenResult(ffi::String code, ffi::Array<ffi::String> headers) {
     auto n = ffi::make_object<CodegenResultNode>();
@@ -98,7 +101,7 @@ class CodegenResult : public ObjectRef {
     data_ = std::move(n);
   }
 
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(CodegenResult, ObjectRef, CodegenResultNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(CodegenResult, ffi::ObjectRef, CodegenResultNode);
 };
 
 TVM_FFI_STATIC_INIT_BLOCK() { CodegenResultNode::RegisterReflection(); }
@@ -149,12 +152,14 @@ using OutputType = std::vector<Output>;
 class CodegenCutlass : public relax::MemoizedExprTranslator<OutputType>,
                        public relax::contrib::CodegenCBase {
  public:
+  using relax::MemoizedExprTranslator<OutputType>::VisitExpr_;
+
   CodegenCutlass(const std::string& id, const ffi::Map<Var, Expr>& bindings)
       : ext_func_id_(id), bindings_(bindings) {}
 
   void AddParm(Var param) {
     ext_func_args_.push_back(param);
-    auto v_name = name_sup_->FreshName(param->name_hint());
+    auto v_name = name_sup_->FreshName(param->name);
     var_name_map_[param.get()] = v_name;
   }
 
@@ -162,11 +167,11 @@ class CodegenCutlass : public relax::MemoizedExprTranslator<OutputType>,
     std::vector<std::string> arg_types, arg_names;
 
     for (const auto& arg : ext_func_args_) {
-      auto sinfo = GetStructInfo(arg);
-      if (const auto* tensor_sinfo = sinfo.as<TensorStructInfoNode>()) {
-        arg_types.emplace_back(backend::DType2String(tensor_sinfo->dtype));
-      } else if (const auto* shape_sinfo = sinfo.as<ShapeStructInfoNode>()) {
-        arg_types.emplace_back(backend::DType2String(shape_sinfo->values.value()[0]->dtype));
+      auto ty = GetType(arg);
+      if (const auto* tensor_ty = ty.as<TensorTypeNode>()) {
+        arg_types.emplace_back(backend::DType2String(tensor_ty->dtype.value()->dtype));
+      } else if (const auto* shape_ty = ty.as<ShapeTypeNode>()) {
+        arg_types.emplace_back(backend::DType2String(shape_ty->values.value()[0].ty()->dtype));
       } else {
         TVM_FFI_THROW(InternalError) << "Unimplemented";
       }
@@ -208,7 +213,7 @@ class CodegenCutlass : public relax::MemoizedExprTranslator<OutputType>,
   OutputType VisitExpr_(const CallNode* call) final {
     const auto* fn_var = call->op.as<VarNode>();
     TVM_FFI_ICHECK(fn_var);
-    const auto func = Downcast<Function>(bindings_[ffi::GetRef<Var>(fn_var)]);
+    const auto func = bindings_[ffi::GetRef<Var>(fn_var)].as_or_throw<Function>();
     const auto pattern_name_opt = func->GetAttr<ffi::String>(attr::kComposite);
     TVM_FFI_ICHECK(pattern_name_opt) << "Only composite function is supported for CUTLASS.";
     auto ret = GenerateBody(call, pattern_name_opt.value(), func->attrs->dict);
@@ -295,13 +300,13 @@ class CodegenCutlass : public relax::MemoizedExprTranslator<OutputType>,
   GenerateBodyOutput GenerateBody(const CallNode* call, const std::string& func_name,
                                   const ffi::Map<ffi::String, ffi::Any>& attrs) {
     auto func_args = GetArgumentNames(call);
-    auto struct_info = GetStructInfo(ffi::GetRef<Call>(call));
+    auto ty = GetType(ffi::GetRef<Call>(call));
 
     std::vector<std::string> out_types;
-    if (const auto* tensor_sinfo = struct_info.as<TensorStructInfoNode>()) {
-      out_types.emplace_back(backend::DType2String(tensor_sinfo->dtype));
+    if (const auto* tensor_ty = ty.as<TensorTypeNode>()) {
+      out_types.emplace_back(backend::DType2String(tensor_ty->dtype.value()->dtype));
     } else {
-      TVM_FFI_THROW(InternalError) << "Unimplemented sinfo type: " << struct_info;
+      TVM_FFI_THROW(InternalError) << "Unimplemented ty type: " << ty;
     }
 
     return contrib::GenerateBody(func_name, ext_func_id_, out_types, func_args, attrs, &buf_idx_);
@@ -327,11 +332,11 @@ class CodegenCutlass : public relax::MemoizedExprTranslator<OutputType>,
   /*!
    * \brief A mapping from a variable to its unique name.
    * We use this since sometimes different parameters to the same function end up having the same
-   * name_hint.
+   * name.
    */
   std::unordered_map<const VarNode*, std::string> var_name_map_;
-  /*! \brief A name supply to generate a unique name for each parameter. */
-  NameSupply name_sup_;
+  /*! \brief A unique name supply to generate a unique name for each parameter. */
+  UniqueNameSupply name_sup_;
 };
 
 class CutlassModuleCodegen {

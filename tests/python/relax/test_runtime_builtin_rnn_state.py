@@ -19,13 +19,14 @@ from collections.abc import Sequence
 
 import numpy as np
 import pytest
+from tvm_ffi import Shape
 
 import tvm
 import tvm.testing
 from tvm import tirx
-from tvm.runtime import ShapeTuple
 from tvm.s_tir import dlight as dl
 from tvm.script import tirx as T
+from tvm.testing import env
 
 # pylint: disable=invalid-name
 
@@ -37,7 +38,6 @@ np_three = np.full((32, 32), 3.0, "float32")
 reserved_nseq = 4
 max_history = 4
 num_layers = 1
-device = tvm.cuda()
 # Note that kernels in this test file cannot support 1-dim states.
 states = [((16, 16), "float16"), ((32, 32), "float32")]
 
@@ -93,7 +93,7 @@ def set_global_func():
     f_tir_sets = _f_tir_sets
 
 
-def create_rnn_state():
+def create_rnn_state(device):
     f_create = tvm.get_global_func("vm.builtin.rnn_state_create")
     init_values = [
         tvm.runtime.tensor(np_zero, device=device),
@@ -105,7 +105,7 @@ def create_rnn_state():
 @pytest.fixture
 def rnn_state():
     set_global_func()
-    return create_rnn_state()
+    return create_rnn_state
 
 
 def verify_state(state, seq_ids, expected_values):
@@ -116,70 +116,94 @@ def verify_state(state, seq_ids, expected_values):
             tvm.testing.assert_allclose(state_value.numpy(), expected_value)
 
 
-@tvm.testing.requires_cuda
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda(), reason="need cuda")
 def test_rnn_state_get(rnn_state):  # pylint: disable=redefined-outer-name
-    state = rnn_state
-    f_clear(state)
-    f_add_sequence(state, 0)
-    f_begin_forward(state, ShapeTuple([0]), ShapeTuple([1]))
-    tvm_nd_0 = tvm.runtime.tensor(np.empty((1, 16, 16), "float16"), device=device)
-    tvm_nd_1 = tvm.runtime.tensor(np.empty((1, 32, 32), "float32"), device=device)
-    f_get(state, 0, 0, tvm_nd_0)
-    f_get(state, 0, 1, tvm_nd_1)
-    f_end_forward(state)
-    tvm.testing.assert_allclose(tvm_nd_0.numpy(), np.zeros((1, 16, 16), "float16"))
-    tvm.testing.assert_allclose(tvm_nd_1.numpy(), np.ones((1, 32, 32), "float32"))
+    def run_and_check():
+        device = tvm.cuda()
+        state = rnn_state(device)
+        f_clear(state)
+        f_add_sequence(state, 0)
+        f_begin_forward(state, Shape([0]), Shape([1]))
+        tvm_nd_0 = tvm.runtime.tensor(np.empty((1, 16, 16), "float16"), device=device)
+        tvm_nd_1 = tvm.runtime.tensor(np.empty((1, 32, 32), "float32"), device=device)
+        f_get(state, 0, 0, tvm_nd_0)
+        f_get(state, 0, 1, tvm_nd_1)
+        f_end_forward(state)
+        tvm.testing.assert_allclose(tvm_nd_0.numpy(), np.zeros((1, 16, 16), "float16"))
+        tvm.testing.assert_allclose(tvm_nd_1.numpy(), np.ones((1, 32, 32), "float32"))
+
+    tvm.testing.run_with_gpu_lock(run_and_check)
 
 
-@tvm.testing.requires_cuda
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda(), reason="need cuda")
 def test_rnn_state_set(rnn_state):  # pylint: disable=redefined-outer-name
-    state = rnn_state
-    f_clear(state)
-    for seq_id in range(3):
-        f_add_sequence(state, seq_id)
-    f_begin_forward(state, ShapeTuple([0, 2]), ShapeTuple([1, 1]))
+    def run_and_check():
+        device = tvm.cuda()
+        state = rnn_state(device)
+        f_clear(state)
+        for seq_id in range(3):
+            f_add_sequence(state, seq_id)
+        f_begin_forward(state, Shape([0, 2]), Shape([1, 1]))
+        f_set(
+            state,
+            0,
+            0,
+            tvm.runtime.tensor(np.full((2, 16, 16), 2.0, "float16"), device=device),
+        )
+        f_set(
+            state,
+            0,
+            1,
+            tvm.runtime.tensor(np.full((2, 32, 32), 3.0, "float32"), device=device),
+        )
+        f_end_forward(state)
+        expected_values = [[np_two, np_three], [np_zero, np_one], [np_two, np_three]]
+        verify_state(state, [0, 1, 2], expected_values)
 
-    f_set(state, 0, 0, tvm.runtime.tensor(np.full((2, 16, 16), 2.0, "float16"), device=device))
-    f_set(state, 0, 1, tvm.runtime.tensor(np.full((2, 32, 32), 3.0, "float32"), device=device))
-    f_end_forward(state)
-
-    expected_values = [[np_two, np_three], [np_zero, np_one], [np_two, np_three]]
-    verify_state(state, [0, 1, 2], expected_values)
+    tvm.testing.run_with_gpu_lock(run_and_check)
 
 
-@tvm.testing.requires_cuda
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda(), reason="need cuda")
 def test_rnn_state_popn(rnn_state):  # pylint: disable=redefined-outer-name
-    state = rnn_state
-    f_clear(state)
+    def run_and_check():
+        device = tvm.cuda()
+        state = rnn_state(device)
+        f_clear(state)
+        f_add_sequence(state, 0)
+        f_begin_forward(state, Shape([0]), Shape([1]))
+        f_set(state, 0, 0, tvm.runtime.tensor(np_two.reshape(1, 16, 16), device=device))
+        f_set(state, 0, 1, tvm.runtime.tensor(np_three.reshape(1, 32, 32), device=device))
+        f_end_forward(state)
+        verify_state(state, [0], [[np_two, np_three]])
+        f_popn(state, 0, 1)
+        verify_state(state, [0], [[np_zero, np_one]])
+        with pytest.raises(RuntimeError):
+            f_popn(state, 0, 1)
 
-    f_add_sequence(state, 0)
-    f_begin_forward(state, ShapeTuple([0]), ShapeTuple([1]))
-    f_set(state, 0, 0, tvm.runtime.tensor(np_two.reshape(1, 16, 16), device=device))
-    f_set(state, 0, 1, tvm.runtime.tensor(np_three.reshape(1, 32, 32), device=device))
-    f_end_forward(state)
-
-    verify_state(state, [0], [[np_two, np_three]])
-    f_popn(state, 0, 1)
-    verify_state(state, [0], [[np_zero, np_one]])
-    with pytest.raises(tvm.error.TVMError):
-        f_popn(state, 0, 1)  # no available history to pop
+    tvm.testing.run_with_gpu_lock(run_and_check)
 
 
-@tvm.testing.requires_cuda
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_cuda(), reason="need cuda")
 def test_rnn_state_fork_sequence(rnn_state):  # pylint: disable=redefined-outer-name
-    state = rnn_state
-    f_clear(state)
+    def run_and_check():
+        device = tvm.cuda()
+        state = rnn_state(device)
+        f_clear(state)
+        f_add_sequence(state, 0)
+        f_begin_forward(state, Shape([0]), Shape([1]))
+        f_set(state, 0, 0, tvm.runtime.tensor(np_two.reshape(1, 16, 16), device=device))
+        f_set(state, 0, 1, tvm.runtime.tensor(np_three.reshape(1, 32, 32), device=device))
+        f_end_forward(state)
+        f_fork_sequence(state, 0, 1, -1)
+        verify_state(state, [0, 1], [[np_two, np_three], [np_two, np_three]])
+        f_popn(state, 1, 1)
+        verify_state(state, [0, 1], [[np_two, np_three], [np_zero, np_one]])
 
-    f_add_sequence(state, 0)
-    f_begin_forward(state, ShapeTuple([0]), ShapeTuple([1]))
-    f_set(state, 0, 0, tvm.runtime.tensor(np_two.reshape(1, 16, 16), device=device))
-    f_set(state, 0, 1, tvm.runtime.tensor(np_three.reshape(1, 32, 32), device=device))
-    f_end_forward(state)
-    f_fork_sequence(state, 0, 1, -1)
-    verify_state(state, [0, 1], [[np_two, np_three], [np_two, np_three]])
-    # Verify popn for the forked sequence
-    f_popn(state, 1, 1)
-    verify_state(state, [0, 1], [[np_two, np_three], [np_zero, np_one]])
+    tvm.testing.run_with_gpu_lock(run_and_check)
 
 
 def rnn_state_get(
@@ -187,14 +211,14 @@ def rnn_state_get(
     dtype: str,
 ):
     # fmt: off
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def _rnn_state_get(
         var_storage: T.handle,
         var_seq_slot_ids: T.handle,
         var_history_slot_ids: T.handle,
         var_output: T.handle,
     ):
-        batch_size = T.int32(is_size_var=True)
+        batch_size = T.int32()
 
         storage = T.match_buffer(var_storage, (reserved_nseq, max_history, *shape), dtype)
         seq_slot_ids = T.match_buffer(var_seq_slot_ids, (batch_size,), "int32")
@@ -205,8 +229,8 @@ def rnn_state_get(
             for s in T.grid(*shape):
                 with T.sblock("copy"):
                     vi, *vs = T.axis.remap("S" * (len(shape) + 1), [i, *s])
-                    seq_id: T.int32 = seq_slot_ids[vi]
-                    history_id: T.int32 = history_slot_ids[vi]
+                    seq_id: T.let[T.int32] = seq_slot_ids[vi]
+                    history_id: T.let[T.int32] = history_slot_ids[vi]
                     # The following line is equivalent to:
                     # `output[vi, *vs] = storage[seq_id, history_id, *vs]`
                     # However, unpacking operator in subscript requires Python 3.11 or newer
@@ -222,14 +246,14 @@ def rnn_state_set(
     dtype: str,
 ):
     # fmt: off
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def _rnn_state_set(
         var_storage: T.handle,
         var_seq_slot_ids: T.handle,
         var_history_slot_ids: T.handle,
         var_data: T.handle,
     ):
-        batch_size = T.int32(is_size_var=True)
+        batch_size = T.int32()
 
         storage = T.match_buffer(var_storage, (reserved_nseq, max_history, *shape), dtype)
         seq_slot_ids = T.match_buffer(var_seq_slot_ids, (batch_size,), "int32")
@@ -240,8 +264,8 @@ def rnn_state_set(
             for s in T.grid(*shape):
                 with T.sblock("copy"):
                     vi, *vs = T.axis.remap("S" * (len(shape) + 1), [i, *s])
-                    seq_id: T.int32 = seq_slot_ids[vi]
-                    history_id: T.int32 = (history_slot_ids[vi] + 1) % T.cast(
+                    seq_id: T.let[T.int32] = seq_slot_ids[vi]
+                    history_id: T.let[T.int32] = (history_slot_ids[vi] + 1) % T.cast(
                         max_history, "int32"
                     )
                     # The following line is equivalent to:
@@ -258,7 +282,7 @@ def rnn_state_set(
 
 if __name__ == "__main__":
     set_global_func()
-    rnn_state = create_rnn_state()
+    rnn_state = create_rnn_state
     test_rnn_state_get(rnn_state)
     test_rnn_state_set(rnn_state)
     test_rnn_state_popn(rnn_state)

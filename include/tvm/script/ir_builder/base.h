@@ -22,7 +22,7 @@
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/expr.h>
 #include <tvm/ir/function.h>
-#include <tvm/node/cast.h>
+#include <tvm/ir/node_functor.h>
 
 #include <vector>
 
@@ -39,7 +39,7 @@ namespace ir_builder {
  *
  * \example
  *
- * The `T::MatchBuffer` below adds an element in `PrimFuncNode::buffer_map`:
+ * The `T::MatchBuffer` below annotates a PrimFunc parameter with BufferType:
  *
  * \code {.cpp}
  *
@@ -62,7 +62,7 @@ namespace ir_builder {
  *
  * \endcode
  */
-class IRBuilderFrameNode : public runtime::Object {
+class IRBuilderFrameNode : public ffi::Object {
  public:
   /*! \brief A list of callbacks used when exiting the frame. */
   std::vector<ffi::TypedFunction<void()>> callbacks;
@@ -74,8 +74,7 @@ class IRBuilderFrameNode : public runtime::Object {
   }
 
   static constexpr const bool _type_mutable = true;
-  TVM_FFI_DECLARE_OBJECT_INFO("script.ir_builder.IRBuilderFrame", IRBuilderFrameNode,
-                              runtime::Object);
+  TVM_FFI_DECLARE_OBJECT_INFO("script.ir_builder.IRBuilderFrame", IRBuilderFrameNode, ffi::Object);
 
  public:
   /*! \brief Default destructor. */
@@ -101,14 +100,14 @@ class IRBuilderFrameNode : public runtime::Object {
  * \brief Managed reference to an IRBuilderFrameNode.
  * \sa IRBuilderFrameNode
  */
-class IRBuilderFrame : public runtime::ObjectRef {
+class IRBuilderFrame : public ffi::ObjectRef {
  public:
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(IRBuilderFrame, ObjectRef, IRBuilderFrameNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(IRBuilderFrame, ffi::ObjectRef, IRBuilderFrameNode);
 
  protected:
   /*! \brief Disallow direct construction of this object. */
   IRBuilderFrame() = default;
-  explicit IRBuilderFrame(ObjectPtr<IRBuilderFrameNode> data) : ObjectRef(data) {}
+  explicit IRBuilderFrame(ffi::ObjectPtr<IRBuilderFrameNode> data) : ffi::ObjectRef(data) {}
 
  public:
   /*!
@@ -156,12 +155,14 @@ class IRBuilderFrame : public runtime::ObjectRef {
  *
  * \endcode
  */
-class IRBuilderNode : public runtime::Object {
+class IRBuilderNode : public ffi::Object {
  public:
   /*! \brief A stack of context frames in the IRBuilder */
   ffi::Array<IRBuilderFrame> frames;
   /*! \brief The outcome of IR construction */
-  ffi::Optional<ObjectRef> result;
+  ffi::Optional<ffi::ObjectRef> result;
+  /*! \brief Active frontend source spans, from outermost to innermost. */
+  std::vector<Span> source_spans;
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
@@ -171,7 +172,7 @@ class IRBuilderNode : public runtime::Object {
   }
 
   static constexpr const bool _type_mutable = true;
-  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("script.ir_builder.IRBuilder", IRBuilderNode, runtime::Object);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("script.ir_builder.IRBuilder", IRBuilderNode, ffi::Object);
 
  public:
   /*!
@@ -196,17 +197,25 @@ class IRBuilderNode : public runtime::Object {
    */
   template <typename TObjectRef>
   inline TObjectRef Get() const;
+  /*! \brief Push a frontend source span for IR constructed in the nested scope. */
+  void PushSourceSpan(Span span);
+  /*! \brief Pop the innermost frontend source span. */
+  void PopSourceSpan();
+  /*! \brief Return the normalized active source span, including expansion history. */
+  Span GetCurrentSourceSpan() const;
+  /*! \brief Attach the active source span to an expression that has no span yet. */
+  ffi::ObjectRef SetCurrentSourceSpan(ffi::ObjectRef obj) const;
 };
 
 /*!
  * \brief Managed reference to an IRBuilderNode.
  * \sa IRBuilderNode
  */
-class IRBuilder : public runtime::ObjectRef {
+class IRBuilder : public ffi::ObjectRef {
  public:
   /*! \brief Creates an IRBuilder. */
   IRBuilder();
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(IRBuilder, ObjectRef, IRBuilderNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(IRBuilder, ffi::ObjectRef, IRBuilderNode);
 
  public:
   /*!
@@ -260,9 +269,9 @@ namespace details {
 
 class Namer {
  public:
-  using FType = NodeFunctor<void(const ObjectRef&, ffi::String)>;
+  using FType = NodeFunctor<void(const ffi::ObjectRef&, ffi::String)>;
   static FType& vtable();
-  static void Name(ObjectRef node, ffi::String name);
+  static void Name(ffi::ObjectRef node, ffi::String name);
 };
 
 }  // namespace details
@@ -270,7 +279,7 @@ class Namer {
 template <class TObjectRef>
 inline TObjectRef IRBuilder::Name(ffi::String name, TObjectRef obj) {
   details::Namer::Name(obj, name);
-  return Downcast<TObjectRef>(obj);
+  return obj.template as_or_throw<TObjectRef>();
 }
 
 template <typename TFrame>
@@ -288,7 +297,7 @@ template <typename TFrame>
 inline ffi::Optional<TFrame> IRBuilderNode::GetLastFrame() const {
   using TFrameNode = typename TFrame::ContainerType;
   if (!frames.empty() && frames.back()->IsInstance<TFrameNode>()) {
-    return Downcast<TFrame>(frames.back());
+    return frames.back().as_or_throw<TFrame>();
   }
   return std::nullopt;
 }
@@ -296,7 +305,7 @@ inline ffi::Optional<TFrame> IRBuilderNode::GetLastFrame() const {
 template <typename TObjectRef>
 inline TObjectRef IRBuilderNode::Get() const {
   using TObject = typename TObjectRef::ContainerType;
-  TVM_FFI_CHECK(result.defined(), IndexError) << "No result exists in IRBuilder yet";
+  TVM_FFI_CHECK(result.has_value(), IndexError) << "No result exists in IRBuilder yet";
   const auto* n = result.as<TObject>();
   TVM_FFI_CHECK(n != nullptr, TypeError)
       << "IRBuilder result is not of type: " << TObject::_type_key;

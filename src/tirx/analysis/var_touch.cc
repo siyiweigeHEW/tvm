@@ -37,7 +37,7 @@ class VarTouchVisitor : public StmtExprVisitor {
     StmtExprVisitor::VisitStmt(stmt);
   }
 
-  void VisitExpr(const PrimExpr& e) final {
+  void VisitExpr(const Expr& e) final {
     if (use_var_) return;
     StmtExprVisitor::VisitExpr(e);
   }
@@ -45,12 +45,12 @@ class VarTouchVisitor : public StmtExprVisitor {
   void VisitExpr_(const VarNode* op) final { Handle(op); }
 
   void VisitStmt_(const BufferStoreNode* op) final {
-    Handle(op->buffer->data.get());
+    Handle(op->buffer.get());
     StmtVisitor::VisitStmt_(op);
   }
 
   void VisitExpr_(const BufferLoadNode* op) final {
-    Handle(op->buffer->data.get());
+    Handle(op->buffer.get());
     ExprVisitor::VisitExpr_(op);
   }
 

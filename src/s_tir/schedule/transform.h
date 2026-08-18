@@ -43,7 +43,7 @@ using namespace tvm::tirx;
  * \return A new block with the given annotation as its last annotation
  */
 SBlock WithAnnotation(const SBlockNode* block, const ffi::String& attr_key,
-                      const ObjectRef& attr_value);
+                      const ffi::ObjectRef& attr_value);
 
 /******** Buffer Related ********/
 
@@ -53,7 +53,7 @@ SBlock WithAnnotation(const SBlockNode* block, const ffi::String& attr_key,
  * \param scope The target storage scope.
  * \return The new buffer with target storage scope.
  */
-Buffer WithScope(const Buffer& buffer, const ffi::String& scope);
+BufferVar WithScope(const BufferVar& buffer, const ffi::String& scope);
 
 /*!
  * \brief Create a new buffer by changint the data type.
@@ -61,7 +61,7 @@ Buffer WithScope(const Buffer& buffer, const ffi::String& scope);
  * \param scope The target data type.
  * \return The new buffer with target data type.
  */
-Buffer WithDType(const Buffer& buffer, const DataType& dtype);
+BufferVar WithDType(const BufferVar& buffer, PrimType dtype);
 
 /*!
  * \brief Replaces the buffer within the specific sequence of regions
@@ -70,8 +70,8 @@ Buffer WithDType(const Buffer& buffer, const DataType& dtype);
  * \param target The buffer to be replaced to
  * \return The new sequence of regions after replacement
  */
-ffi::Array<BufferRegion> ReplaceBuffer(ffi::Array<BufferRegion> regions, const Buffer& source,
-                                       const Buffer& target);
+ffi::Array<BufferRegion> ReplaceBuffer(ffi::Array<BufferRegion> regions, const BufferVar& source,
+                                       const BufferVar& target);
 
 /*!
  * \brief Replaces the buffer within the specific sequence of regions
@@ -80,7 +80,7 @@ ffi::Array<BufferRegion> ReplaceBuffer(ffi::Array<BufferRegion> regions, const B
  * \return The new sequence of regions after replacement
  */
 ffi::Array<BufferRegion> ReplaceBuffer(ffi::Array<BufferRegion> regions,
-                                       const ffi::Map<Buffer, Buffer>& buffer_map);
+                                       const ffi::Map<BufferVar, BufferVar>& buffer_map);
 
 /*!
  * \brief Replaces the buffer within the specific sequence of match_buffers
@@ -90,7 +90,7 @@ ffi::Array<BufferRegion> ReplaceBuffer(ffi::Array<BufferRegion> regions,
  * \return The new sequence of match_buffers after replacement
  */
 ffi::Array<MatchBufferRegion> ReplaceBuffer(ffi::Array<MatchBufferRegion> match_buffers,
-                                            const Buffer& source, const Buffer& target);
+                                            const BufferVar& source, const BufferVar& target);
 
 /*!
  * \brief Replaces the buffer region within the specific sequence of regions
@@ -100,7 +100,7 @@ ffi::Array<MatchBufferRegion> ReplaceBuffer(ffi::Array<MatchBufferRegion> match_
  * \return The new sequence of regions after replacement
  */
 ffi::Array<BufferRegion> ReplaceBufferRegion(ffi::Array<BufferRegion> regions,
-                                             const Buffer& source_buffer,
+                                             const BufferVar& source_buffer,
                                              const BufferRegion& target);
 
 /*!
@@ -111,7 +111,7 @@ ffi::Array<BufferRegion> ReplaceBufferRegion(ffi::Array<BufferRegion> regions,
  * \return The new sequence of match_buffers after replacement
  */
 ffi::Array<MatchBufferRegion> ReplaceBufferRegion(ffi::Array<MatchBufferRegion> match_buffers,
-                                                  const Buffer& source_buffer,
+                                                  const BufferVar& source_buffer,
                                                   const BufferRegion& target);
 
 /*!
@@ -131,21 +131,21 @@ class ReplaceBufferMutator : public StmtExprMutator {
    * \param block_sref_reuse Optional map to record mapping between old and new blocks that reuse
    *        sref.
    */
-  ReplaceBufferMutator(const Buffer& old_buffer, Buffer new_buffer,
+  ReplaceBufferMutator(const BufferVar& old_buffer, BufferVar new_buffer,
                        ffi::Map<SBlock, SBlock>* block_sref_reuse);
 
-  ReplaceBufferMutator(const ffi::Map<Buffer, Buffer>& buffer_map,
+  ReplaceBufferMutator(const ffi::Map<BufferVar, BufferVar>& buffer_map,
                        ffi::Map<SBlock, SBlock>* block_sref_reuse);
 
  protected:
   using StmtExprMutator::VisitExpr_;
   using StmtExprMutator::VisitStmt_;
 
-  PrimExpr VisitExpr_(const VarNode* var) final;
+  Expr VisitExpr_(const VarNode* var) final;
 
   template <typename Node>
   Node VisitBufferAccess(Node node) {
-    auto it = buffer_var_map_.find(node->buffer->data.get());
+    auto it = buffer_var_map_.find(node->buffer.get());
     if (it != buffer_var_map_.end()) {
       node.CopyOnWrite()->buffer = it->second;
     }
@@ -154,7 +154,7 @@ class ReplaceBufferMutator : public StmtExprMutator {
 
   Stmt VisitStmt_(const BufferStoreNode* op) override;
 
-  PrimExpr VisitExpr_(const BufferLoadNode* op) override;
+  Expr VisitExpr_(const BufferLoadNode* op) override;
 
   virtual MatchBufferRegion VisitMatchBufferRegion(const MatchBufferRegion& match_buffer);
 
@@ -164,7 +164,7 @@ class ReplaceBufferMutator : public StmtExprMutator {
    * \brief A mapping which maps old buffer vars to new buffers, including the buffers defined in
    * MatchBufferRegion.
    */
-  std::unordered_map<const VarNode*, Buffer> buffer_var_map_;
+  std::unordered_map<const VarNode*, BufferVar> buffer_var_map_;
   /*! \brief The block sref reuse map for the following replacement */
   ffi::Map<SBlock, SBlock>* block_sref_reuse_;
 };
@@ -236,13 +236,13 @@ class BlockBufferAccessSimplifier : public arith::IRMutatorWithAnalyzer {
    * \param analyzer The arithmetic analyzer
    * \return The simplified statement
    */
-  static Stmt Simplify(const Stmt& stmt, arith::Analyzer* analyzer) {
+  static Stmt Simplify(const Stmt& stmt, const arith::Analyzer& analyzer) {
     BlockBufferAccessSimplifier simplifier(analyzer);
     return simplifier(stmt);
   }
 
  private:
-  explicit BlockBufferAccessSimplifier(arith::Analyzer* analyzer)
+  explicit BlockBufferAccessSimplifier(const arith::Analyzer& analyzer)
       : IRMutatorWithAnalyzer(analyzer) {}
 
   using IRMutatorWithAnalyzer::VisitExpr_;
@@ -253,7 +253,7 @@ class BlockBufferAccessSimplifier : public arith::IRMutatorWithAnalyzer {
 
   Stmt VisitStmt_(const SBlockNode* op) final;
   Stmt VisitStmt_(const BufferStoreNode* op) final;
-  PrimExpr VisitExpr_(const BufferLoadNode* op) final;
+  Expr VisitExpr_(const BufferLoadNode* op) final;
 };
 
 }  // namespace s_tir

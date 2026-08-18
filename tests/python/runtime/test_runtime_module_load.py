@@ -23,7 +23,8 @@ import pytest
 import tvm
 import tvm.testing
 from tvm import te
-from tvm.contrib import cc, popen_pool, utils
+from tvm.support import cc, popen_pool, utils
+from tvm.testing import env
 
 runtime_py = """
 import os
@@ -43,14 +44,14 @@ print("Finish runtime checking...")
 """
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 @pytest.mark.parametrize("target", ["llvm", {"kind": "llvm", "jit": "mcjit"}])
 def test_dso_module_load(target):
     dtype = "int64"
     temp = utils.tempdir()
 
     def save_object(names):
-        n = te.size_var("n")
+        n = te.var("n")
         Ab = tvm.tirx.decl_buffer((n,), dtype)
         i = te.var("i")
         # for i in 0 to n-1:
@@ -96,8 +97,11 @@ def test_dso_module_load(target):
     assert proc.returncode == 0, f"{proc.args} exited with {proc.returncode}: {proc.stdout}"
 
 
-@tvm.testing.requires_gpu
+@pytest.mark.gpu
+@pytest.mark.skipif(not env.has_gpu(), reason="need gpu")
 def test_device_module_dump():
+    pytest.importorskip("cloudpickle")  # needed by popen_pool.PopenWorker
+
     # graph
     n = tvm.runtime.convert(1024)
     A = te.placeholder((n,), name="A")
@@ -111,7 +115,6 @@ def test_device_module_dump():
     sch.bind(tx, "threadIdx.x")
 
     def check_device(device):
-        dev = tvm.device(device, 0)
         if not tvm.testing.device_enabled(device):
             print(f"Skip because {device} is not enabled")
             return
@@ -122,39 +125,52 @@ def test_device_module_dump():
         # test cross compiler function
         f.export_library(path_dso, fcompile=cc.cross_compiler("g++"))
 
-        def popen_check():
-            import tvm
+        def run_and_check():
+            dev = tvm.device(device, 0)
 
-            f1 = tvm.runtime.load_module(path_dso)
-            a = tvm.runtime.tensor(np.random.uniform(size=1024).astype(A.dtype), dev)
-            b = tvm.runtime.tensor(np.zeros(1024, dtype=A.dtype), dev)
-            f1(a, b)
-            np.testing.assert_equal(b.numpy(), a.numpy() + 1)
+            def popen_check():
+                import tvm
 
-        # system lib should be loaded in different process
-        worker = popen_pool.PopenWorker()
-        worker.send(popen_check)
-        worker.recv()
+                f1 = tvm.runtime.load_module(path_dso)
+                a = tvm.runtime.tensor(np.random.uniform(size=1024).astype(A.dtype), dev)
+                b = tvm.runtime.tensor(np.zeros(1024, dtype=A.dtype), dev)
+                f1(a, b)
+                np.testing.assert_equal(b.numpy(), a.numpy() + 1)
+
+            worker = popen_pool.PopenWorker()
+            try:
+                worker.send(popen_check)
+                worker.recv()
+            finally:
+                worker.kill()
+
+        tvm.testing.run_with_gpu_lock(run_and_check)
 
     def check_c(device):
-        dev = tvm.device(device, 0)
         if not tvm.testing.device_enabled(device):
             print(f"Skip because {device} is not enabled")
             return
         f = tvm.compile(sch.mod, target=tvm.target.Target(device, host="c"))
-        a = tvm.runtime.tensor(np.random.uniform(size=1024).astype(A.dtype), dev)
-        b = tvm.runtime.tensor(np.zeros(1024, dtype=A.dtype), dev)
-        f["main"](a, b)
-        np.testing.assert_equal(b.numpy(), a.numpy() + 1)
+
+        def run_and_check():
+            dev = tvm.device(device, 0)
+            a = tvm.runtime.tensor(np.random.uniform(size=1024).astype(A.dtype), dev)
+            b = tvm.runtime.tensor(np.zeros(1024, dtype=A.dtype), dev)
+            f["main"](a, b)
+            np.testing.assert_equal(b.numpy(), a.numpy() + 1)
+
+        tvm.testing.run_with_gpu_lock(run_and_check)
 
     for device in ["cuda", "vulkan", "opencl", "metal"]:
         check_device(device)
         check_c(device)
 
 
-@tvm.testing.requires_llvm
+@pytest.mark.skipif(not env.has_llvm(), reason="need llvm")
 def test_combine_module_llvm():
     """Test combine multiple module into one shared lib."""
+    pytest.importorskip("cloudpickle")  # needed by popen_pool.PopenWorker
+
     # graph
     nn = 12
     n = tvm.runtime.convert(nn)

@@ -17,6 +17,7 @@
  * under the License.
  */
 #include <tvm/arith/int_set.h>
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
 
 #include "./utils.h"
@@ -27,7 +28,7 @@ using namespace tvm::tirx;
 TVM_FFI_STATIC_INIT_BLOCK() { ScheduleStateNode::RegisterReflection(); }
 
 template <class K, class V>
-using SMap = std::unordered_map<K, V, ObjectPtrHash, ObjectPtrEqual>;
+using SMap = std::unordered_map<K, V, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>;
 
 /**************** Utility functions ****************/
 
@@ -44,15 +45,16 @@ ffi::Array<arith::IntSet> AnalyzeRegionUpperBound(const BufferRegion& region,   
                                                   const PrimExpr& predicate,           //
                                                   const StmtSRef& dom_low_inclusive,   //
                                                   const StmtSRef& dom_high_exclusive,  //
-                                                  arith::Analyzer* analyzer) {
+                                                  arith::AnalyzerObj* analyzer) {
   ffi::Map<Var, Range> var_dom = LoopDomainOfSRefTreePath(
       /*low_inclusive=*/dom_low_inclusive,
       /*high_exclusive=*/dom_high_exclusive,
       /*extra_relax_scope=*/runtime::StorageScope::Create(region->buffer.scope()));
+  arith::Analyzer analyzer_ref = ffi::GetRef<arith::Analyzer>(analyzer);
   return EstimateRegionUpperBound(
       /*region=*/region->region,
       /*var_dom=*/var_dom,
-      /*predicate=*/predicate, /*analyzer=*/analyzer);
+      /*predicate=*/predicate, /*analyzer=*/analyzer_ref);
 }
 
 /*!
@@ -69,15 +71,16 @@ ffi::Array<arith::IntSet> AnalyzeRegionLowerBound(const BufferRegion& region,   
                                                   const PrimExpr& predicate,           //
                                                   const StmtSRef& dom_low_inclusive,   //
                                                   const StmtSRef& dom_high_exclusive,  //
-                                                  arith::Analyzer* analyzer) {
+                                                  arith::AnalyzerObj* analyzer) {
   ffi::Map<Var, Range> var_dom = LoopDomainOfSRefTreePath(
       /*low_inclusive=*/dom_low_inclusive,
       /*high_exclusive=*/dom_high_exclusive,
       /*extra_relax_scope=*/runtime::StorageScope::Create(region->buffer.scope()));
+  arith::Analyzer analyzer_ref = ffi::GetRef<arith::Analyzer>(analyzer);
   if (ffi::Optional<ffi::Array<arith::IntSet>> result = EstimateRegionLowerBound(
           /*region=*/region->region,
           /*var_dom=*/var_dom,
-          /*predicate=*/predicate, /*analyzer=*/analyzer)) {
+          /*predicate=*/predicate, /*analyzer=*/analyzer_ref)) {
     return result.value();
   }
   return ffi::Array<arith::IntSet>(region->buffer->shape.size(), arith::IntSet::Nothing());
@@ -94,7 +97,7 @@ ffi::Array<arith::IntSet> AnalyzeRegionLowerBound(const BufferRegion& region,   
 bool ProducerCoversConsumer(const ffi::Array<PrimExpr>& buffer_shape,
                             const ffi::Array<arith::IntSet>& produced_region,
                             const ffi::Array<arith::IntSet>& consumed_region,
-                            arith::Analyzer* analyzer) {
+                            arith::AnalyzerObj* analyzer) {
   TVM_FFI_ICHECK_EQ(buffer_shape.size(), consumed_region.size());
   TVM_FFI_ICHECK_EQ(produced_region.size(), consumed_region.size());
   int ndim = produced_region.size();
@@ -190,7 +193,7 @@ class SBlockInfoCollector : private StmtVisitor {
       info.affine_binding =
           IsAffineBinding(/*realize=*/block2realize_.at(scope_root->stmt),
                           /*loop_var_ranges=*/LoopDomainOfSRefTreePath(srefs_.back()),
-                          /*analyzer=*/&analyzer_);
+                          /*analyzer=*/analyzer_.get());
     }
     // Set `region_cover` to true, will be updated on its scope block
     info.region_cover = true;
@@ -269,11 +272,12 @@ class SBlockInfoCollector : private StmtVisitor {
           continue;
         }
         // For each buffer, record the regions generated under this loop
-        std::unordered_map<const BufferNode*, std::vector<ffi::Array<arith::IntSet>>>
+        std::unordered_map<BufferVar, std::vector<ffi::Array<arith::IntSet>>, ffi::ObjectPtrHash,
+                           ffi::ObjectPtrEqual>
             touched_regions;
         // Step 2.3.1. Find all the regions read by the consumer that we care about
         for (const BufferRegion& region : block_reads_unbound.at(consumer_block_sref.get())) {
-          const BufferNode* buffer = region->buffer.get();
+          BufferVar buffer = region->buffer;
           touched_regions[buffer] = {};
         }
         // Step 2.3.2. Find all the regions written by each producer
@@ -281,7 +285,7 @@ class SBlockInfoCollector : private StmtVisitor {
           const SBlockRealize& producer_realize = block2realize_.at(producer_block_sref->stmt);
           StmtSRef parent_sref = ffi::GetRef<StmtSRef>(producer_block_sref->parent);
           for (const BufferRegion& region : block_writes_unbound.at(producer_block_sref)) {
-            const BufferNode* buffer = region->buffer.get();
+            BufferVar buffer = region->buffer;
             auto it = touched_regions.find(buffer);
             // Skip the regions that is not read by the consumer
             if (it != touched_regions.end()) {
@@ -295,7 +299,7 @@ class SBlockInfoCollector : private StmtVisitor {
                   /*predicate=*/producer_realize->predicate,
                   /*dom_low_inclusive=*/parent_sref,
                   /*dom_high_exclusive=*/lca,
-                  /*analyzer=*/&analyzer_));
+                  /*analyzer=*/analyzer_.get()));
             }
           }
         }
@@ -303,7 +307,7 @@ class SBlockInfoCollector : private StmtVisitor {
         {
           StmtSRef parent_sref = ffi::GetRef<StmtSRef>(consumer_block_sref->parent);
           for (const BufferRegion& region : block_reads_unbound.at(consumer_block_sref.get())) {
-            const BufferNode* buffer = region->buffer.get();
+            BufferVar buffer = region->buffer;
             const std::vector<ffi::Array<arith::IntSet>>& touched_region =
                 touched_regions.at(buffer);
             if (!touched_region.empty()) {
@@ -314,9 +318,9 @@ class SBlockInfoCollector : private StmtVisitor {
                   /*predicate=*/consumer_realize->predicate,
                   /*dom_low_inclusive=*/parent_sref,
                   /*dom_high_exclusive=*/lca,
-                  /*analyzer=*/&analyzer_);
+                  /*analyzer=*/analyzer_.get());
               if (!ProducerCoversConsumer(buffer->shape, produced_region, consumed_region,
-                                          &analyzer_)) {
+                                          analyzer_.get())) {
                 region_cover = false;
                 self_->block_info.at(consumer_block_sref).region_cover = region_cover;
                 break;
@@ -331,7 +335,7 @@ class SBlockInfoCollector : private StmtVisitor {
   }
 
   void VisitStmt_(const ForNode* loop) final {
-    analyzer_.Bind(loop->loop_var, Range::FromMinExtent(loop->min, loop->extent));
+    analyzer_->Bind(loop->loop_var, Range::FromMinExtent(loop->min, loop->extent));
     PushSRef(loop);
     VisitStmt(loop->body);
     PopSRef();
@@ -375,7 +379,7 @@ class SBlockInfoCollector : private StmtVisitor {
 ScheduleState::ScheduleState(IRModule mod, int debug_mask, bool enable_check) {
   TVM_FFI_CHECK_GE(debug_mask, -1, ValueError)
       << "negative `debug_mask` other than -1 is not supported";
-  ObjectPtr<ScheduleStateNode> n = ffi::make_object<ScheduleStateNode>();
+  ffi::ObjectPtr<ScheduleStateNode> n = ffi::make_object<ScheduleStateNode>();
   ScheduleStateNode* self = n.get();
   // Set `n->mod`
   n->mod = std::move(mod);
@@ -529,9 +533,9 @@ class SRefTreePruner : public StmtVisitor {
    * where the block comes from the subtree of `tgt_stmt`
    * 3) Intact reuse: not returned
    */
-  static std::unordered_map<const Object*, StmtSRef> Prune(ScheduleStateNode* self,
-                                                           const ReuseInfo& reuse_info,
-                                                           const Stmt& src_stmt) {
+  static std::unordered_map<const ffi::Object*, StmtSRef> Prune(ScheduleStateNode* self,
+                                                                const ReuseInfo& reuse_info,
+                                                                const Stmt& src_stmt) {
     SRefTreePruner pruner(self, reuse_info);
     pruner.VisitStmt(src_stmt);
     return std::move(pruner.reused_srefs_);
@@ -599,7 +603,7 @@ class SRefTreePruner : public StmtVisitor {
    * 1) loop var -> StmtSRef
    * 2) block stmt -> StmtSRef, where the block comes from the subtree of `tgt_stmt`
    */
-  std::unordered_map<const Object*, StmtSRef> reused_srefs_;
+  std::unordered_map<const ffi::Object*, StmtSRef> reused_srefs_;
 };
 
 /*!
@@ -613,14 +617,14 @@ class SRefTreePruner : public StmtVisitor {
 class SRefUpdater : public StmtVisitor {
  public:
   static void Update(ScheduleStateNode* self, StmtSRefNode* src_stmt_parent,
-                     const std::unordered_map<const Object*, StmtSRef>& reused_srefs,
+                     const std::unordered_map<const ffi::Object*, StmtSRef>& reused_srefs,
                      const Stmt& tgt_stmt) {
     SRefUpdater(self, src_stmt_parent, reused_srefs).VisitStmt(tgt_stmt);
   }
 
  private:
   explicit SRefUpdater(ScheduleStateNode* self, StmtSRefNode* src_stmt_parent,
-                       const std::unordered_map<const Object*, StmtSRef>& reused_srefs)
+                       const std::unordered_map<const ffi::Object*, StmtSRef>& reused_srefs)
       : self_(ffi::GetRef<ScheduleState>(self)),
         ancestors_{src_stmt_parent},
         reused_srefs_(reused_srefs) {}
@@ -687,7 +691,8 @@ class SRefUpdater : public StmtVisitor {
   }
 
   void UpdateSBlockInfo(const StmtSRef& block_sref) {
-    using TIter = std::unordered_map<StmtSRef, SBlockInfo, ObjectPtrHash, ObjectPtrEqual>::iterator;
+    using TIter =
+        std::unordered_map<StmtSRef, SBlockInfo, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>::iterator;
     // The caller is responsible for correcting the flags
     SBlockInfo new_info((SBlockScope(GetChildBlockSRefOnSRefTree(self_, block_sref))));
     std::pair<TIter, bool> insert_result = self_->block_info.emplace(block_sref, new_info);
@@ -712,7 +717,7 @@ class SRefUpdater : public StmtVisitor {
   /*! \brief A stack containing all the ancestor For/Block nodes during the visit */
   std::vector<StmtSRefNode*> ancestors_;
   /*! \brief Maps the loop var / block to the reused sref */
-  const std::unordered_map<const Object*, StmtSRef>& reused_srefs_;
+  const std::unordered_map<const ffi::Object*, StmtSRef>& reused_srefs_;
 };
 
 /*!
@@ -771,14 +776,15 @@ class ChildReplacer : private StmtMutator {
         // Case 2. stmt is BlockRealize, src_stmt is Block
         if (realize->block.get() == src_stmt) {
           const auto* tgt_block = TVM_TYPE_AS(tgt_stmt_, SBlockNode);
-          ObjectPtr<SBlockRealizeNode> new_realize = ffi::make_object<SBlockRealizeNode>(*realize);
+          ffi::ObjectPtr<SBlockRealizeNode> new_realize =
+              ffi::make_object<SBlockRealizeNode>(*realize);
           new_realize->block = ffi::GetRef<SBlock>(tgt_block);
           new_stmt = SBlockRealize(std::move(new_realize));
         }
       }
       // Move new_stmt to position i
-      if (new_stmt.defined()) {
-        ObjectPtr<SeqStmtNode> new_seq_stmt = CopyOnWrite(op);
+      if (new_stmt.has_value()) {
+        ffi::ObjectPtr<SeqStmtNode> new_seq_stmt = CopyOnWrite(op);
         new_seq_stmt->seq.Set(i, new_stmt.value());
         return SeqStmt(std::move(new_seq_stmt));
       }
@@ -793,12 +799,12 @@ class ChildReplacer : private StmtMutator {
     // and replace it with `child_tgt_stmt`
     if (parent_stmt->IsInstance<SBlockNode>()) {
       auto* block = const_cast<SBlockNode*>(static_cast<const SBlockNode*>(parent_stmt));
-      ObjectPtr<SBlockNode> new_block = CopyOnWrite(block);
+      ffi::ObjectPtr<SBlockNode> new_block = CopyOnWrite(block);
       new_block->body = this->VisitStmt(new_block->body);
       return SBlock(std::move(new_block));
     } else if (parent_stmt->IsInstance<ForNode>()) {
       auto* loop = const_cast<ForNode*>(static_cast<const ForNode*>(parent_stmt));
-      ObjectPtr<ForNode> new_loop = CopyOnWrite(loop);
+      ffi::ObjectPtr<ForNode> new_loop = CopyOnWrite(loop);
       new_loop->body = this->VisitStmt(new_loop->body);
       return For(std::move(new_loop));
     }
@@ -859,7 +865,7 @@ void ScheduleStateNode::Replace(const tirx::StmtSRef& _src_sref, const Stmt& tgt
     reuse_info.block_sref_reuse = std::move(block_sref_reuse);
     // Step 1.2. Collect loop/block reuse to their corresponding srefs
     // and remove those srefs in the `src_stmt` that are no longer used after replacement
-    std::unordered_map<const Object*, StmtSRef> reused_srefs =
+    std::unordered_map<const ffi::Object*, StmtSRef> reused_srefs =
         SRefTreePruner::Prune(this, reuse_info, src_stmt);
     // Step 1.3. Update the sref tree, inserting newly created srefs and properly handle reused
     // srefs in `tgt_stmt`
@@ -955,7 +961,7 @@ void ScheduleStateNode::Replace(const tirx::StmtSRef& _src_sref, const Stmt& tgt
     IRModuleNode* new_mod = this->mod.CopyOnWrite();
     ffi::MapObj* new_map = new_mod->functions.CopyOnWrite();
     // Move out the PrimFunc where the sref belong while ensuring uniqueness
-    PrimFunc ref_new_func = Downcast<PrimFunc>(std::move(new_map->at(g_var)));
+    PrimFunc ref_new_func = std::move(new_map->at(g_var)).as_or_throw<PrimFunc>();
     TVM_FFI_ICHECK(ref_new_func.get() == g_func);
     PrimFuncNode* new_func = ref_new_func.CopyOnWrite();
     // If `g_func` was not unique, after the 3 lines above:
@@ -967,7 +973,7 @@ void ScheduleStateNode::Replace(const tirx::StmtSRef& _src_sref, const Stmt& tgt
     const auto* realize = TVM_TYPE_AS(g_func->body, SBlockRealizeNode);
     // Make `child_tgt_stmt` the root block
     const auto* child_block = TVM_TYPE_AS(child_tgt_stmt, SBlockNode);
-    ObjectPtr<SBlockRealizeNode> new_realize = ffi::make_object<SBlockRealizeNode>(*realize);
+    ffi::ObjectPtr<SBlockRealizeNode> new_realize = ffi::make_object<SBlockRealizeNode>(*realize);
     new_realize->block = ffi::GetRef<SBlock>(child_block);
     new_func->body = SBlockRealize(std::move(new_realize));
     // Finally, move the `ref_new_func` back and update `this->mod`
@@ -1010,11 +1016,11 @@ void ScheduleStateNode::UpdateScopeSBlockInfo(const Stmt& stmt) {
   SBlockInfoCollector::Collect(this, stmt);
 }
 
-TVM_DLL ffi::Array<Bool> GetCachedFlags(const ScheduleState& self, const StmtSRef& block_sref) {
+TVM_DLL ffi::Array<IntImm> GetCachedFlags(const ScheduleState& self, const StmtSRef& block_sref) {
   const SBlockInfo& info = self->GetSBlockInfo(block_sref);
-  return {Bool(info.affine_binding),  //
-          Bool(info.region_cover),    //
-          Bool(info.stage_pipeline)};
+  return {IntImm::Bool(info.affine_binding),  //
+          IntImm::Bool(info.region_cover),    //
+          IntImm::Bool(info.stage_pipeline)};
 }
 
 /**************** FFI ****************/

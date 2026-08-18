@@ -21,6 +21,7 @@
  * \file src/runtime/vm/executable.cc
  */
 
+#include <tvm/ffi/cast.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/runtime/vm/executable.h>
@@ -32,6 +33,7 @@
 
 #include "../../support/bytes_io.h"
 #include "../file_utils.h"
+#include "./module_utils.h"
 
 namespace tvm {
 namespace runtime {
@@ -44,6 +46,20 @@ constexpr uint64_t kTVMVMBytecodeMagicV2 = 0xD225DE2F4214151E;
 #define STREAM_CHECK(val, section)                                                  \
   TVM_FFI_ICHECK(val) << "Invalid VM file format in the " << section << " section." \
                       << "\n";
+
+const char* VMExecutable::kind() const { return "relax.VMExecutable"; }
+
+ffi::Optional<ffi::Function> VMExecutable::GetFunction(const ffi::String& _name) {
+  using SelfPtr = std::remove_cv_t<decltype(this)>;
+  ::tvm::ffi::ObjectPtr<::tvm::ffi::Object> _self =
+      ::tvm::ffi::GetObjectPtr<::tvm::ffi::Object>(this);
+  TVM_MODULE_VTABLE_ENTRY("stats", &VMExecutable::Stats);
+  TVM_MODULE_VTABLE_ENTRY("as_text", &VMExecutable::AsText);
+  TVM_MODULE_VTABLE_ENTRY("as_python", &VMExecutable::AsPython);
+  TVM_MODULE_VTABLE_ENTRY("vm_load_executable", &VMExecutable::VMLoadExecutable);
+  TVM_MODULE_VTABLE_ENTRY("has_function", &VMExecutable::HasFunction);
+  return std::nullopt;
+}
 
 std::string VMExecutable::Stats() const {
   std::ostringstream oss;
@@ -85,8 +101,7 @@ std::string VMExecutable::Stats() const {
       oss << opt_int.value();
       oss << ", ";
     } else if (auto opt_dtype = it.as<DLDataType>()) {
-      DataType dtype(opt_dtype.value());
-      oss << dtype;
+      oss << opt_dtype.value();
       oss << ", ";
     } else {
       TVM_FFI_THROW(InternalError) << "Unsupported constant pool type " << it.GetTypeKey();
@@ -194,7 +209,7 @@ void VMExecutable::WriteToFile(const ffi::String& file_name, const ffi::String& 
 ffi::Module VMExecutable::LoadFromBytes(const ffi::Bytes& bytes) {
   support::BytesInStream strm(bytes);
 
-  ObjectPtr<VMExecutable> exec = ffi::make_object<VMExecutable>();
+  ffi::ObjectPtr<VMExecutable> exec = ffi::make_object<VMExecutable>();
 
   // Load header.
   uint64_t header_magic = LoadHeader(&strm);
@@ -416,14 +431,8 @@ std::string RegNameToStr(RegName reg) {
 }
 
 ffi::Module VMExecutable::VMLoadExecutable() const {
-  ObjectPtr<VirtualMachine> vm = VirtualMachine::Create();
-  vm->LoadExecutable(GetObjectPtr<VMExecutable>(const_cast<VMExecutable*>(this)));
-  return ffi::Module(vm);
-}
-
-ffi::Module VMExecutable::VMProfilerLoadExecutable() const {
-  ObjectPtr<VirtualMachine> vm = VirtualMachine::CreateProfiler();
-  vm->LoadExecutable(GetObjectPtr<VMExecutable>(const_cast<VMExecutable*>(this)));
+  ffi::ObjectPtr<VirtualMachine> vm = VirtualMachine::Create();
+  vm->LoadExecutable(ffi::GetObjectPtr<VMExecutable>(const_cast<VMExecutable*>(this)));
   return ffi::Module(vm);
 }
 

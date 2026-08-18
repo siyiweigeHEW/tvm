@@ -46,18 +46,18 @@ struct IntervalEntry {
   PrimExpr max_value;
 };
 
-class LinearEqDetector : public ExprFunctor<LinearEqEntry(const PrimExpr&, const PrimExpr&)> {
+class LinearEqDetector : public ExprFunctor<LinearEqEntry(const Expr&, const PrimExpr&)> {
  public:
-  explicit LinearEqDetector(Var var) : var_(var) {}
+  explicit LinearEqDetector(PrimVar var) : var_(var) {}
 
   bool Detect(const PrimExpr& e, LinearEqEntry* ret) {
     *ret = VisitExpr(e, e);
     if (fail_) return false;
     if (!ret->base.defined()) {
-      ret->base = make_zero(var_.dtype());
+      ret->base = IntImm(var_->ty.as_or_throw<PrimType>(), 0);
     }
     if (!ret->coeff.defined()) {
-      ret->coeff = make_zero(var_.dtype());
+      ret->coeff = IntImm(var_->ty.as_or_throw<PrimType>(), 0);
     }
     return true;
   }
@@ -101,14 +101,14 @@ class LinearEqDetector : public ExprFunctor<LinearEqEntry(const PrimExpr&, const
   LinearEqEntry VisitExpr_(const VarNode* op, const PrimExpr& e) final {
     LinearEqEntry ret;
     if (op == var_.get()) {
-      auto dtype = op->dtype;
-      ret.coeff = make_const(DataType::Int(dtype.bits(), dtype.lanes()), 1);
+      PrimType dtype = op->ty.as_or_throw<PrimType>();
+      ret.coeff = MakeConst(PrimType::Int(dtype.bits(), dtype.lanes()), 1);
     } else {
       ret.base = e;
     }
     return ret;
   }
-  LinearEqEntry VisitExprDefault_(const Object* op, const PrimExpr& e) final {
+  LinearEqEntry VisitExprDefault_(const ffi::Object* op, const PrimExpr& e) final {
     if (fail_) return LinearEqEntry();
     if (UsesVar(e, [this](const VarNode* var) { return var == var_.get(); })) {
       fail_ = true;
@@ -121,7 +121,7 @@ class LinearEqDetector : public ExprFunctor<LinearEqEntry(const PrimExpr&, const
   }
 
  private:
-  Var var_;
+  PrimVar var_;
   bool fail_{false};
   // Combine by add
   PrimExpr AddCombine(PrimExpr a, PrimExpr b) {
@@ -142,11 +142,11 @@ class LinearEqDetector : public ExprFunctor<LinearEqEntry(const PrimExpr&, const
   }
 };
 
-ffi::Array<PrimExpr> DetectLinearEquation(const PrimExpr& e, const ffi::Array<Var>& vars) {
+ffi::Array<PrimExpr> DetectLinearEquation(const PrimExpr& e, const ffi::Array<PrimVar>& vars) {
   PrimExpr base = e;
   ffi::Array<PrimExpr> coeff;
 
-  for (Var v : vars) {
+  for (PrimVar v : vars) {
     LinearEqEntry ret;
     if (!LinearEqDetector(v).Detect(base, &ret)) {
       return ffi::Array<PrimExpr>();
@@ -173,12 +173,13 @@ ffi::Array<PrimExpr> DetectLinearEquation(const PrimExpr& e, const ffi::Array<Va
 bool DetectClipBound(const PrimExpr& cond,
                      std::unordered_map<const VarNode*, IntervalEntry>* bmap) {
   int flag = 0;
-  Var var;
-  auto fvisit = [&bmap, &flag, &var](const ObjectRef& n) {
-    if (const VarNode* v = n.as<VarNode>()) {
+  PrimVar var;
+  auto fvisit = [&bmap, &flag, &var](const ffi::ObjectRef& n) {
+    if (auto prim_var = n.as<PrimVar>()) {
+      const VarNode* v = prim_var->get();
       if (bmap->count(v)) {
         if (flag == 0) {
-          var = Downcast<Var>(n);
+          var = *prim_var;
           flag = 1;
         } else if (flag == 1) {
           if (!var.same_as(n)) {
@@ -194,19 +195,21 @@ bool DetectClipBound(const PrimExpr& cond,
   bool is_eq = false;
   PrimExpr canonical;
   if (const LTNode* op = cond.as<LTNode>()) {
-    if (!op->a.dtype().is_int()) return false;
-    canonical = op->b - op->a - make_const(op->a.dtype(), 1);
+    PrimType a_ty = op->a.ty();
+    if (!a_ty.MatchesCode(DLDataTypeCode::kDLInt)) return false;
+    canonical = op->b - op->a - MakeConst(a_ty, 1);
   } else if (const LENode* op = cond.as<LENode>()) {
-    if (!op->a.dtype().is_int()) return false;
+    if (!op->a.ty().MatchesCode(DLDataTypeCode::kDLInt)) return false;
     canonical = op->b - op->a;
   } else if (const GTNode* op = cond.as<GTNode>()) {
-    if (!op->a.dtype().is_int()) return false;
-    canonical = op->a - op->b - make_const(op->a.dtype(), 1);
+    PrimType a_ty = op->a.ty();
+    if (!a_ty.MatchesCode(DLDataTypeCode::kDLInt)) return false;
+    canonical = op->a - op->b - MakeConst(a_ty, 1);
   } else if (const GENode* op = cond.as<GENode>()) {
-    if (!op->a.dtype().is_int()) return false;
+    if (!op->a.ty().MatchesCode(DLDataTypeCode::kDLInt)) return false;
     canonical = op->a - op->b;
   } else if (const EQNode* op = cond.as<EQNode>()) {
-    if (!op->a.dtype().is_int()) return false;
+    if (!op->a.ty().MatchesCode(DLDataTypeCode::kDLInt)) return false;
     canonical = op->a - op->b;
     is_eq = true;
   } else {
@@ -215,7 +218,7 @@ bool DetectClipBound(const PrimExpr& cond,
   LinearEqEntry ret;
   Analyzer analyzer;
   if (!LinearEqDetector(var).Detect(canonical, &ret)) return false;
-  ret.coeff = analyzer.Simplify(ret.coeff);
+  ret.coeff = analyzer->Simplify(ret.coeff);
   IntervalEntry& p = (*bmap)[var.get()];
 
   ffi::Optional<PrimExpr> min_value;
@@ -233,17 +236,17 @@ bool DetectClipBound(const PrimExpr& cond,
       min_value = max_value;
     }
   }
-  if (!min_value.defined() && !max_value.defined()) {
+  if (!min_value.has_value() && !max_value.has_value()) {
     return false;
   }
-  if (min_value.defined()) {
+  if (min_value.has_value()) {
     if (p.min_value.defined()) {
       p.min_value = max(p.min_value, min_value.value());
     } else {
       p.min_value = min_value.value();
     }
   }
-  if (max_value.defined()) {
+  if (max_value.has_value()) {
     if (p.max_value.defined()) {
       p.max_value = min(p.max_value, max_value.value());
     } else {
@@ -265,25 +268,25 @@ void SplitCommExpr(const PrimExpr& e, std::vector<PrimExpr>* ret) {
 
 // Detect the lower and upper bound from the expression.
 // e must be connected by and.
-ffi::Array<PrimExpr> DetectClipBound(const PrimExpr& e, const ffi::Array<Var>& vars) {
+ffi::Array<PrimExpr> DetectClipBound(const PrimExpr& e, const ffi::Array<PrimVar>& vars) {
   std::vector<PrimExpr> splits;
   Analyzer analyzer;
-  SplitCommExpr<tirx::AndNode>(analyzer.Simplify(e), &splits);
+  SplitCommExpr<tirx::AndNode>(analyzer->Simplify(e), &splits);
   std::unordered_map<const VarNode*, IntervalEntry> rmap;
-  for (Var v : vars) {
+  for (PrimVar v : vars) {
     rmap[v.get()] = IntervalEntry();
   }
   for (PrimExpr cond : splits) {
     if (!DetectClipBound(cond, &rmap)) return ffi::Array<PrimExpr>();
   }
   ffi::Array<PrimExpr> ret;
-  for (Var v : vars) {
+  for (PrimVar v : vars) {
     IntervalEntry e = rmap[v.get()];
     if (e.min_value.defined()) {
-      e.min_value = analyzer.Simplify(e.min_value);
+      e.min_value = analyzer->Simplify(e.min_value);
     }
     if (e.max_value.defined()) {
-      e.max_value = analyzer.Simplify(e.max_value);
+      e.max_value = analyzer->Simplify(e.max_value);
     }
     ret.push_back(e.min_value);
     ret.push_back(e.max_value);
@@ -295,8 +298,9 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()
       .def("arith.DetectLinearEquation", DetectLinearEquation)
-      .def("arith.DetectClipBound",
-           [](const PrimExpr& e, const ffi::Array<Var>& vars) { return DetectClipBound(e, vars); });
+      .def("arith.DetectClipBound", [](const PrimExpr& e, const ffi::Array<PrimVar>& vars) {
+        return DetectClipBound(e, vars);
+      });
 }
 }  // namespace arith
 }  // namespace tvm

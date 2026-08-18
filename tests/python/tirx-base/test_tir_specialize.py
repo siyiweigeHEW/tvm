@@ -15,7 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 # pylint: disable=missing-function-docstring, missing-module-docstring
-# ruff: noqa: F401, F841
+# ruff: noqa: F401
 
 import pytest
 
@@ -24,7 +24,7 @@ from tvm.s_tir.schedule.testing import assert_structural_equal_ignore_global_sym
 from tvm.script import tirx as T
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def matmul(a: T.handle, b: T.handle, c: T.handle, n: T.int32) -> None:
     m = T.int32()
     A = T.match_buffer(a, [m, n])
@@ -39,7 +39,7 @@ def matmul(a: T.handle, b: T.handle, c: T.handle, n: T.int32) -> None:
             C[vi, vj] = C[vi, vj] + A[vi, vk] * B[vj, vk]
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def matmul_128(a: T.handle, b: T.handle, c: T.handle) -> None:
     A = T.match_buffer(a, [128, 128])
     B = T.match_buffer(b, [128, 128])
@@ -53,7 +53,7 @@ def matmul_128(a: T.handle, b: T.handle, c: T.handle) -> None:
             C[vi, vj] = C[vi, vj] + A[vi, vk] * B[vj, vk]
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def matmul_m_128(a: T.handle, b: T.handle, c: T.handle) -> None:
     m = T.int32()
     A = T.match_buffer(a, [m, 128])
@@ -70,7 +70,7 @@ def matmul_m_128(a: T.handle, b: T.handle, c: T.handle) -> None:
 
 # x is considered undefined because it appears as part of x*8,
 # but not on its own
-@T.prim_func(check_well_formed=False)
+@T.prim_func(check_well_formed=False, s_tir=True)
 def matmul_m_8x(a: T.handle, b: T.handle, c: T.handle) -> None:
     x = T.int32()
     m = T.int32()
@@ -86,7 +86,7 @@ def matmul_m_8x(a: T.handle, b: T.handle, c: T.handle) -> None:
             C[vi, vj] = C[vi, vj] + A[vi, vk] * B[vj, vk]
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def element_wise(a: T.handle, c: T.handle) -> None:
     m = T.int32()
     n = T.int32()
@@ -106,7 +106,7 @@ def element_wise(a: T.handle, c: T.handle) -> None:
             C[vi, vj] = B[vi, vj] + 1.0
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def element_wise_128_64(a: T.handle, c: T.handle) -> None:
     A = T.match_buffer(a, (128, 64), "float32")
     C = T.match_buffer(c, (128, 64), "float32")
@@ -123,7 +123,7 @@ def element_wise_128_64(a: T.handle, c: T.handle) -> None:
             C[vi, vj] = B[vi, vj] + 1.0
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def element_wise_128_n(a: T.handle, c: T.handle) -> None:
     n = T.int32()
     A = T.match_buffer(a, (128, n), "float32")
@@ -141,7 +141,7 @@ def element_wise_128_n(a: T.handle, c: T.handle) -> None:
             C[vi, vj] = B[vi, vj] + 1.0
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def mem_copy(a: T.handle, b: T.handle, m: T.int32, n: T.int32, p: T.int32, q: T.int32) -> None:
     A = T.match_buffer(a, (m, n), "float32", strides=[p, 1], elem_offset=q)
     B = T.match_buffer(b, (m, n), "float32", strides=[p, 1], elem_offset=q)
@@ -152,7 +152,7 @@ def mem_copy(a: T.handle, b: T.handle, m: T.int32, n: T.int32, p: T.int32, q: T.
             B[vi, vj] = A[vi, vj]
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def mem_copy_16_16_8_4(a: T.handle, b: T.handle) -> None:
     A = T.match_buffer(a, (16, 16), "float32", strides=[8, 1], elem_offset=4)
     B = T.match_buffer(b, (16, 16), "float32", strides=[8, 1], elem_offset=4)
@@ -163,7 +163,7 @@ def mem_copy_16_16_8_4(a: T.handle, b: T.handle) -> None:
             B[vi, vj] = A[vi, vj]
 
 
-@T.prim_func
+@T.prim_func(s_tir=True)
 def mem_copy_m_n_p_n(a: T.handle, b: T.handle, m: T.int32, n: T.int32, p: T.int32) -> None:
     A = T.match_buffer(a, (m, n), "float32", strides=[p, 1], elem_offset=n)
     B = T.match_buffer(b, (m, n), "float32", strides=[p, 1], elem_offset=n)
@@ -194,12 +194,12 @@ def test_specialize_matmul():
 
 def test_specialize_elemwise():
     a, c = element_wise.params
-    C = element_wise.buffer_map[c]
+    C = c
     # fully specialized
     func = element_wise.specialize({a: tvm.tirx.decl_buffer((128, 64))})
     assert_structural_equal_ignore_global_symbol(func, element_wise_128_64)
     # partially specialized
-    func = element_wise.specialize({c: tvm.tirx.decl_buffer((128, C.shape[1]))})
+    func = element_wise.specialize({c: tvm.tirx.decl_buffer((128, C.ty.shape[1]))})
     assert_structural_equal_ignore_global_symbol(func, element_wise_128_n)
 
 
@@ -221,7 +221,7 @@ def test_specialize_recursive_load():
 
 
 def test_specialize_with_const_folding():
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def before(a: T.handle, b: T.handle):
         n = T.int32()
         A = T.match_buffer(a, [n // 8, 8], "int32")
@@ -231,7 +231,7 @@ def test_specialize_with_const_folding():
                 vi = T.axis.S(n - 1, i)
                 B[vi] = A[vi // 8, vi % 8] + (n + 1) * 42
 
-    @T.prim_func
+    @T.prim_func(s_tir=True)
     def expected(a: T.handle, b: T.handle):
         A = T.match_buffer(a, [2, 8], "int32")
         B = T.match_buffer(b, [16], "int32")
@@ -248,13 +248,13 @@ def test_specialize_with_const_folding():
 def test_specialize_decl_buffer():
     """Buffers occurring in a DeclBuffer statement should be updated"""
 
-    @T.prim_func(private=True)
+    @T.prim_func(private=True, s_tir=True)
     def before(A_data: T.handle("float32"), A_size: T.int32):
         A_buf = T.decl_buffer(A_size, "float32", data=A_data)
         for i in range(A_size):
             A_buf[i] = A_buf[i] * 2.0
 
-    @T.prim_func(private=True)
+    @T.prim_func(private=True, s_tir=True)
     def expected(A_data: T.handle("float32")):
         A_buf = T.decl_buffer(16, "float32", data=A_data)
         for i in range(16):
@@ -266,6 +266,24 @@ def test_specialize_decl_buffer():
     tvm.ir.assert_structural_equal(expected, after)
 
 
+def test_specialize_preserves_decl_buffer_alias():
+    @T.prim_func(private=True, s_tir=True)
+    def before(A_handle: T.handle, n: T.int32):
+        A = T.match_buffer(A_handle, (n,), "int32")
+        A_flat = T.decl_buffer((n,), "int32", data=A.data)
+        A_flat[n - 1] = 42
+
+    @T.prim_func(private=True, s_tir=True)
+    def expected(A_handle: T.handle):
+        A = T.match_buffer(A_handle, (8,), "int32")
+        A_flat = T.decl_buffer((8,), "int32", data=A.data)
+        A_flat[7] = 42
+
+    after = before.specialize({before.params[1]: 8})
+
+    tvm.ir.assert_structural_equal(expected, after)
+
+
 def test_specialize_buffer_var_to_var():
     """A buffer var may be remapped by specialization
 
@@ -273,24 +291,21 @@ def test_specialize_buffer_var_to_var():
     buffers using the same buffer var should also be updated.
     """
 
-    @T.prim_func(private=True)
+    @T.prim_func(private=True, s_tir=True)
     def before(A: T.Buffer([16, 16], "float32"), B: T.Buffer([16, 16], "float32")):
         A_flat = T.decl_buffer([256], "float32", data=A.data)
         B_flat = T.decl_buffer([256], "float32", data=B.data)
         for i in range(256):
             B_flat[i] = A_flat[i] * 2.0
 
-    # well-formed checker complains about multiple nested definitions of B_flat
-    # since it appears in the buffer map twice
-    @T.prim_func(private=True, check_well_formed=False)
-    def expected(A: T.Buffer([16, 16], "float32"), B_handle: T.handle):
-        B = T.match_buffer(B_handle, [16, 16], "float32", data=A.data)
+    @T.prim_func(private=True, s_tir=True)
+    def expected(A: T.Buffer([16, 16], "float32")):
         A_flat = T.decl_buffer([256], "float32", data=A.data)
         B_flat = T.decl_buffer([256], "float32", data=A.data)
         for i in range(256):
             B_flat[i] = A_flat[i] * 2.0
 
-    A = before.buffer_map[before.params[0]]
+    A = before.params[0]
     B_handle = before.params[1]
     param_map = {B_handle: A}
     after = before.specialize(param_map)
@@ -299,27 +314,19 @@ def test_specialize_buffer_var_to_var():
 
 
 def test_specialize_buffer_var_to_expr():
-    """Handle specialization of buffer var
+    """A DeclBuffer source expression may be specialized directly."""
 
-    The `tirx::Buffer::data` field must be an explicit `tirx::Var`, and
-    cannot be replaced with a `tirx::PrimExpr` of type
-    `DataType::Handle()`.  However, these substitutions are useful
-    when lowering.  If these occur, a binding of the `tirx::Var` is
-    included in the specialized function.
-    """
-
-    @T.prim_func(private=True)
+    @T.prim_func(private=True, s_tir=True)
     def before(A_data: T.handle("float32"), B_data: T.handle("float32")):
         A_buf = T.decl_buffer(32, "float32", data=A_data)
         B_buf = T.decl_buffer(16, "float32", data=B_data)
         for i in range(16):
             B_buf[i] = A_buf[i] * 2.0
 
-    @T.prim_func(private=True)
+    @T.prim_func(private=True, s_tir=True)
     def expected(A_data: T.handle("float32")):
         A_buf = T.decl_buffer(32, "float32", data=A_data)
-        B_data: T.Ptr[T.float32] = T.address_of(A_buf[16])
-        B_buf = T.decl_buffer(16, "float32", data=B_data)
+        B_buf = T.decl_buffer(16, "float32", data=T.address_of(A_buf[16]))
         for i in range(16):
             B_buf[i] = A_buf[i] * 2.0
 
@@ -332,35 +339,33 @@ def test_specialize_buffer_var_to_expr():
     tvm.ir.assert_structural_equal(expected, after)
 
 
-def test_specialization_updates_struct_info():
-    """Update struct info in specialization
+def test_specialization_updates_ty():
+    """Update type in specialization
 
-    A PrimFunc may have a `relax.StructInfo`.  If that PrimFunc is
-    specialized, the struct info should be updated.
+    A PrimFunc may have a `relax.Type`.  If that PrimFunc is
+    specialized, the type should be updated.
     """
 
-    @T.prim_func(private=True)
+    @T.prim_func(private=True, s_tir=True)
     def before(n: T.int32) -> T.int32:
-        T.ret(n * 10)
+        return n * 10
 
-    @T.prim_func(private=True)
+    @T.prim_func(private=True, s_tir=True)
     def expected() -> T.int32:
-        T.ret(50)
+        return 50
 
-    sinfo_before = tvm.relax.FuncStructInfo(
-        [tvm.relax.PrimStructInfo("int32")], tvm.relax.PrimStructInfo("int32")
-    )
-    tvm.ir.assert_structural_equal(before.struct_info, sinfo_before)
+    ty_before = tvm.relax.FuncType([tvm.ir.PrimType("int32")], tvm.ir.PrimType("int32"))
+    tvm.ir.assert_structural_equal(before.ty, ty_before)
 
-    sinfo_expected = tvm.relax.FuncStructInfo([], tvm.relax.PrimStructInfo("int32"))
-    tvm.ir.assert_structural_equal(expected.struct_info, sinfo_expected)
+    ty_expected = tvm.relax.FuncType([], tvm.ir.PrimType("int32"))
+    tvm.ir.assert_structural_equal(expected.ty, ty_expected)
 
     n = before.params[0]
     param_map = {n: 5}
     after = before.specialize(param_map)
 
     tvm.ir.assert_structural_equal(after, expected)
-    tvm.ir.assert_structural_equal(after.struct_info, sinfo_expected)
+    tvm.ir.assert_structural_equal(after.ty, ty_expected)
 
 
 if __name__ == "__main__":
